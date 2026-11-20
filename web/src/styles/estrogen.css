@@ -492,6 +492,10 @@ code.lit {
 	color: var(--muted);
 }
 
+.pane[data-pane='output'].active ~ .toolbar #obfuscateBtn {
+	display: none;
+}
+
 .toolbar .engine {
 	margin-left: auto;
 	color: var(--muted);
