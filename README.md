@@ -1,4 +1,4 @@
-# crack
+# @sysce/crack
 
 <div align="center">
   <a href="https://www.npmjs.com/package/@sysce/crack"><img src="https://img.shields.io/npm/v/@sysce/crack?maxAge=3600&label=npm" alt="npm" /></a>
