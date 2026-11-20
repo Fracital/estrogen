@@ -1,5 +1,3 @@
-<img src="docs/assets/am i cool yet.png" alt="David Reed" width="80" align="right">
-
 # crack
 
 A post-build web obfuscator. It takes a directory a bundler already produced and
@@ -72,40 +70,42 @@ encrypt the decoder the first run added.
 <table>
 <tr><th></th><th>Site</th><th>Link</th><th>Repo</th></tr>
 <tr>
-<td align="center" valign="middle"><img src="docs/assets/brands/abstract.svg" alt="abstract v2" width="24"></td>
+<td align="center" valign="middle"><img src="docs/assets/brands/abstract.svg" alt="abstract v2" width="24" align="middle"></td>
 <td valign="middle">abstract v2</td>
-<td valign="middle">abstracteducation.loan (private)</td>
-<td valign="middle"><code>Fracital/abstract-v2</code> (private)</td>
+<td valign="middle"><a href="https://abstracteducation.loan">abstracteducation.loan</a></td>
+<td valign="middle"></td>
 </tr>
 <tr>
-<td align="center" valign="middle"><img src="docs/assets/brands/fracital.svg" alt="Fracital" width="24"></td>
+<td align="center" valign="middle"><img src="docs/assets/brands/fracital.svg" alt="Fracital" width="24" align="middle"></td>
 <td valign="middle">Fracital</td>
 <td valign="middle"><a href="https://fracit.al">fracit.al</a></td>
 <td valign="middle"><a href="https://github.com/Fracital/Fracital"><code>Fracital/Fracital</code></a></td>
 </tr>
 <tr>
-<td align="center" valign="middle"><img src="docs/assets/brands/systemya.png" alt="SystemYA" width="24"></td>
+<td align="center" valign="middle"><img src="docs/assets/brands/systemya.png" alt="SystemYA" width="24" align="middle"></td>
 <td valign="middle">SystemYA</td>
 <td valign="middle"><a href="https://systemya.fracit.al">systemya.fracit.al</a></td>
 <td valign="middle"><a href="https://github.com/Fracital/SystemYA"><code>Fracital/SystemYA</code></a></td>
 </tr>
 <tr>
-<td align="center" valign="middle"><img src="docs/assets/brands/stomp.png" alt="STomp" width="24"></td>
+<td align="center" valign="middle"><img src="docs/assets/brands/stomp.png" alt="STomp" width="24" align="middle"></td>
 <td valign="middle">STomp (powerMouse)</td>
 <td valign="middle"><a href="https://stomp.fracit.al">stomp.fracit.al</a></td>
 <td valign="middle"><a href="https://github.com/Fracital/powerMouse"><code>Fracital/powerMouse</code></a></td>
 </tr>
 <tr>
-<td align="center" valign="middle"><img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" width="24"></td>
+<td align="center" valign="middle"><img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" width="24" align="middle"></td>
 <td valign="middle">Holy Unblocker</td>
 <td valign="middle"><a href="https://holyunb.locker">holyunb.locker</a></td>
 <td valign="middle"><a href="https://github.com/holy-unblocker/website2"><code>holy-unblocker/website2</code></a></td>
 </tr>
 </table>
 
-## Author
+## Credits
 
-David Reed.
+|                                                                               | GitHub                         | Name       |
+| ----------------------------------------------------------------------------- | ------------------------------ | ---------- |
+| <img src="docs/assets/am%20i%20cool%20yet.png" width="64" alt="e9x's avatar"> | [@e9x](https://github.com/e9x) | David Reed |
 
 ## License
 
