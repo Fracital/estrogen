@@ -12,8 +12,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// What went wrong while loading config or obfuscating a build.
 ///
 /// Every variant that concerns one file carries that file's path, so the CLI
-/// can name it in the exit message. The engine-stub variant [`Error::Engine`]
-/// marks the obfuscation work that the passes do not do yet.
+/// can name it in the exit message. [`Error::Engine`] marks an internal
+/// invariant that should not happen on well-formed input.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A file or directory could not be read or written.
@@ -78,11 +78,11 @@ pub enum Error {
         len: usize,
     },
 
-    /// The obfuscation engine is not built yet. The passes are stubs, so any
-    /// path that needs the real encryption, name map or decoder emitter returns
-    /// this. The identity milestone (parse and write back unchanged) does not
-    /// hit it.
-    #[error("engine not implemented: {0}")]
+    /// An internal engine invariant failed: canary-free sampling that did not
+    /// converge, or a pool entry or key of the wrong length or bad base64. It
+    /// does not happen on well-formed input, so it marks a bug rather than bad
+    /// input.
+    #[error("engine error: {0}")]
     Engine(&'static str),
 
     /// A wasm module could not be walked, or mapping it would have changed its

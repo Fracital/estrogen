@@ -12,18 +12,16 @@
 //! left alone.
 //!
 //! Spec: `obfuscate-build.mjs` (`wasmNameRanges`, `mapWasmBytes`,
-//! `mapWasmBase64`). The same-length substitution itself is the names pass
-//! (milestone 3); this module takes it as a parameter so the byte and base64
-//! handling can be built and tested on its own. The substitution must return a
-//! replacement of the same length, or mapping fails closed.
+//! `mapWasmBase64`). The same-length substitution itself is the names pass;
+//! this module takes it as a parameter, so the byte and base64 handling is
+//! tested on its own. The substitution must return a replacement of the same
+//! length, or mapping fails closed.
 //!
 //! This raises the cost of reading a build; it is not secrecy. Nothing here is
 //! secret.
 
-// The names pass (milestone 3) is what calls these: it supplies the same-length
-// proxy substitution and runs the mapping over the proxy transports' wasm. Until
-// that pass lands, the module is reached only by its tests, so the non-test
-// build sees it as unused. Remove this when the names pass wires it in.
+// The names pass calls these: it supplies the same-length proxy substitution and
+// runs the mapping over the proxy transports' wasm.
 
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};

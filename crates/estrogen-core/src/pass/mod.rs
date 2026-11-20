@@ -7,13 +7,14 @@
 //!
 //! The passes mirror `obfuscate-build.mjs`, one module each:
 //! - [`literals`]: string and template literals into an encrypted pool.
-//! - [`names`]: proxy and store names into per-build substitutes.
-//! - [`wasm`]: the embedded wasm names and base64.
+//! - [`names`]: the proxy and store name transform for vendor files, which also
+//!   maps the embedded wasm names through the crate's `wasm` module.
 //! - [`markup`]: the HTML shells and the SVG cloak.
 //!
-//! The engine is not built yet. Every pass here is an identity stub: it parses
-//! (so a parse failure still fails closed) and returns no edits. The real edit
-//! collection is the engine work, cited against the reference in each module.
+//! A pass parses the file (so a parse failure fails closed), walks it, and
+//! returns the byte-range edits it wants; the obfuscator applies them and
+//! re-parses the output. Each JS file takes one transform: the proxy path for a
+//! vendor file, else the literal pool.
 
 pub mod literals;
 pub mod markup;
@@ -22,8 +23,6 @@ pub mod names;
 use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::StringLiteral;
-use oxc_ast_visit::Visit;
 use oxc_diagnostics::Severity;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -76,9 +75,9 @@ pub trait Pass {
 
     /// Collect this pass's edits for the file.
     ///
-    /// In the identity milestone this parses (for JS) and returns an empty set.
-    /// A parse failure is returned as [`Error::Parse`], so a file estrogen cannot
-    /// read never ships.
+    /// The pass parses the file (for JS) and returns the byte-range edits it
+    /// wants. A parse failure is returned as [`Error::Parse`], so a file estrogen
+    /// cannot read never ships.
     fn collect_edits(&self, ctx: &FileContext) -> Result<EditSet>;
 }
 
@@ -142,41 +141,10 @@ pub fn ensure_js_reparses(path: &Path, output: &str) -> Result<()> {
     Ok(())
 }
 
-/// A read-only visitor that counts string literals.
-///
-/// It does not collect edits. It exists so the identity milestone exercises the
-/// `oxc_ast_visit` walk end to end: the literals pass runs it to prove the AST
-/// is reachable before the real pool work replaces it. The count is reported as
-/// a diagnostic aid, not acted on.
-#[derive(Default)]
-pub struct StringLiteralCounter {
-    /// How many string literals were seen.
-    pub count: usize,
-}
-
-impl<'a> Visit<'a> for StringLiteralCounter {
-    fn visit_string_literal(&mut self, _lit: &StringLiteral<'a>) {
-        self.count += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
-
-    #[test]
-    fn valid_js_parses_and_counts_literals() {
-        let src = "const a = 'x'; const b = 'y'; const c = `t${a}`;";
-        let n = with_parsed_js(Path::new("app.js"), src, |program| {
-            let mut c = StringLiteralCounter::default();
-            c.visit_program(program);
-            Ok(c.count)
-        })
-        .unwrap();
-        // Two string literals; the template quasi is not a StringLiteral.
-        assert_eq!(n, 2);
-    }
 
     #[test]
     fn broken_js_fails_closed() {
