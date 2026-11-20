@@ -237,10 +237,19 @@ impl Obfuscator {
         // JS chunk gets full literal encryption, and HTML/SVG run the markup
         // pass. This mirrors the reference's `isProxyVendor ? proxy : app` split.
         let ctx = FileContext::new(path, kind, &source, &self.options);
+        // A VM chunk is a whole-file replacement, not a set of in-place edits, so
+        // the sourceMappingURL strip and the private source map do not apply to
+        // it (the replacement carries neither). Track that here.
+        let mut vm_replaced = false;
         let mut edits = match kind {
             FileKind::Js => {
                 if self.proxy.is_vendor(path) {
                     collect_proxy_edits(&ctx, &self.proxy)?
+                } else if let Some(replacement) = self.try_vm(&source)? {
+                    vm_replaced = true;
+                    let mut set = EditSet::new();
+                    set.push(Edit::replace(0, source.len(), replacement));
+                    set
                 } else {
                     LiteralsPass.collect_edits(&ctx)?
                 }
@@ -250,8 +259,10 @@ impl Obfuscator {
         };
 
         // Strip any bundler sourceMappingURL comment from a processed JS chunk.
-        // Its map points at the pre-obfuscation source and must never ship.
-        if kind == FileKind::Js {
+        // Its map points at the pre-obfuscation source and must never ship. A VM
+        // chunk is replaced wholesale, so there is nothing to strip (and a strip
+        // edit would overlap the whole-file replacement).
+        if kind == FileKind::Js && !vm_replaced {
             if let Some(edit) = sourcemap_strip_edit(&source) {
                 edits.push(edit);
             }
@@ -283,9 +294,23 @@ impl Obfuscator {
         }
         if !self.options.check {
             write_preserving_bom(path, &source, &rewritten)?;
-            self.write_sourcemap(path, root, &source, &edits)?;
+            if !vm_replaced {
+                self.write_sourcemap(path, root, &source, &edits)?;
+            }
         }
         Ok(FileReport::obfuscated(path, kind, edit_count))
+    }
+
+    /// Try to compile an app chunk to the bytecode VM, the default transform for
+    /// a non-vendor JS chunk. Returns the whole-chunk replacement on success, or
+    /// `None` when the VM is off or the chunk uses a construct outside the VM's
+    /// subset, in which case the caller falls back to the literal-pool and name
+    /// passes. See [`crate::vm`].
+    fn try_vm(&self, source: &str) -> Result<Option<String>> {
+        if !self.options.vm {
+            return Ok(None);
+        }
+        crate::vm::try_compile_chunk(source, &self.options)
     }
 
     /// Write the V3 source map for a processed file, when `--sourcemap <dir>` is
@@ -494,11 +519,15 @@ mod tests {
         let dir = tmp_dir();
         let js = dir.join("app.js");
         // "Fracital" is an identifier, not a string, so the literal pass does
-        // not touch it; the output scan must catch the leak and fail closed.
+        // not touch it; the output scan must catch the leak and fail closed. This
+        // exercises the literal-pool path (vm off), where an identifier canary
+        // survives; the VM path renames every local to a slot, so there the name
+        // is gone (covered by `vm_chunk_leaves_no_plaintext_or_canary`).
         fs::write(&js, "const Fracital = 'x';").unwrap();
 
         let opts = Options {
             seed: Some(b"seed".to_vec()),
+            vm: false,
             canaries: vec![crate::options::Canary {
                 value: "Fracital".to_string(),
                 reason: String::new(),
@@ -508,6 +537,91 @@ mod tests {
         let obf = Obfuscator::new(opts).unwrap();
         let err = obf.obfuscate_dir(&dir).unwrap_err();
         assert!(matches!(err, Error::Canary { .. }));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_compilable_chunk_becomes_a_vm_chunk() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // A chunk the VM subset covers: declarations + expressions, no imports.
+        fs::write(&js, "const a = 1 + 2; const b = a * 10; b - 1;\n").unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"vm-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        let report = obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(out.contains(crate::format::MARKER));
+        // The VM runtime and its entry call are present; the literal-pool decode
+        // call shape (`NAME(0)`) is not what drives this chunk.
+        assert!(out.contains("createRuntime"), "runtime missing: {out}");
+        assert!(out.contains(".run();"), "vm entry call missing");
+        assert_eq!(report.total(), 1);
+        assert!(!report.has_unprotected());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_chunk_outside_the_subset_falls_back_to_literals() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // A top-level function is outside the VM subset, so the whole chunk falls
+        // back to the literal-pool path, which still encrypts the string.
+        fs::write(&js, "export function greet() { return 'hello world'; }\n").unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"fb-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(out.contains(crate::format::MARKER));
+        assert!(!out.contains("'hello world'"), "string must be encrypted");
+        // The literal-pool decoder is present, and the VM runtime is not: this
+        // chunk took the fallback path.
+        assert!(out.contains("=(function(){"), "literal decoder missing");
+        assert!(!out.contains("createRuntime"), "should not be a vm chunk");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vm_chunk_leaves_no_plaintext_or_canary() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // A compilable chunk whose string value and binding name are both
+        // canaries. The VM encrypts the program (so the string never ships in the
+        // clear) and renames the local to a slot (so the name is gone), and the
+        // output scan finds neither, so the build does not fail closed.
+        fs::write(&js, "const secretBrand = 'topSecretValue'; secretBrand;\n").unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"canary-seed".to_vec()),
+            canaries: vec![
+                crate::options::Canary {
+                    value: "topSecretValue".to_string(),
+                    reason: String::new(),
+                },
+                crate::options::Canary {
+                    value: "secretBrand".to_string(),
+                    reason: String::new(),
+                },
+            ],
+            ..Options::default()
+        })
+        .unwrap();
+        let report = obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(out.contains("createRuntime"), "expected a vm chunk");
+        assert!(!out.contains("topSecretValue"), "string canary leaked");
+        assert!(!out.contains("secretBrand"), "name canary leaked");
+        assert!(!report.has_unprotected());
         fs::remove_dir_all(&dir).ok();
     }
 

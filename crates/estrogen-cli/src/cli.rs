@@ -75,6 +75,11 @@ pub struct Common {
     #[arg(long = "check")]
     pub check: bool,
 
+    /// Do not compile app chunks to the bytecode VM; use the literal-pool and
+    /// name passes for every app chunk instead. The VM is on by default.
+    #[arg(long = "no-vm")]
+    pub no_vm: bool,
+
     /// Watch the directories and re-run on each change until stopped.
     #[arg(long = "watch")]
     pub watch: bool,
@@ -137,6 +142,9 @@ impl Cli {
         }
         if common.check {
             options.check = true;
+        }
+        if common.no_vm {
+            options.vm = false;
         }
 
         Ok(options)

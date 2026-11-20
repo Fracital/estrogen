@@ -67,6 +67,7 @@ mod proxy;
 pub mod report;
 mod sourcemap;
 mod vendor;
+pub mod vm;
 pub mod walk;
 mod wasm;
 mod watermark;

@@ -184,6 +184,7 @@ struct ConfigOptions {
     sourcemap: Option<PathBuf>,
     jobs: Option<usize>,
     check: bool,
+    vm: Option<bool>,
 }
 
 /// How a vendored input is brought into the build.
@@ -268,6 +269,12 @@ pub struct Options {
     /// Inputs to copy into the dist before obfuscating, from `[[vendor]]`. Empty
     /// by default, so a plain obfuscate run vendors nothing.
     pub vendor: Vec<VendorInput>,
+    /// Compile app chunks to the bytecode VM, the default transform for a
+    /// non-vendor JS chunk. On by default. A chunk the VM cannot compile falls
+    /// back to the literal-pool and name passes, so turning this off only
+    /// changes which transform an app chunk takes, never whether it is
+    /// protected. The CLI exposes `--no-vm`.
+    pub vm: bool,
 }
 
 impl Default for Options {
@@ -281,6 +288,7 @@ impl Default for Options {
             check: false,
             proxy: ProxyConfig::default(),
             vendor: Vec::new(),
+            vm: true,
         }
     }
 }
@@ -306,6 +314,7 @@ impl Options {
             check: file.options.check,
             proxy: file.proxy,
             vendor: file.vendor,
+            vm: file.options.vm.unwrap_or(true),
         };
         opts.canaries.retain(|c| !c.value.is_empty());
         if opts.jobs == 0 {
