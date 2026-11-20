@@ -75,8 +75,24 @@ pub fn obfuscate_js(source: &str, options: &Options) -> Result<Obfuscated> {
     let rewritten = edits.apply(source)?;
     ensure_js_reparses(path, &rewritten)?;
     check_canaries(path, &rewritten, options)?;
-    let map = crate::sourcemap::build_v3("input.js", source, &edits.sorted());
 
+    // Collapse to a single line when minify is on (the default), matching the
+    // directory walk. The reprint does not line up with the source, so a
+    // minified chunk carries no map. minify_js re-parses its own output; if the
+    // minified text would reintroduce a canary, keep the edit-and-splice output.
+    if options.minify {
+        if let Some(minified) = crate::minify::minify_js(path, &rewritten) {
+            if check_canaries(path, &minified, options).is_ok() {
+                return Ok(Obfuscated {
+                    code: minified,
+                    edits: count,
+                    map: None,
+                });
+            }
+        }
+    }
+
+    let map = crate::sourcemap::build_v3("input.js", source, &edits.sorted());
     Ok(Obfuscated {
         code: rewritten,
         edits: count,
@@ -104,9 +120,12 @@ mod tests {
     // The literal-path tests pin `vm: false`, since the VM default would compile
     // these simple chunks to bytecode instead of pooling and splicing.
     fn literal_opts(seed: &[u8]) -> Options {
+        // minify off so these tests see the edit-and-splice output and its map,
+        // not the single-line reprint.
         Options {
             seed: Some(seed.to_vec()),
             vm: false,
+            minify: false,
             ..Options::default()
         }
     }
@@ -177,9 +196,11 @@ mod tests {
     #[test]
     fn a_chunk_off_the_vm_subset_falls_back_with_a_map() {
         // An import is outside the VM subset, so the chunk falls back to the
-        // edit-and-splice path, which pools the string and carries a map.
+        // edit-and-splice path, which pools the string and (with minify off)
+        // carries a map.
         let opts = Options {
             seed: Some(b"vm".to_vec()),
+            minify: false,
             ..Options::default()
         };
         let out = obfuscate_js("import x from 'm'; const s = 'hello world'; x(s);", &opts).unwrap();

@@ -10,6 +10,8 @@ use regex::Regex;
 fn options(seed: &[u8]) -> Options {
     Options {
         seed: Some(seed.to_vec()),
+        // Test the edit-and-splice shape, not the single-line minified reprint.
+        minify: false,
         ..Options::default()
     }
 }
@@ -24,6 +26,7 @@ fn splice(source: &str) -> String {
     let opts = Options {
         seed: Some(b"toplevel-node".to_vec()),
         vm: false,
+        minify: false,
         ..Options::default()
     };
     obfuscate_js(source, &opts).unwrap().code
