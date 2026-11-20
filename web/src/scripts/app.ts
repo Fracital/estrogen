@@ -11,19 +11,23 @@ import { zipSync, type Zippable } from 'fflate';
 import init, { obfuscate } from '../wasm/estrogen.js';
 
 const SAMPLE = `function greet(name) {
-	const greeting = 'Hello, ' + name + '!';
-	console.log(greeting);
-	return greeting;
+	const message = 'hello, ' + name + '!';
+	console.log(message);
+	return message;
 }
 
-const messages = {
-	start: 'starting up',
-	done: 'all finished',
-};
+function sumTo(n) {
+	let total = 0;
+	let i = 1;
+	while (i <= n) {
+		total = total + i;
+		i = i + 1;
+	}
+	return total;
+}
 
 greet('world');
-console.log(messages.start);
-console.log(\`today is \${new Date().toDateString()}\`);
+console.log(sumTo(10));
 `;
 
 const DEFAULT_OUTPUT_FILE_NAME = 'obfuscated.js';
