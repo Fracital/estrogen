@@ -8,8 +8,14 @@ interface Props {
 
 const {
 	title = 'estrogen obfuscator',
-	description = 'estrogen moves string and template literals into an encrypted per-file pool and prepends a small decoder. The real engine runs in your browser as WebAssembly. Nothing is uploaded.',
+	description = 'estrogen moves string and template literals into an encrypted per-file pool and shortens local names. The real engine runs in your browser as WebAssembly. Nothing is uploaded.',
 } = Astro.props;
+
+// Holo Web (github.com/zmyaro/holo-web), the Ice Cream Sandwich dark theme,
+// pinned to a commit on jsDelivr. The base sheets size the elements and the
+// ics-dark sheets colour them. This is the same framework holyWisp uses.
+const HOLO =
+	'https://cdn.jsdelivr.net/gh/zmyaro/holo-web@a20e0f843181c77970208b2695829a0b948c7a4c';
 ---
 
 <!doctype html>
@@ -19,11 +25,26 @@ const {
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>{title}</title>
 		<meta name="description" content={description} />
-		<meta name="theme-color" content="#08080c" />
+		<meta name="theme-color" content="#000000" />
+		<link rel="icon" href="/icons/icon-32.png" type="image/png" sizes="32x32" />
+		<link rel="icon" href="/icons/icon-16.png" type="image/png" sizes="16x16" />
+		<link rel="apple-touch-icon" href="/icons/icon-180.png" />
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<script is:inline>
+			if ('serviceWorker' in navigator) {
+				window.addEventListener('load', () =>
+					navigator.serviceWorker.register('/sw.js').catch(() => {}),
+				);
+			}
+		</script>
+		<link rel="stylesheet" href={`${HOLO}/holo-base-elements.css`} />
+		<link rel="stylesheet" href={`${HOLO}/holo-ics-dark-elements.css`} />
+		<link rel="stylesheet" href={`${HOLO}/holo-base-widgets.css`} />
+		<link rel="stylesheet" href={`${HOLO}/holo-ics-dark-widgets.css`} />
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link
-			href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+			href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500&display=swap"
 			rel="stylesheet"
 		/>
 	</head>

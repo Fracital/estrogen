@@ -8,7 +8,7 @@ import 'codemirror/mode/javascript/javascript.js';
 import 'codemirror/lib/codemirror.css';
 import { zipSync, type Zippable } from 'fflate';
 
-import init, { obfuscate, version } from '../wasm/estrogen.js';
+import init, { obfuscate } from '../wasm/estrogen.js';
 
 const SAMPLE = `function greet(name) {
 	const greeting = 'Hello, ' + name + '!';
@@ -45,7 +45,8 @@ const editor = CodeMirror.fromTextArea(editorArea, {
 });
 editor.setValue(SAMPLE);
 
-let outputFileName = DEFAULT_OUTPUT_FILE_NAME;
+const wrapToggle = byId<HTMLInputElement>('wrapToggle');
+
 let ready = false;
 
 // Tabs --------------------------------------------------------------------
@@ -72,13 +73,171 @@ for (const tab of tabs) {
 	tab.addEventListener('click', () => selectTab(tab.dataset.tab as string));
 }
 
-// Obfuscate (paste tab) ---------------------------------------------------
+// Output files ------------------------------------------------------------
+//
+// One list holds what the last run produced: the single pasted file, or every
+// file of an uploaded folder. The sidebar lists it, the viewer shows the
+// focused file, Download saves that file and Download .zip saves them all.
+
+interface OutputFile {
+	path: string;
+	bytes: Uint8Array;
+	// The file as text, or null when it is not UTF-8 (binary, or holds NUL).
+	text: string | null;
+	edits: number;
+	skipped: boolean;
+}
 
 const obfuscateBtn = byId<HTMLButtonElement>('obfuscateBtn');
 const outputArea = byId<HTMLTextAreaElement>('output');
 const editsCount = byId('editsCount');
 const downloadBtn = byId<HTMLButtonElement>('downloadBtn');
+const downloadAllBtn = byId<HTMLButtonElement>('downloadAllBtn');
 const seedInput = byId<HTMLInputElement>('seed');
+const fileList = byId('fileList');
+const viewPath = byId('viewPath');
+const unsupported = byId('unsupported');
+const copyBtn = byId<HTMLButtonElement>('copyBtn');
+
+const encoder = new TextEncoder();
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+let outputs: OutputFile[] = [];
+let active = -1;
+let zipName = 'estrogen.zip';
+
+function asText(bytes: Uint8Array): string | null {
+	if (bytes.includes(0)) return null;
+	try {
+		return utf8.decode(bytes);
+	} catch {
+		return null;
+	}
+}
+
+function extension(path: string): string {
+	const match = /\.([^./]+)$/.exec(path);
+	return match ? match[1].toLowerCase() : '';
+}
+
+const MIME: Record<string, string> = {
+	js: 'text/javascript',
+	mjs: 'text/javascript',
+	cjs: 'text/javascript',
+	html: 'text/html',
+	htm: 'text/html',
+	css: 'text/css',
+	json: 'application/json',
+	svg: 'image/svg+xml',
+	txt: 'text/plain',
+	map: 'application/json',
+};
+
+function setOutputs(files: OutputFile[], name: string): void {
+	outputs = files.slice().sort((a, b) => a.path.localeCompare(b.path));
+	zipName = name;
+	renderFiles();
+	// Open the first file the engine rewrote, else the first file.
+	const first = outputs.findIndex((f) => f.edits > 0);
+	showFile(outputs.length === 0 ? -1 : Math.max(first, 0));
+}
+
+function renderFiles(): void {
+	fileList.replaceChildren();
+	if (outputs.length === 0) {
+		const empty = document.createElement('span');
+		empty.className = 'files-empty';
+		empty.textContent = 'No output yet';
+		fileList.append(empty);
+		return;
+	}
+	outputs.forEach((file, index) => {
+		const item = document.createElement('button');
+		item.type = 'button';
+		item.className = 'file';
+		item.dataset.index = String(index);
+		item.title = file.path;
+		const slash = file.path.lastIndexOf('/');
+		if (slash >= 0) {
+			const dir = document.createElement('span');
+			dir.className = 'dir';
+			dir.textContent = file.path.slice(0, slash + 1);
+			item.append(dir);
+		}
+		const name = document.createElement('span');
+		name.className = 'name';
+		name.textContent = file.path.slice(slash + 1);
+		item.append(name);
+		if (file.skipped || file.edits > 0) {
+			const badge = document.createElement('span');
+			badge.className = file.skipped ? 'badge skip' : 'badge';
+			badge.textContent = file.skipped ? 'skipped' : String(file.edits);
+			badge.title = file.skipped
+				? 'Failed to parse, copied through unchanged'
+				: `${file.edits} edits`;
+			item.append(badge);
+		}
+		item.addEventListener('click', () => showFile(index));
+		fileList.append(item);
+	});
+}
+
+function showFile(index: number): void {
+	active = index;
+	for (const item of fileList.querySelectorAll<HTMLElement>('.file')) {
+		const on = Number(item.dataset.index) === index;
+		item.classList.toggle('current', on);
+		if (on) item.setAttribute('aria-current', 'true');
+		else item.removeAttribute('aria-current');
+	}
+	const file = outputs[index];
+	if (!file) {
+		viewPath.textContent = '';
+		outputArea.value = '';
+		outputArea.hidden = false;
+		unsupported.hidden = true;
+		copyBtn.disabled = true;
+		downloadBtn.disabled = true;
+		downloadBtn.textContent = 'Download .js';
+		downloadAllBtn.disabled = true;
+		return;
+	}
+	viewPath.textContent = file.path;
+	const isText = file.text !== null;
+	outputArea.value = file.text ?? '';
+	outputArea.scrollTop = 0;
+	outputArea.hidden = !isText;
+	unsupported.hidden = isText;
+	copyBtn.disabled = !isText;
+	const ext = extension(file.path);
+	downloadBtn.textContent = ext ? `Download .${ext}` : 'Download file';
+	downloadBtn.disabled = false;
+	downloadAllBtn.disabled = false;
+}
+
+// Arrow keys move through the file list, Home and End jump to its ends.
+fileList.addEventListener('keydown', (event) => {
+	if (outputs.length === 0) return;
+	let next = active;
+	if (event.key === 'ArrowDown') next = Math.min(active + 1, outputs.length - 1);
+	else if (event.key === 'ArrowUp') next = Math.max(active - 1, 0);
+	else if (event.key === 'Home') next = 0;
+	else if (event.key === 'End') next = outputs.length - 1;
+	else return;
+	event.preventDefault();
+	showFile(next);
+	fileList
+		.querySelector<HTMLElement>(`.file[data-index="${next}"]`)
+		?.focus();
+});
+
+// Obfuscate (paste tab) ---------------------------------------------------
+
+// Wrap long lines in both the editor and the output panel, off by default.
+wrapToggle.addEventListener('change', () => {
+	editor.setOption('lineWrapping', wrapToggle.checked);
+	outputArea.classList.toggle('wrap', wrapToggle.checked);
+});
 
 function currentSeed(): string | null {
 	const seed = seedInput.value.trim();
@@ -89,13 +248,25 @@ function runObfuscate(): void {
 	if (!ready) return;
 	try {
 		const result = JSON.parse(obfuscate(editor.getValue(), currentSeed()));
-		outputArea.value = result.code;
+		const code = result.code as string;
 		const n = result.edits as number;
+		setOutputs(
+			[
+				{
+					path: DEFAULT_OUTPUT_FILE_NAME,
+					bytes: encoder.encode(code),
+					text: code,
+					edits: n,
+					skipped: false,
+				},
+			],
+			'estrogen.zip',
+		);
 		editsCount.textContent = n === 1 ? '1 edit' : `${n} edits`;
-		downloadBtn.disabled = false;
 		selectTab('output');
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
+		setOutputs([], 'estrogen.zip');
 		editsCount.textContent = `error: ${message}`;
 		selectTab('output');
 	}
@@ -107,20 +278,19 @@ obfuscateBtn.addEventListener('click', runObfuscate);
 
 byId('resetBtn').addEventListener('click', () => {
 	editor.setValue(SAMPLE);
-	outputArea.value = '';
+	setOutputs([], 'estrogen.zip');
 	editsCount.textContent = '';
-	downloadBtn.disabled = true;
-	outputFileName = DEFAULT_OUTPUT_FILE_NAME;
+	uploadStatus.classList.remove('show');
+	downloadZipBtn.disabled = true;
 	selectTab('code');
 });
 
 // Copy output -------------------------------------------------------------
 
-const copyBtn = byId<HTMLButtonElement>('copyBtn');
 let copyTimer: number | undefined;
 
 copyBtn.addEventListener('click', async () => {
-	if (!outputArea.value) return;
+	if (!outputArea.value || outputArea.hidden) return;
 	try {
 		await navigator.clipboard.writeText(outputArea.value);
 	} catch {
@@ -138,7 +308,7 @@ copyBtn.addEventListener('click', async () => {
 	}, 1400);
 });
 
-// Download single output --------------------------------------------------
+// Downloads ---------------------------------------------------------------
 
 function download(data: BlobPart, name: string, type: string): void {
 	const url = URL.createObjectURL(new Blob([data], { type }));
@@ -148,27 +318,39 @@ function download(data: BlobPart, name: string, type: string): void {
 	document.body.appendChild(a);
 	a.click();
 	a.remove();
-	URL.revokeObjectURL(url);
+	// Revoke after the click has started the download.
+	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 downloadBtn.addEventListener('click', () => {
-	download(outputArea.value, outputFileName, 'text/javascript');
+	const file = outputs[active];
+	if (!file) return;
+	const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+	download(
+		file.bytes as BlobPart,
+		name,
+		MIME[extension(file.path)] ?? 'application/octet-stream',
+	);
 });
 
-// Folder upload -> zip ----------------------------------------------------
+function downloadZip(): void {
+	if (outputs.length === 0) return;
+	const zip: Zippable = {};
+	for (const file of outputs) zip[file.path] = file.bytes;
+	download(zipSync(zip, { level: 6 }) as BlobPart, zipName, 'application/zip');
+}
+
+downloadAllBtn.addEventListener('click', downloadZip);
+
+// Folder upload -----------------------------------------------------------
 
 const dropZone = byId('dropZone');
 const folderInput = byId<HTMLInputElement>('folderInput');
 const uploadStatus = byId('uploadStatus');
-const progressFill = byId('progressFill');
+const progressBar = byId<HTMLProgressElement>('progressBar');
 const progressText = byId('progressText');
 const skips = byId('skips');
 const downloadZipBtn = byId<HTMLButtonElement>('downloadZipBtn');
-
-let zipBlobUrl: string | null = null;
-let zipName = 'obfuscated.zip';
-
-const encoder = new TextEncoder();
 
 interface NamedFile {
 	path: string;
@@ -179,21 +361,21 @@ async function readBytes(file: File): Promise<Uint8Array> {
 	return new Uint8Array(await file.arrayBuffer());
 }
 
-async function readText(file: File): Promise<string> {
-	return await file.text();
-}
-
 // Walk a dropped directory tree via the webkit entry API so a dropped folder
 // behaves like the folder picker. Flat file drops fall back to their names.
-function readEntries(
-	reader: {
-		readEntries(cb: (e: FileSystemEntry[]) => void, err: (e: unknown) => void): void;
-	},
-): Promise<FileSystemEntry[]> {
+function readEntries(reader: {
+	readEntries(
+		cb: (e: FileSystemEntry[]) => void,
+		err: (e: unknown) => void,
+	): void;
+}): Promise<FileSystemEntry[]> {
 	return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
 }
 
-async function walkEntry(entry: FileSystemEntry, out: NamedFile[]): Promise<void> {
+async function walkEntry(
+	entry: FileSystemEntry,
+	out: NamedFile[],
+): Promise<void> {
 	if (entry.isFile) {
 		const file = await new Promise<File>((resolve, reject) =>
 			(entry as FileSystemFileEntry).file(resolve, reject),
@@ -237,38 +419,51 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 	uploadStatus.classList.add('show');
 	downloadZipBtn.disabled = true;
 	skips.textContent = '';
-	if (zipBlobUrl) {
-		URL.revokeObjectURL(zipBlobUrl);
-		zipBlobUrl = null;
-	}
+	progressBar.value = 0;
 
 	const seed = currentSeed();
-	const zip: Zippable = {};
+	const results: OutputFile[] = [];
 	const skipped: string[] = [];
 	let edits = 0;
 	let obfuscated = 0;
 	let done = 0;
 
 	for (const { path, file } of files) {
-		if (JS_EXT.test(path)) {
+		const original = await readBytes(file);
+		let out: OutputFile = {
+			path,
+			bytes: original,
+			text: null,
+			edits: 0,
+			skipped: false,
+		};
+		const source = JS_EXT.test(path) ? asText(original) : null;
+		if (source !== null) {
 			try {
-				const result = JSON.parse(obfuscate(await readText(file), seed));
-				zip[path] = encoder.encode(result.code);
+				const result = JSON.parse(obfuscate(source, seed));
+				const code = result.code as string;
 				const count = (result.edits as number) ?? 0;
+				out = {
+					path,
+					bytes: encoder.encode(code),
+					text: code,
+					edits: count,
+					skipped: false,
+				};
 				edits += count;
 				if (count > 0) obfuscated += 1;
 			} catch (err) {
 				// A file that fails to parse passes through unchanged, noted as a skip.
 				const message = err instanceof Error ? err.message : String(err);
-				zip[path] = await readBytes(file);
+				out = { ...out, text: source, skipped: true };
 				skipped.push(`${path}: ${message}`);
 			}
 		} else {
-			zip[path] = await readBytes(file);
+			out.text = asText(original);
 		}
+		results.push(out);
 		done += 1;
-		const pct = Math.round((done / files.length) * 100);
-		progressFill.style.width = `${pct}%`;
+		progressBar.value = Math.round((done / files.length) * 100);
 		progressText.textContent = `${done} / ${files.length} files, ${obfuscated} obfuscated, ${edits} edits`;
 		if (done % 20 === 0) await new Promise((r) => setTimeout(r, 0));
 	}
@@ -276,15 +471,17 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 	if (skipped.length > 0) {
 		skips.textContent = `Passed through unchanged (parse error):\n${skipped.join('\n')}`;
 	}
-	progressText.textContent = `${files.length} files, ${obfuscated} obfuscated, ${edits} edits, ${skipped.length} skipped`;
+	const summary = `${files.length} files, ${obfuscated} obfuscated, ${edits} edits, ${skipped.length} skipped`;
+	progressText.textContent = summary;
 
-	const bytes = zipSync(zip, { level: 6 });
-	zipBlobUrl = URL.createObjectURL(
-		new Blob([bytes], { type: 'application/zip' }),
-	);
 	const top = files[0]?.path.split('/')[0];
-	zipName = top && top !== files[0]?.file.name ? `${top}.estrogen.zip` : 'estrogen.zip';
+	setOutputs(
+		results,
+		top && top !== files[0]?.file.name ? `${top}.estrogen.zip` : 'estrogen.zip',
+	);
+	editsCount.textContent = summary;
 	downloadZipBtn.disabled = false;
+	selectTab('output');
 }
 
 dropZone.addEventListener('click', () => folderInput.click());
@@ -296,37 +493,30 @@ dropZone.addEventListener('dragover', (event) => {
 	event.preventDefault();
 	dropZone.classList.add('dragover');
 });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('dragleave', () =>
+	dropZone.classList.remove('dragover'),
+);
 dropZone.addEventListener('drop', (event) => {
 	event.preventDefault();
 	dropZone.classList.remove('dragover');
-	if (event.dataTransfer) void collectFromDataTransfer(event.dataTransfer).then(runFolder);
+	if (event.dataTransfer)
+		void collectFromDataTransfer(event.dataTransfer).then(runFolder);
 });
 
-downloadZipBtn.addEventListener('click', () => {
-	if (!zipBlobUrl) return;
-	const a = document.createElement('a');
-	a.href = zipBlobUrl;
-	a.download = zipName;
-	document.body.appendChild(a);
-	a.click();
-	a.remove();
-});
+downloadZipBtn.addEventListener('click', downloadZip);
+
+setOutputs([], 'estrogen.zip');
 
 // Engine ------------------------------------------------------------------
-
-const engineVersion = byId('engineVersion');
-const engineNote = byId('engineNote');
 
 init()
 	.then(() => {
 		ready = true;
-		const v = version();
-		engineVersion.textContent = `engine v${v}`;
-		engineNote.textContent = `v${v}, WebAssembly`;
 	})
 	.catch((err) => {
 		const message = err instanceof Error ? err.message : String(err);
-		engineVersion.textContent = `engine failed to load`;
-		engineNote.textContent = message;
+		obfuscateBtn.disabled = true;
+		obfuscateBtn.textContent = 'engine failed';
+		editsCount.textContent = message;
+		console.error(err);
 	});

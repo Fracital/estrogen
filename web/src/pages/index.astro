@@ -4,44 +4,71 @@ import Base from '../layouts/Base.astro';
 import logo from '../assets/estrogen.png';
 
 const NPM = 'https://www.npmjs.com/package/@sysce/estrogen';
-const JS_OBF = 'https://github.com/javascript-obfuscator/javascript-obfuscator';
+const REPO = 'https://github.com/Fracital/estrogen';
 ---
 
 <Base>
-	<main class="container">
-		<header class="masthead">
-			<div class="brand">
-				<Image src={logo} alt="estrogen" width={56} height={56} />
-				<div>
-					<h1>estrogen</h1>
-					<span class="ver" id="engineVersion">loading engine...</span>
-				</div>
-			</div>
-			<a class="npm-btn" href={NPM} target="_blank" rel="noopener">
+	<header class="holo-actionBar">
+		<span class="holo-title">
+			<Image src={logo} alt="" width={36} height={36} />
+			estrogen
+		</span>
+		<div class="brand-actions">
+			<a
+				class="npm-pill"
+				href={NPM}
+				target="_blank"
+				rel="noopener"
+				aria-label="estrogen on npm"
+			>
 				<svg
-					class="npm-mark"
-					width="39"
-					height="12.5"
+					class="brand-mark"
+					width="34"
+					height="13"
 					viewBox="0 0 780 250"
 					aria-hidden="true"
 				>
 					<path
 						fill="currentColor"
 						d="M240,250h100v-50h100V0H240V250z M340,50h50v100h-50V50z M480,0v200h100V50h50v150h50V50h50v150h50V0H480z M0,200h100V50h50v150h50V0H0V200z"
-					/>
+					></path>
 				</svg>
-				<span>@sysce/estrogen</span>
+				<span class="pkg">@sysce/estrogen</span>
 			</a>
-		</header>
+			<a
+				class="gh-btn"
+				href={REPO}
+				target="_blank"
+				rel="noopener"
+				aria-label="estrogen on GitHub"
+			>
+				<svg
+					class="brand-mark"
+					width="18"
+					height="18"
+					viewBox="0 0 16 16"
+					aria-hidden="true"
+				>
+					<path
+						fill="currentColor"
+						fill-rule="evenodd"
+						d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+					></path>
+				</svg>
+				<span>GitHub</span>
+			</a>
+		</div>
+	</header>
 
+	<main class="wrap">
 		<p class="lede">
-			Want to protect your site from crawlers? estrogen transforms your built
-			JavaScript into something more fun. Drop in a file or a whole codebase and
-			it rewrites the strings and shortens the names,
-			<strong>right in your browser</strong>. Nothing you load leaves your
-			machine, and it comes back ready to ship. This page is a web UI in the
-			spirit of <a href={JS_OBF}>javascript-obfuscator</a> and obfuscator.io,
-			running the real estrogen engine compiled to WebAssembly.
+			estrogen rewrites your JavaScript to be more fun for internet crawlers.
+			Drop in a file or a whole folder and it pools
+			the strings and shortens the local names, <strong
+				>right in your browser</strong
+			>. Nothing you load leaves your machine, and what comes back is ready to
+			ship. This page runs the real estrogen engine compiled to WebAssembly, the
+			same pass the command line runs over a built file.
 		</p>
 
 		<section class="panel" id="app">
@@ -81,9 +108,8 @@ const JS_OBF = 'https://github.com/javascript-obfuscator/javascript-obfuscator';
 					</svg>
 					<span class="big">Pick a folder, or drop files here</span>
 					<span class="sub"
-						>estrogen runs on every .js, .mjs and .cjs file in the folder. Every
-						other file is copied through unchanged. You get the whole tree back
-						as a .zip. Nothing leaves your browser.</span
+						>drop in your codebase and we will take care of the rest! (html, js,
+						and css supported)</span
 					>
 				</div>
 				<input
@@ -94,113 +120,131 @@ const JS_OBF = 'https://github.com/javascript-obfuscator/javascript-obfuscator';
 					hidden
 				/>
 				<div class="upload-status" id="uploadStatus">
-					<div class="progress-track">
-						<div class="progress-fill" id="progressFill"></div>
-					</div>
+					<progress id="progressBar" value="0" max="100"></progress>
 					<div class="progress-text" id="progressText"></div>
 					<div class="skips" id="skips"></div>
-					<div>
-						<button class="btn btn-primary" id="downloadZipBtn" disabled
-							>Download .zip</button
-						>
+					<div class="bar">
+						<button id="downloadZipBtn" disabled>Download .zip</button>
 					</div>
 				</div>
 			</div>
 
 			<div class="pane" data-pane="output">
-				<div class="output-wrap">
-					<button class="copy-btn" id="copyBtn" type="button">Copy</button>
-					<textarea id="output" readonly spellcheck="false"></textarea>
+				<div class="viewer">
+					<nav class="files" id="fileList" aria-label="Output files"></nav>
+					<div class="view">
+						<div class="view-head">
+							<span class="view-path" id="viewPath"></span>
+							<button class="copy-btn" id="copyBtn" type="button">Copy</button>
+						</div>
+						<textarea id="output" readonly spellcheck="false"></textarea>
+						<div class="unsupported" id="unsupported" hidden>
+							<span class="big">No preview for this file</span>
+							<span class="sub"
+								>The viewer shows UTF-8 text and JSON. This file is binary, so
+								download it to open it.</span
+							>
+						</div>
+					</div>
 				</div>
 				<div class="output-meta">
 					<span id="editsCount"></span>
-					<button class="btn" id="downloadBtn" disabled type="button"
-						>Download .js</button
-					>
+					<button id="downloadBtn" disabled type="button">Download .js</button>
+					<button id="downloadAllBtn" disabled type="button">Download .zip</button>
 				</div>
 			</div>
 
-			<div class="toolbar">
-				<div class="opt">
-					<label for="seed">Seed</label>
+			<ul class="holo-list opts">
+				<li class="row">
+					<label>
+						<span class="grow">
+							<span class="title">Wrap lines</span>
+							<span class="summary"
+								>Soft wrap long lines in the editor and the output instead of
+								scrolling sideways</span
+							>
+						</span>
+						<input id="wrapToggle" type="checkbox" />
+					</label>
+				</li>
+				<li>
+					<label class="title" for="seed">Seed</label>
 					<input
-						class="input"
-						type="text"
 						id="seed"
+						type="text"
 						placeholder="empty = random keys each run"
+						spellcheck="false"
+						autocomplete="off"
 					/>
-				</div>
-				<span class="engine" id="engineNote"></span>
-				<button class="btn" id="resetBtn" type="button">Reset</button>
-				<button class="btn btn-primary" id="obfuscateBtn" type="button"
-					>Obfuscate</button
-				>
+					<span class="summary"
+						>A fixed seed makes the keys, and the output, the same on every run.</span
+					>
+				</li>
+			</ul>
+
+			<div class="bar">
+				<button id="resetBtn" type="button">Reset</button>
+				<button id="obfuscateBtn" type="button">Obfuscate</button>
 			</div>
 		</section>
 
-		<section class="faq">
-			<h2>FAQ</h2>
-
-			<div class="faq-item">
-				<h3>Why would I obfuscate my JavaScript?</h3>
-				<p>
-					To make a shipped build more fun to read, for crawlers, scrapers and
-					the casual copy/paste. estrogen takes the plain string and template
+		<h2>FAQ</h2>
+		<ul class="holo-list faq">
+			<li>
+				<span class="title">Why obfuscate your JavaScript?</span>
+				<span class="summary"
+					>To make a shipped build harder to read for crawlers, scrapers and the
+					casual copy and paste. estrogen takes the plain string and template
 					literals out of the source and stores them in an encrypted pool, so a
-					reader can no longer grep for a message, a URL or a key name and land
-					on the line that uses it.
-				</p>
-			</div>
-
-			<div class="faq-item">
-				<h3>Is this foolproof?</h3>
-				<p>
-					No. The browser has to run the code, so a reader with time and patience
-					can work it back. estrogen makes that a lot more work, which is the
-					point.
-				</p>
-			</div>
-
-			<div class="faq-item">
-				<h3>Why is the output larger than my source?</h3>
-				<p>
-					Because the pass prepends a decoder and stores the literals as an
-					encrypted, base64 pool, which is bigger than the plain text it
-					replaced. There is a lot of repetition in the decoder, so the output
-					compresses well with gzip or brotli, which most servers already send.
-				</p>
-			</div>
-
-			<div class="faq-item">
-				<h3>Does it work on any JavaScript?</h3>
-				<p>
-					It works on standard JavaScript and Node source that parses, including
-					.mjs and .cjs. The browser demo runs one source string at a time through
-					the pass, or every .js, .mjs and .cjs file when you upload a folder. If
-					the engine finds nothing to rewrite, it returns the input unchanged. In
-					a folder, a file that fails to parse is copied unchanged and listed as
-					skipped.
-				</p>
-			</div>
-
-			<div class="faq-item">
-				<h3>Is my code uploaded anywhere?</h3>
-				<p>
-					No. There is no server. The engine is WebAssembly running in this page,
-					so your source never leaves your browser. Reload the tab and it is gone.
-				</p>
-			</div>
-
-			<div class="faq-item">
-				<h3>Can I run it on my own machine?</h3>
-				<p>
-					Yes. estrogen is a post-build obfuscator published to npm as
-					<code class="lit">@sysce/estrogen</code>. It rewrites an already-built
-					output directory and has an Astro integration for build-time use. This
-					page is the same engine compiled to WebAssembly.
-				</p>
-			</div>
-		</section>
+					reader cannot grep for a message, a URL or a key name and land on the
+					line that uses it.</span
+				>
+			</li>
+			<li>
+				<span class="title">Is this foolproof?</span>
+				<span class="summary"
+					>No. The browser has to run the code, so a reader with time and
+					patience can work it back. estrogen makes that a lot more work, which
+					is the point.</span
+				>
+			</li>
+			<li>
+				<span class="title">Why is the output larger than the source?</span>
+				<span class="summary"
+					>The pass prepends a decoder and stores the literals as an encrypted
+					base64 pool, which is bigger than the plain text it replaced. The
+					decoder repeats a lot, so the output compresses well with gzip or
+					brotli, which most servers already send.</span
+				>
+			</li>
+			<li>
+				<span class="title">Does it work on any JavaScript?</span>
+				<span class="summary"
+					>It works on standard JavaScript and Node source that parses, including
+					.mjs and .cjs. This page runs one source string at a time, or every
+					.js, .mjs and .cjs file when you upload a folder. If the engine finds
+					nothing to rewrite, it returns the input unchanged. In a folder, a file
+					that fails to parse is copied through and listed as skipped.</span
+				>
+			</li>
+			<li>
+				<span class="title">Is my code uploaded anywhere?</span>
+				<span class="summary"
+					>No. There is no server. The engine is WebAssembly running in this
+					page, so your source never leaves your browser. Reload the tab and it
+					is gone.</span
+				>
+			</li>
+			<li>
+				<span class="title">Can I run it on my own machine?</span>
+				<span class="summary"
+					>Yes. estrogen is a post-build obfuscator published to npm as
+					<code>@sysce/estrogen</code>. It rewrites an already-built output
+					directory and has an Astro integration for build-time use. This page is
+					the same engine compiled to WebAssembly.</span
+				>
+			</li>
+		</ul>
 	</main>
 
 	<script>
