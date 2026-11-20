@@ -10,16 +10,33 @@
 //! - [`names`]: the proxy and store name transform for vendor files, which also
 //!   maps the embedded wasm names through the crate's `wasm` module.
 //! - [`markup`]: the HTML shells and the SVG cloak.
+//! - [`svg`]: SVG asset optimization, the Rust port of SVGO's default job set.
+//!   It runs before the cloak pass over plain image assets, not from
+//!   `obfuscate-build.mjs` but replacing a site's separate `svgmin` step.
+//! - [`html`]: HTML shell minification, run before the cloak pass.
+//! - [`css`]: CSS asset minification. These three asset steps shrink output a
+//!   bundler wrote; they do not obfuscate, and they are not from
+//!   `obfuscate-build.mjs`.
 //!
 //! A pass parses the file (so a parse failure fails closed), walks it, and
 //! returns the byte-range edits it wants; the obfuscator applies them and
 //! re-parses the output. Each JS file takes one transform: the proxy path for a
 //! vendor file, else the literal pool and local renames.
 
+// The asset optimizers (svg, html, css) pull heavy native dependencies (oxvg,
+// minify-html, lightningcss). They are not built for wasm32, so the in-browser
+// binding stays lean; the obfuscator's calls into them are compiled out there
+// too.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod css;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod html;
 pub mod literals;
 mod mangle;
 pub mod markup;
 pub mod names;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod svg;
 
 use std::path::{Path, PathBuf};
 

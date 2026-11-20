@@ -29,7 +29,7 @@ use crate::pass::{FileContext, Pass};
 use crate::proxy::ProxyEngine;
 use crate::report::{FileReport, Report};
 use crate::vendor::{self, VendorFile};
-use crate::walk::{eligibility, walk_files, Eligibility, FileKind};
+use crate::walk::{eligibility, walk_files, Eligibility, FileKind, SkipReason};
 
 /// The obfuscator. Build it with [`Obfuscator::new`] from a set of options, then
 /// call [`Obfuscator::obfuscate_dir`] on each built directory.
@@ -277,6 +277,13 @@ impl Obfuscator {
     /// `root`. The public [`obfuscate_file`](Self::obfuscate_file) roots it at the
     /// file's own directory; the directory walk roots it at the walked dir.
     fn obfuscate_file_in(&self, path: &Path, root: &Path) -> Result<FileReport> {
+        // CSS is not an obfuscation target, so it never reaches the eligibility
+        // gate; it is minified here as a size-only asset step when enabled. The
+        // asset steps are compiled out for wasm32 (see [`Self::css_intercept`]).
+        if let Some(result) = self.css_intercept(path) {
+            return result;
+        }
+
         // Decide on the path alone first, so a `.map` or an unhandled type is
         // never even read.
         if let Eligibility::Skip(reason) = eligibility(path, None) {
@@ -292,10 +299,20 @@ impl Obfuscator {
             }
         };
 
+        // Asset minification runs first, before the cloak pass, and produces a
+        // smaller base for the pass to edit. A plain image SVG is shrunk with the
+        // SVGO default job set; an HTML shell is minified. Both fail closed, and
+        // both are compiled out for wasm32. See [`Self::optimize_markup`].
+        let optimized: Option<String> = self.optimize_markup(kind, &source);
+        // The text every pass works against: the minified SVG or HTML when one
+        // was produced, else the original source. For JS this is always the
+        // original.
+        let base: &str = optimized.as_deref().unwrap_or(&source);
+
         // One transform per file: a proxy vendor JS file is renamed, any other
         // JS chunk gets full literal encryption, and HTML/SVG run the markup
         // pass. This mirrors the reference's `isProxyVendor ? proxy : app` split.
-        let ctx = FileContext::new(path, kind, &source, &self.options);
+        let ctx = FileContext::new(path, kind, base, &self.options);
         // A VM chunk is a whole-file replacement, not a set of in-place edits, so
         // the sourceMappingURL strip and the private source map do not apply to
         // it (the replacement carries neither). Track that here.
@@ -328,13 +345,30 @@ impl Obfuscator {
         }
 
         if edits.is_empty() {
-            // Nothing to rewrite: no literal, name or canary, and no source-map
-            // comment. The file is left exactly as it was, and counts as
-            // unprotected in a check.
+            // No pass rewrote the file. If SVG optimization shrank it, the
+            // optimized bytes are still a change to write; otherwise the file is
+            // left exactly as it was, and counts as unprotected in a check.
+            if let Some(opt) = optimized {
+                // Fail closed: no canary may survive in the optimized asset. The
+                // non-empty-edits path below scans `rewritten`; this path has no
+                // edits, so it scans the optimized text directly.
+                for canary in &self.options.canaries {
+                    if !canary.value.is_empty() && opt.contains(&canary.value) {
+                        return Err(Error::Canary {
+                            path: path.to_path_buf(),
+                            literal: canary.value.clone(),
+                        });
+                    }
+                }
+                if !self.options.check {
+                    write_preserving_bom(path, &source, &opt)?;
+                }
+                return Ok(FileReport::obfuscated(path, kind));
+            }
             return Ok(FileReport::unchanged(path, kind));
         }
 
-        let rewritten = edits.apply(&source)?;
+        let rewritten = edits.apply(base)?;
         // Fail closed: a JS chunk that no longer parses is a pass bug, and estrogen
         // never writes a broken chunk over a working one.
         if kind == FileKind::Js {
@@ -352,11 +386,102 @@ impl Obfuscator {
         }
         if !self.options.check {
             write_preserving_bom(path, &source, &rewritten)?;
-            if !vm_replaced {
+            // The private map traces edits against the source text. A VM chunk is
+            // a whole-file replacement, and an optimized SVG was reshaped before
+            // the cloak pass edited it, so in both cases the edits do not line up
+            // with the original source and no map is written.
+            if !vm_replaced && optimized.is_none() {
                 self.write_sourcemap(path, root, &source, &edits)?;
             }
         }
         Ok(FileReport::obfuscated(path, kind))
+    }
+
+    /// Minify an SVG or HTML asset before the cloak pass, or `None` to keep the
+    /// original. SVG and HTML are the two asset kinds the cloak pass edits; the
+    /// result becomes the base for that pass. A cloak SVG (inline `<script>`) and
+    /// an already-marked document are left for the cloak pass. Both steps fail
+    /// closed. The asset optimizers are not built for wasm32, where this is a
+    /// no-op.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn optimize_markup(&self, kind: FileKind, source: &str) -> Option<String> {
+        match kind {
+            FileKind::Svg
+                if self.options.optimize_svg && !crate::pass::svg::is_cloak_or_marked(source) =>
+            {
+                crate::pass::svg::optimize_svg_asset(source)
+            }
+            FileKind::Html
+                if self.options.minify_html && !crate::watermark::marked_markup(source, false) =>
+            {
+                crate::pass::html::minify_html_doc(source)
+            }
+            _ => None,
+        }
+    }
+
+    /// On wasm32 the asset optimizers are not built, so markup minification is a
+    /// no-op and the cloak pass edits the original source.
+    #[cfg(target_arch = "wasm32")]
+    fn optimize_markup(&self, _kind: FileKind, _source: &str) -> Option<String> {
+        None
+    }
+
+    /// Minify a `.css` file and report it, or `None` when the path is not a
+    /// stylesheet or CSS minification is off. CSS never reaches the eligibility
+    /// gate, so it is intercepted here. The CSS minifier is not built for wasm32,
+    /// where this is always `None`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn css_intercept(&self, path: &Path) -> Option<Result<FileReport>> {
+        if self.options.minify_css && is_css(path) {
+            Some(self.minify_css_file(path))
+        } else {
+            None
+        }
+    }
+
+    /// On wasm32 the CSS minifier is not built, so CSS is never intercepted.
+    #[cfg(target_arch = "wasm32")]
+    fn css_intercept(&self, _path: &Path) -> Option<Result<FileReport>> {
+        None
+    }
+
+    /// Minify one `.css` file in place and report what happened to it.
+    ///
+    /// CSS is a size-only asset step, not an obfuscation target. The stylesheet is
+    /// minified with lightningcss; on a parse error the original is kept and the
+    /// file is reported as a skip, the same as an unhandled type. When it parses,
+    /// the result is scanned for canaries (so a sensitive literal is caught even
+    /// in an already-minimal stylesheet) and written only when it is strictly
+    /// smaller. In `--check` mode nothing is written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn minify_css_file(&self, path: &Path) -> Result<FileReport> {
+        let kind = FileKind::classify(path);
+        let source = fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        let Some(minified) = crate::pass::css::minify_css_asset(&source) else {
+            // A parse error or an empty reprint: leave the stylesheet untouched,
+            // reported as a skip like any file estrogen does not rewrite.
+            return Ok(FileReport::skipped(path, kind, SkipReason::Policy));
+        };
+        // Fail closed: no canary may survive in the minified stylesheet.
+        for canary in &self.options.canaries {
+            if !canary.value.is_empty() && minified.contains(&canary.value) {
+                return Err(Error::Canary {
+                    path: path.to_path_buf(),
+                    literal: canary.value.clone(),
+                });
+            }
+        }
+        // Write it only when it actually shrank; an already-minimal stylesheet is
+        // a deliberate no-op, not a miss.
+        if minified.len() < source.len() {
+            if !self.options.check {
+                write_preserving_bom(path, &source, &minified)?;
+            }
+            Ok(FileReport::obfuscated(path, kind))
+        } else {
+            Ok(FileReport::skipped(path, kind, SkipReason::Policy))
+        }
     }
 
     /// Try to compile an app chunk to the bytecode VM, the default transform for
@@ -437,6 +562,16 @@ fn sourcemap_strip_edit(source: &str) -> Option<Edit> {
 
 /// Write `rewritten` to `path`, keeping a UTF-8 byte-order mark if the original
 /// had one. Input is UTF-8; a BOM at the head of the original is preserved.
+/// Whether a path is a `.css` stylesheet, matched case-insensitively on the
+/// extension. estrogen handles these as an asset minify step, not an obfuscation
+/// target. Only the non-wasm32 CSS intercept calls this.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_css(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("css"))
+}
+
 fn write_preserving_bom(path: &Path, original: &str, rewritten: &str) -> Result<()> {
     const BOM: &str = "\u{feff}";
     let body = if original.starts_with(BOM) && !rewritten.starts_with(BOM) {
@@ -738,6 +873,240 @@ mod tests {
         assert!(!v["mappings"].as_str().unwrap().is_empty());
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&maps).ok();
+    }
+
+    // SVG asset optimization tests.
+
+    /// A fat SVG: an XML declaration, a comment, editor metadata, indentation
+    /// and over-precise numbers, all of which the default job set strips or
+    /// shortens.
+    const FAT_SVG: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<!-- an icon -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+    <metadata>editor junk here</metadata>
+    <g fill="none">
+        <path d="M12.00000,2.000000 L22.0000000,22.00000 Z" fill="#000000"></path>
+    </g>
+</svg>
+"##;
+
+    #[test]
+    fn a_run_optimizes_an_svg_asset() {
+        let dir = tmp_dir();
+        let svg = dir.join("icon.svg");
+        fs::write(&svg, FAT_SVG).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"svg-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        let report = obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&svg).unwrap();
+        assert!(out.len() < FAT_SVG.len(), "the svg should shrink: {out}");
+        assert!(
+            out.to_ascii_lowercase().contains("<svg"),
+            "root lost: {out}"
+        );
+        assert!(!out.contains("editor junk"), "metadata survived: {out}");
+        // The optimized asset is written and reported as a change.
+        assert_eq!(report.obfuscated(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn optimize_svg_off_leaves_an_svg_asset_unchanged() {
+        let dir = tmp_dir();
+        let svg = dir.join("icon.svg");
+        fs::write(&svg, FAT_SVG).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            optimize_svg: false,
+            seed: Some(b"svg-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        // With optimization off and no cloak content, the file is untouched.
+        assert_eq!(fs::read_to_string(&svg).unwrap(), FAT_SVG);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_canary_in_an_optimized_svg_fails_the_build() {
+        let dir = tmp_dir();
+        let svg = dir.join("brand.svg");
+        // Fat enough to shrink (metadata and whitespace go), with the canary in
+        // visible text the optimizer keeps.
+        let src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"10\">\n    <metadata>junk junk junk</metadata>\n    <text x=\"0\" y=\"8\">Fracital</text>\n</svg>\n";
+        fs::write(&svg, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"svg-seed".to_vec()),
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..Options::default()
+        })
+        .unwrap();
+        let err = obf.obfuscate_dir(&dir).unwrap_err();
+        assert!(
+            matches!(err, Error::Canary { .. }),
+            "expected a canary error"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cloak_svg_is_not_optimized() {
+        let dir = tmp_dir();
+        let svg = dir.join("cloak.svg");
+        // A cloak: lots of whitespace the optimizer would collapse, but it carries
+        // an inline script, so the optimizer leaves it for the markup pass. The
+        // markup pass has no canary to act on here, so the file is unchanged.
+        let src =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n    <script>var a = 1;</script>\n</svg>\n";
+        fs::write(&svg, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"svg-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        // Untouched: optimization skipped the cloak and the markup pass found no
+        // canary to neutralize.
+        assert_eq!(fs::read_to_string(&svg).unwrap(), src);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // HTML and CSS asset minification tests.
+
+    #[test]
+    fn a_run_minifies_an_html_shell() {
+        let dir = tmp_dir();
+        let html = dir.join("index.html");
+        let src = "<!doctype html>\n<html>\n    <head>\n        <!-- c -->\n        <title>Home</title>\n    </head>\n    <body>\n        <p>hi</p>\n    </body>\n</html>\n";
+        fs::write(&html, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"html-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        let report = obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&html).unwrap();
+        assert!(out.len() < src.len(), "the shell should shrink: {out}");
+        assert!(!out.contains("<!-- c -->"), "comment survived: {out}");
+        assert!(out.to_lowercase().contains("<title>home</title>"));
+        assert_eq!(report.obfuscated(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_canary_in_an_html_body_fails_the_build() {
+        let dir = tmp_dir();
+        let html = dir.join("index.html");
+        // The canary sits in body text the cloak pass does not neutralize, so the
+        // post-minify canary scan must catch it.
+        let src =
+            "<!doctype html>\n<html>\n    <body>\n        <p>Fracital</p>\n    </body>\n</html>\n";
+        fs::write(&html, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"html-seed".to_vec()),
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..Options::default()
+        })
+        .unwrap();
+        let err = obf.obfuscate_dir(&dir).unwrap_err();
+        assert!(
+            matches!(err, Error::Canary { .. }),
+            "expected a canary error"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_run_minifies_a_css_file() {
+        let dir = tmp_dir();
+        let css = dir.join("app.css");
+        let src = "/* x */\n.a {\n    color: #ffffff;\n    margin: 0px;\n}\n";
+        fs::write(&css, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"css-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        let report = obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&css).unwrap();
+        assert!(out.len() < src.len(), "the stylesheet should shrink: {out}");
+        assert!(!out.contains("/* x */"), "comment survived: {out}");
+        assert!(out.contains(".a"), "selector lost: {out}");
+        assert_eq!(report.obfuscated(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_canary_in_a_css_file_fails_the_build() {
+        let dir = tmp_dir();
+        let css = dir.join("brand.css");
+        // A content string carrying the canary, in a stylesheet fat enough to
+        // parse and shrink.
+        let src =
+            "/* comment */\n.logo::after {\n    content: \"Fracital\";\n    color: #ffffff;\n}\n";
+        fs::write(&css, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"css-seed".to_vec()),
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..Options::default()
+        })
+        .unwrap();
+        let err = obf.obfuscate_dir(&dir).unwrap_err();
+        assert!(
+            matches!(err, Error::Canary { .. }),
+            "expected a canary error"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn minify_off_leaves_html_and_css_unchanged() {
+        let dir = tmp_dir();
+        let html = dir.join("index.html");
+        let css = dir.join("app.css");
+        let html_src =
+            "<!doctype html>\n<html>\n    <body>\n        <p>hi</p>\n    </body>\n</html>\n";
+        let css_src = "/* x */\n.a {\n    color: #ffffff;\n}\n";
+        fs::write(&html, html_src).unwrap();
+        fs::write(&css, css_src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            minify_html: false,
+            minify_css: false,
+            seed: Some(b"off-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        assert_eq!(fs::read_to_string(&html).unwrap(), html_src);
+        assert_eq!(fs::read_to_string(&css).unwrap(), css_src);
+        fs::remove_dir_all(&dir).ok();
     }
 
     // Vendor pipeline tests.

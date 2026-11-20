@@ -44,6 +44,25 @@ sha2 = "0.10"
 regex = "1"
 hmac = "0.12"
 globset = "0.4"
+# SVG asset optimization (pass/svg.rs). oxvg is the Rust port of SVGO; its
+# optimiser runs the same default job set svgo does, over a roxmltree-parsed
+# document, so a built icon shrinks without a node svgmin step. oxvg_ast gives
+# the parse and serialize entry points; the `roxmltree` feature is the light XML
+# front end (no markup5ever, so no html5ever/tendril/string_cache pulled in).
+oxvg_optimiser = "0.0.9"
+oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
+# CSS asset minification (pass/css.rs). lightningcss parses, minifies and
+# reprints a stylesheet. It is already in the tree as a transitive dependency of
+# oxvg_optimiser, so pinning the same version adds no new compiled crate. Pinned
+# exact so the two requirements resolve to one copy.
+lightningcss = "=1.0.0-alpha.72"
+# HTML shell minification (pass/html.rs). minify-html's one-pass engine strips
+# comments and collapses insignificant whitespace, HTML-aware so it never touches
+# <pre>, <textarea>, <script> or <style> content. It returns an error on
+# malformed input, which is the fail-closed path. Its JS and CSS minifiers are
+# left off so estrogen's own passes stay the only thing that rewrites script and
+# style bodies.
+minify-html-onepass = "0.18"
 
 [profile.release]
 lto = "fat"

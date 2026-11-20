@@ -62,6 +62,33 @@ export interface Options {
 	 */
 	check?: boolean;
 
+	/**
+	 * Optimize `.svg` asset files (`--no-optimize-svg` turns it off). On by
+	 * default: estrogen shrinks each plain image SVG with the SVGO default job set
+	 * (drops metadata and comments, collapses whitespace, rounds path numbers,
+	 * removes default attributes) and writes the smaller result. This replaces a
+	 * site's separate `svgmin` step. A cloak SVG (one with an inline `<script>`)
+	 * is left for the markup pass. Set this to `false` to keep the SVGs as the
+	 * bundler wrote them.
+	 */
+	optimizeSvg?: boolean;
+
+	/**
+	 * Minify `.html` shells (`--no-minify-html` turns it off). On by default:
+	 * estrogen strips comments and collapses insignificant whitespace before the
+	 * cloak pass, leaving `<pre>`, `<textarea>`, `<script>` and `<style>` content
+	 * intact. Set this to `false` to keep the HTML as the bundler wrote it.
+	 */
+	minifyHtml?: boolean;
+
+	/**
+	 * Minify `.css` stylesheets (`--no-minify-css` turns it off). On by default:
+	 * estrogen minifies each stylesheet with lightningcss. CSS is not an
+	 * obfuscation target, so this only shrinks it. Set this to `false` to keep the
+	 * CSS as the bundler wrote it.
+	 */
+	minifyCss?: boolean;
+
 	/** Quiet output (`--quiet`). Suppresses progress logging. */
 	quiet?: boolean;
 
@@ -115,6 +142,9 @@ export function buildArgs(options: Options): string[] {
 	if (options.seed !== undefined) args.push('--seed', options.seed);
 	if (options.jobs !== undefined) args.push('--jobs', String(options.jobs));
 	if (options.check) args.push('--check');
+	if (options.optimizeSvg === false) args.push('--no-optimize-svg');
+	if (options.minifyHtml === false) args.push('--no-minify-html');
+	if (options.minifyCss === false) args.push('--no-minify-css');
 	if (options.quiet) args.push('--quiet');
 	if (options.verbose) args.push('--verbose');
 	if (options.extraArgs) args.push(...options.extraArgs);

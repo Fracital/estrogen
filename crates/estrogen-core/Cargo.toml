@@ -33,3 +33,13 @@ sha2.workspace = true
 regex.workspace = true
 hmac.workspace = true
 globset.workspace = true
+
+# Asset optimizers for the svg, html and css passes. They pull heavy native
+# dependencies, so they are built only for native targets, not for the wasm32
+# in-browser binding (estrogen-wasm), which obfuscates a single JS string and
+# never runs an asset step. The passes that use them are `#[cfg]`-gated to match.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+oxvg_optimiser.workspace = true
+oxvg_ast.workspace = true
+lightningcss.workspace = true
+minify-html-onepass.workspace = true

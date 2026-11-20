@@ -188,6 +188,9 @@ struct ConfigOptions {
     jobs: Option<usize>,
     check: bool,
     vm: Option<bool>,
+    optimize_svg: Option<bool>,
+    minify_html: Option<bool>,
+    minify_css: Option<bool>,
     /// Where `build` writes the vendor manifest. Absent uses
     /// [`DEFAULT_VENDOR_MANIFEST`]; an empty string turns it off. A relative path
     /// lands under the dist root, an absolute path is used as is.
@@ -325,6 +328,24 @@ pub struct Options {
     /// changes which transform an app chunk takes, never whether it is
     /// protected. The CLI exposes `--no-vm`.
     pub vm: bool,
+    /// Optimize `.svg` asset files: shrink each plain image SVG with the SVGO
+    /// default job set (drop metadata and comments, collapse whitespace, round
+    /// path numbers, remove default attributes) and write the smaller result.
+    /// On by default; it replaces a site's separate `svgmin` step. A cloak SVG
+    /// (one with an inline `<script>`) is left for the markup pass, and an SVG
+    /// that does not shrink is left exactly as it was. The CLI exposes
+    /// `--no-optimize-svg`.
+    pub optimize_svg: bool,
+    /// Minify `.html` shells: strip comments and collapse insignificant
+    /// whitespace before the cloak pass runs, leaving `<pre>`, `<textarea>`,
+    /// `<script>` and `<style>` content intact. On by default. Fails closed on
+    /// malformed markup (the original is kept). The CLI exposes
+    /// `--no-minify-html`.
+    pub minify_html: bool,
+    /// Minify `.css` stylesheets with lightningcss. On by default. CSS is not an
+    /// obfuscation target, so this only shrinks it; it fails closed on a parse
+    /// error (the original is kept). The CLI exposes `--no-minify-css`.
+    pub minify_css: bool,
 }
 
 impl Default for Options {
@@ -340,6 +361,9 @@ impl Default for Options {
             vendor: Vec::new(),
             manifest: Some(PathBuf::from(DEFAULT_VENDOR_MANIFEST)),
             vm: true,
+            optimize_svg: true,
+            minify_html: true,
+            minify_css: true,
         }
     }
 }
@@ -367,6 +391,9 @@ impl Options {
             vendor: file.vendor,
             manifest: resolve_manifest(file.options.manifest),
             vm: file.options.vm.unwrap_or(true),
+            optimize_svg: file.options.optimize_svg.unwrap_or(true),
+            minify_html: file.options.minify_html.unwrap_or(true),
+            minify_css: file.options.minify_css.unwrap_or(true),
         };
         opts.canaries.retain(|c| !c.value.is_empty());
         if opts.jobs == 0 {
@@ -528,6 +555,26 @@ sourcemap = "/tmp/private-maps"
         let c = tmp_file("c.toml", "[options]\nmanifest = \"\"\n");
         assert_eq!(Options::from_config(&c).unwrap().manifest, None);
         fs::remove_file(&c).ok();
+    }
+
+    #[test]
+    fn asset_optimization_defaults_on_and_is_configurable() {
+        // All three default on.
+        let d = Options::default();
+        assert!(d.optimize_svg && d.minify_html && d.minify_css);
+        // A config that omits them stays on.
+        let a = tmp_file("osa.toml", "");
+        let oa = Options::from_config(&a).unwrap();
+        assert!(oa.optimize_svg && oa.minify_html && oa.minify_css);
+        fs::remove_file(&a).ok();
+        // A config can turn each off independently.
+        let b = tmp_file(
+            "osb.toml",
+            "[options]\noptimize_svg = false\nminify_html = false\nminify_css = false\n",
+        );
+        let ob = Options::from_config(&b).unwrap();
+        assert!(!ob.optimize_svg && !ob.minify_html && !ob.minify_css);
+        fs::remove_file(&b).ok();
     }
 
     #[test]

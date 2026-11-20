@@ -80,6 +80,22 @@ pub struct Common {
     #[arg(long = "no-vm")]
     pub no_vm: bool,
 
+    /// Do not optimize `.svg` asset files. SVG optimization is on by default; it
+    /// shrinks each plain image SVG with the SVGO default job set and replaces a
+    /// site's separate `svgmin` step.
+    #[arg(long = "no-optimize-svg")]
+    pub no_optimize_svg: bool,
+
+    /// Do not minify `.html` shells. HTML minification is on by default; it
+    /// strips comments and collapses insignificant whitespace before the cloak
+    /// pass, leaving `<pre>`, `<textarea>`, `<script>` and `<style>` intact.
+    #[arg(long = "no-minify-html")]
+    pub no_minify_html: bool,
+
+    /// Do not minify `.css` stylesheets. CSS minification is on by default.
+    #[arg(long = "no-minify-css")]
+    pub no_minify_css: bool,
+
     /// Watch the directories and re-run on each change until stopped.
     #[arg(long = "watch")]
     pub watch: bool,
@@ -145,6 +161,15 @@ impl Cli {
         }
         if common.no_vm {
             options.vm = false;
+        }
+        if common.no_optimize_svg {
+            options.optimize_svg = false;
+        }
+        if common.no_minify_html {
+            options.minify_html = false;
+        }
+        if common.no_minify_css {
+            options.minify_css = false;
         }
 
         Ok(options)
@@ -274,6 +299,22 @@ mod tests {
         let cli = parse(&["estrogen", "--check", "dist"]);
         let opts = cli.build_options().unwrap();
         assert!(opts.check);
+    }
+
+    #[test]
+    fn asset_optimization_is_on_by_default_and_flags_turn_it_off() {
+        let on = parse(&["estrogen", "dist"]).build_options().unwrap();
+        assert!(on.optimize_svg && on.minify_html && on.minify_css);
+        let off = parse(&[
+            "estrogen",
+            "--no-optimize-svg",
+            "--no-minify-html",
+            "--no-minify-css",
+            "dist",
+        ])
+        .build_options()
+        .unwrap();
+        assert!(!off.optimize_svg && !off.minify_html && !off.minify_css);
     }
 
     #[test]
