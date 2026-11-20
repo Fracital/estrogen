@@ -8,9 +8,11 @@
 //! nonzero exit.
 
 mod cli;
+mod watch;
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 
 use clap::Parser;
 use estrogen_core::report::skip_reason_label;
@@ -42,10 +44,6 @@ fn main() -> ExitCode {
 /// return the exit code. Errors come back as a message for `main` to print.
 fn run(cli: &Cli) -> Result<u8, String> {
     let common = cli.common();
-    if common.watch {
-        return Err("watch mode is not implemented yet".to_string());
-    }
-
     let dirs = cli.dirs();
     if dirs.is_empty() {
         return Err("no directory given; pass one or more built directories".to_string());
@@ -57,10 +55,44 @@ fn run(cli: &Cli) -> Result<u8, String> {
     let verbose = common.verbose;
 
     let obf = Obfuscator::new(options).map_err(|e| e.to_string())?;
+    let is_build = cli.is_build();
+
+    // Watch mode re-runs the pass on each debounced change and does not return
+    // until the process is stopped with Ctrl-C.
+    if common.watch {
+        let paths = watch::watch_paths(&obf, &dirs, is_build);
+        if paths.is_empty() {
+            return Err("no existing directory to watch".to_string());
+        }
+        if !quiet {
+            println!(
+                "estrogen: watching {} path(s); press Ctrl-C to stop",
+                paths.len()
+            );
+        }
+        let never_stop = AtomicBool::new(false);
+        watch::watch(
+            &obf,
+            &dirs,
+            is_build,
+            &paths,
+            watch::DEBOUNCE,
+            &never_stop,
+            |result| match result {
+                Ok(report) => {
+                    if !quiet {
+                        print_report(report, verbose);
+                    }
+                }
+                Err(message) => eprintln!("estrogen: {message}"),
+            },
+        )?;
+        return Ok(EXIT_OK);
+    }
 
     // `build` vendors the configured inputs into each dist, then obfuscates; the
     // default run only obfuscates what is already there.
-    let report = if cli.is_build() {
+    let report = if is_build {
         let mut combined = Report::new(dirs.clone());
         for dir in &dirs {
             combined.absorb(obf.build(dir).map_err(|e| e.to_string())?);

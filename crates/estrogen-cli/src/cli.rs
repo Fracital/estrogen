@@ -75,7 +75,7 @@ pub struct Common {
     #[arg(long = "check")]
     pub check: bool,
 
-    /// Watch the directories and re-run on change. Not implemented yet.
+    /// Watch the directories and re-run on each change until stopped.
     #[arg(long = "watch")]
     pub watch: bool,
 
