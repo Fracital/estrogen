@@ -165,6 +165,28 @@ impl<'a> LiteralVisitor<'a> {
                     computed_key = true;
                 }
             }
+            // A string key in an object destructuring pattern (`const { "k": v }
+            // = o`). OXC splits this from ObjectProperty, but it is the same key
+            // position: a non-computed key must become `[NAME(i)]`, never a bare
+            // value call, or the pattern no longer parses.
+            AstKind::BindingProperty(p) => {
+                if is_key(&p.key, span) && !p.computed {
+                    if !p.shorthand && value == "__proto__" {
+                        return; // a quoted `__proto__` key stays a plain key
+                    }
+                    computed_key = true;
+                }
+            }
+            // The same key, in an assignment destructuring pattern
+            // (`({ "k": v } = o)`). Its key field is `name`.
+            AstKind::AssignmentTargetPropertyProperty(p) => {
+                if is_key(&p.name, span) && !p.computed {
+                    if value == "__proto__" {
+                        return; // a quoted `__proto__` key stays a plain key
+                    }
+                    computed_key = true;
+                }
+            }
             AstKind::MethodDefinition(m) => {
                 if is_key(&m.key, span) && !m.computed {
                     if value == "constructor" {
@@ -437,6 +459,44 @@ mod tests {
         let out = obfuscate("class C { \"run\"() {} }", &opts);
         assert!(!out.contains("\"run\""));
         assert!(out.contains(&format!("[{}(", decode_name(&out))));
+    }
+
+    #[test]
+    fn destructuring_string_keys_become_computed() {
+        let opts = seeded(&[]);
+        // The reduced trigger from the failing Astro chunk: a string key in an
+        // object destructuring pattern must become `[NAME(i)]`, not a bare call.
+        let src =
+            "const { lang: _, \"data-astro-id\": astroId, \"define:vars\": vars, ...props } = p;";
+        let out = obfuscate(src, &opts);
+        assert!(!out.contains("\"data-astro-id\""));
+        assert!(!out.contains("\"define:vars\""));
+        assert!(
+            out.contains(&format!("[{}(", decode_name(&out))),
+            "key became computed: {out}"
+        );
+        crate::pass::ensure_js_reparses(std::path::Path::new("app.js"), &out).unwrap();
+    }
+
+    #[test]
+    fn assignment_destructuring_string_keys_become_computed() {
+        let opts = seeded(&[]);
+        let src = "let a, b; ({ \"x-y\": a, \"z w\": b } = o);";
+        let out = obfuscate(src, &opts);
+        assert!(!out.contains("\"x-y\""));
+        assert!(!out.contains("\"z w\""));
+        assert!(out.contains(&format!("[{}(", decode_name(&out))));
+        crate::pass::ensure_js_reparses(std::path::Path::new("app.js"), &out).unwrap();
+    }
+
+    #[test]
+    fn destructuring_proto_key_stays_literal() {
+        let opts = seeded(&[]);
+        let out = obfuscate("const { \"__proto__\": base } = o;", &opts);
+        assert!(
+            out.contains("\"__proto__\""),
+            "a quoted proto key in a pattern stays plain: {out}"
+        );
     }
 
     #[test]
