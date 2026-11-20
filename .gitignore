@@ -1,0 +1,6 @@
+/target
+node_modules/
+*.node
+/npm/*/crack
+/npm/*/crack.exe
+.DS_Store
