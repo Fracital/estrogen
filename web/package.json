@@ -11,6 +11,7 @@
 	"dependencies": {
 		"@sysce/estrogen": "file:../npm/estrogen",
 		"astro": "^5.14.1",
-		"codemirror": "5.65.19"
+		"codemirror": "5.65.19",
+		"fflate": "^0.8.3"
 	}
 }

@@ -1,5 +1,4 @@
 ---
-import '../styles/semantic-vendor.css';
 import '../styles/estrogen.css';
 
 interface Props {
@@ -9,7 +8,7 @@ interface Props {
 
 const {
 	title = 'estrogen obfuscator',
-	description = 'estrogen rewrites built JavaScript so a reader pays more to make sense of it. Runs the real engine in your browser as WebAssembly.',
+	description = 'estrogen moves string and template literals into an encrypted per-file pool and prepends a small decoder. The real engine runs in your browser as WebAssembly. Nothing is uploaded.',
 } = Astro.props;
 ---
 
@@ -20,6 +19,13 @@ const {
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>{title}</title>
 		<meta name="description" content={description} />
+		<meta name="theme-color" content="#08080c" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+			rel="stylesheet"
+		/>
 	</head>
 	<body>
 		<slot />

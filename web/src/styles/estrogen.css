@@ -1,107 +1,588 @@
 /*
- * Custom rules for the estrogen demo, hand-compiled from the
- * javascript-obfuscator-ui main.less (BSD-2-Clause). The donate, sponsor and
- * bitcoin rules are dropped because this demo has none of those. See
- * THIRD-PARTY.md for the license.
+ * Hand-written styles for the estrogen demo. The visual language is taken from
+ * the elichat frontend: near-black background, a pink accent, Instrument Sans
+ * for text and JetBrains Mono for code, 12px radii, thin #23232f borders, pill
+ * buttons and inputs that glow at the accent on focus. CodeMirror gets a dark
+ * skin to match. This replaces the Semantic UI vendor sheet.
  */
 
-.title {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
+:root {
+	--bg: #08080c;
+	--bg-2: #0e0e15;
+	--bg-3: #15151f;
+	--bg-4: #1c1c29;
+	--border: #23232f;
+	--border-2: #2f2f40;
+	--text: #ebe9f2;
+	--text-2: #b9b6c9;
+	--muted: #7f7c93;
+	--accent: #ef3a6d;
+	--accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+	--ok: #34d399;
+	--warn: #fbbf24;
+	--danger: #f87171;
+	--radius: 12px;
+	--radius-sm: 8px;
+	--font: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto,
+		sans-serif;
+	--mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+	color-scheme: dark;
 }
 
-.title > h1 {
-	margin-right: 1rem;
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
 }
 
-.CodeMirror {
-	height: 200px;
+html {
+	-webkit-text-size-adjust: 100%;
 }
 
-.DropZone {
-	padding: 1em;
-	height: 200px;
-	border-width: 2px;
-	border-color: #ccc;
-	border-style: dashed;
-	border-radius: 5px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	text-align: center;
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font);
+	font-size: 15px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+button {
 	cursor: pointer;
-	color: #666;
 }
 
-.DropZone.dragover {
-	border-color: #d14b8f;
-	background-color: rgba(209, 75, 143, 0.04);
+code,
+pre,
+kbd {
+	font-family: var(--mono);
 }
 
-.OptionsForm.ui.form label {
-	font-size: 0.8em;
+h1,
+h2,
+h3,
+h4 {
+	margin: 0;
+	line-height: 1.2;
+	letter-spacing: -0.02em;
 }
 
-.ui.labels > .label {
-	font-family: monospace;
+p {
+	margin: 0;
 }
 
-.evaluatedCode {
-	white-space: pre;
-	padding: 0.2em;
-	background-color: rgba(0, 0, 0, 0.04);
-	overflow: auto;
-	max-height: 200px;
-	font-family: monospace;
+.container {
+	width: min(960px, 100% - 32px);
+	margin-inline: auto;
+	padding: 40px 0 64px;
+}
+
+code.lit {
+	background: var(--bg-3);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 0.1em 0.4em;
 	font-size: 85%;
 }
 
-/* The inline SVG wordmark in the logo column. */
-#Logo {
-	width: 100%;
-	max-width: 300px;
-	margin: 0 auto;
+/* Masthead ---------------------------------------------------------------- */
+
+.masthead {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	flex-wrap: wrap;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	min-width: 0;
+}
+
+.brand img {
+	width: 56px;
+	height: 56px;
+	border-radius: 14px;
+}
+
+.brand h1 {
+	font-size: 28px;
+	font-weight: 700;
+}
+
+.brand .ver {
+	display: block;
+	margin-top: 2px;
+	color: var(--muted);
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: 0;
+}
+
+.npm-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 9px;
+	margin-left: auto;
+	padding: 8px 14px 8px 10px;
+	border-radius: 10px;
+	background: #cb3837;
+	color: #fff;
+	font-weight: 600;
+	font-size: 14px;
+	white-space: nowrap;
+	transition: background 0.15s;
+}
+
+.npm-btn:hover {
+	background: #d9403e;
+	text-decoration: none;
+}
+
+.npm-btn:active {
+	transform: translateY(1px);
+}
+
+.npm-mark {
+	display: block;
+	flex: none;
+}
+
+.lede {
+	margin-top: 20px;
+	max-width: 70ch;
+	color: var(--text-2);
+	font-size: 16px;
+}
+
+.lede strong {
+	color: var(--text);
+	font-weight: 600;
+}
+
+/* Panel with tabs --------------------------------------------------------- */
+
+.panel {
+	margin-top: 28px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: linear-gradient(180deg, var(--bg-2), var(--bg));
+	overflow: hidden;
+}
+
+.tabs {
+	display: flex;
+	border-bottom: 1px solid var(--border);
+}
+
+.tab {
+	flex: 1 1 0;
+	min-width: 0;
+	padding: 13px 10px;
+	background: transparent;
+	border: 0;
+	border-right: 1px solid var(--border);
+	color: var(--text-2);
+	font-weight: 500;
+	font-size: 13.5px;
+	text-align: center;
+	transition: background 0.15s, color 0.15s;
+}
+
+.tab:last-child {
+	border-right: 0;
+}
+
+.tab:hover {
+	background: var(--bg-3);
+	color: var(--text);
+}
+
+.tab.active {
+	background: var(--bg-3);
+	color: var(--text);
+	box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.pane {
+	display: none;
+	padding: 14px;
+}
+
+.pane.active {
 	display: block;
 }
 
-code {
-	max-width: 100%;
-	overflow-y: hidden;
-	overflow-x: auto;
-	background-color: #e1e1e4;
-	padding: 0.2em 0.4em;
-	margin: 0;
-	font-size: 85%;
-	border-radius: 5px;
+/* The three panes hold the same tall height so switching tabs never resizes
+   the area. */
+.CodeMirror,
+#output,
+.dropzone {
+	height: 420px;
 }
 
-h3 code {
+.editor-wrap {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.CodeMirror {
+	background: var(--bg-2);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 13px;
+	line-height: 1.55;
+}
+
+.CodeMirror-gutters {
+	background: #0b0b11;
+	border-right: 1px solid var(--border);
+}
+
+.CodeMirror-linenumber {
+	color: #4c4866;
+}
+
+.CodeMirror-cursor {
+	border-left: 1px solid var(--text);
+}
+
+.CodeMirror-selected {
+	background: var(--accent-soft) !important;
+}
+
+.cm-s-default .cm-keyword {
+	color: #c792ea;
+}
+.cm-s-default .cm-string,
+.cm-s-default .cm-string-2 {
+	color: #7bd389;
+}
+.cm-s-default .cm-number,
+.cm-s-default .cm-atom {
+	color: #f59e0b;
+}
+.cm-s-default .cm-comment {
+	color: #6b6880;
+}
+.cm-s-default .cm-property {
+	color: #22d3ee;
+}
+.cm-s-default .cm-def,
+.cm-s-default .cm-variable,
+.cm-s-default .cm-variable-2 {
+	color: var(--text);
+}
+.cm-s-default .cm-operator,
+.cm-s-default .cm-punctuation {
+	color: var(--text-2);
+}
+
+/* Output pane with copy button ------------------------------------------- */
+
+.output-wrap {
+	position: relative;
+}
+
+#output {
+	display: block;
+	width: 100%;
+	resize: none;
+	padding: 12px 14px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--bg-2);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 12.5px;
+	line-height: 1.55;
+	white-space: pre;
+	outline: none;
+}
+
+#output:focus {
+	border-color: var(--border-2);
+}
+
+.copy-btn {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 11px;
+	border-radius: 7px;
+	border: 1px solid var(--border-2);
+	background: var(--bg-3);
+	color: var(--text);
+	font-size: 12.5px;
+	font-weight: 500;
+	transition: background 0.15s, border-color 0.15s;
+}
+
+.copy-btn:hover {
+	background: var(--bg-4);
+	border-color: #3b3b50;
+}
+
+.copy-btn.done {
+	color: var(--ok);
+	border-color: rgba(52, 211, 153, 0.4);
+}
+
+.output-meta {
+	margin-top: 10px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	color: var(--muted);
+	font-size: 13px;
+}
+
+/* Upload pane ------------------------------------------------------------- */
+
+.dropzone {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	padding: 24px;
+	border: 2px dashed var(--border-2);
+	border-radius: var(--radius-sm);
+	background: var(--bg-2);
+	color: var(--text-2);
+	text-align: center;
+	cursor: pointer;
+	transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover,
+.dropzone.dragover {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+}
+
+.dropzone .big {
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.dropzone .sub {
+	font-size: 13px;
+	color: var(--muted);
+	max-width: 46ch;
+}
+
+.dz-icon {
+	width: 34px;
+	height: 34px;
+	color: var(--muted);
+}
+
+.upload-status {
+	margin-top: 12px;
+	display: none;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.upload-status.show {
+	display: flex;
+}
+
+.progress-track {
+	height: 6px;
+	border-radius: 999px;
+	background: var(--bg-3);
+	overflow: hidden;
+}
+
+.progress-fill {
+	height: 100%;
+	width: 0;
+	background: var(--accent);
+	transition: width 0.1s linear;
+}
+
+.progress-text {
+	font-size: 13px;
+	color: var(--text-2);
+}
+
+.skips {
+	font-size: 12.5px;
+	color: var(--warn);
+	font-family: var(--mono);
 	white-space: pre-wrap;
-	word-wrap: break-word;
+	max-height: 120px;
+	overflow: auto;
 }
 
-.policies {
+/* Toolbar ----------------------------------------------------------------- */
+
+.toolbar {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	flex-wrap: wrap;
+	padding: 14px;
+	border-top: 1px solid var(--border);
+	background: var(--bg-2);
+}
+
+.opt {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.opt label {
+	font-size: 13px;
+	color: var(--text-2);
+	font-weight: 500;
+}
+
+.input {
+	width: 210px;
+	max-width: 48vw;
+	padding: 8px 11px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-2);
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 13px;
+	outline: none;
+	transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.input::placeholder {
+	color: var(--muted);
+}
+
+.toolbar .engine {
+	margin-left: auto;
+	color: var(--muted);
+	font-family: var(--mono);
+	font-size: 12px;
+}
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 9px 16px;
+	border-radius: 999px;
+	border: 1px solid var(--border-2);
+	background: var(--bg-3);
+	color: var(--text);
+	font-weight: 500;
+	font-size: 14px;
+	transition: background 0.15s, border-color 0.15s, transform 0.1s, opacity 0.15s;
+	white-space: nowrap;
+}
+
+.btn:hover {
+	background: var(--bg-4);
+	border-color: #3b3b50;
+}
+
+.btn:active {
+	transform: translateY(1px);
+}
+
+.btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn-primary {
+	background: var(--accent);
+	border-color: var(--accent);
+	color: #fff;
+}
+
+.btn-primary:hover {
+	background: color-mix(in srgb, var(--accent) 84%, white);
+	border-color: color-mix(in srgb, var(--accent) 84%, white);
+}
+
+/* FAQ --------------------------------------------------------------------- */
+
+.faq {
+	margin-top: 48px;
+}
+
+.faq h2 {
+	font-size: 22px;
 	margin-bottom: 8px;
 }
 
-.editsCount {
-	color: #666;
-	font-size: 0.9em;
-	margin-top: 0.5em;
+.faq-item {
+	padding: 18px 0;
+	border-top: 1px solid var(--border);
 }
 
-.engineVersion {
-	color: #999;
-	font-size: 0.85em;
+.faq-item:first-of-type {
+	border-top: 0;
 }
 
-/* The info panels in the options column read as plain help text. */
-.infoPanel {
-	font-size: 0.9em;
-	line-height: 1.45;
+.faq-item h3 {
+	font-size: 16px;
+	font-weight: 600;
+	margin-bottom: 6px;
 }
 
-.infoPanel h4 {
-	margin-bottom: 0.3em;
+.faq-item p {
+	color: var(--text-2);
+	max-width: 74ch;
+}
+
+.faq-item p + p {
+	margin-top: 8px;
+}
+
+@media (max-width: 560px) {
+	.container {
+		padding: 28px 0 48px;
+	}
+	.npm-btn {
+		margin-left: 0;
+	}
+	.brand h1 {
+		font-size: 24px;
+	}
 }
