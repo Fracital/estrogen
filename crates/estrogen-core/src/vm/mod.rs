@@ -122,7 +122,7 @@ fn emit_chunk(program_json: &str, source: &str, options: &Options) -> Result<Str
     // of this spells the runtime's purpose: the names are generated and the
     // runtime body is mangled.
     Ok(format!(
-        "/* {MARKER} */\nconst {vm_name}={runtime};\n{decoder}\n{vm_name}(JSON.parse({pool_name}(0)))();\n",
+        "/* {MARKER} */const {vm_name}={runtime};{decoder}{vm_name}(JSON.parse({pool_name}(0)))();",
         runtime = runtime_iife(),
     ))
 }

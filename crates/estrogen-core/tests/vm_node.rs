@@ -311,21 +311,20 @@ fn vm_chunk_runtime_is_mangled_and_names_free() {
         .expect("a function chunk should VM-compile");
     assert!(out.contains("JSON.parse("), "expected a VM chunk:\n{out}");
 
-    // The chunk is one line per structural piece:
-    //   /* MARKER */\nconst NAME=<runtime>;\n<decoder>\nNAME(JSON.parse(..))();\n
-    // The runtime is the second line. The opcode-name scan runs against that
-    // line, not the whole chunk, because the encrypted program ships as base64
-    // and a random base64 blob can hold a short opcode substring by chance; the
-    // runtime line carries no base64, so the check there is exact.
-    let runtime_line = out.lines().nth(1).expect("the chunk has a runtime line");
+    // The chunk is a single line by construction: no stray newlines.
     assert!(
-        runtime_line.starts_with("const "),
-        "unexpected runtime line: {runtime_line}"
+        !out.contains('\n'),
+        "the VM chunk should be one line:\n{out}"
     );
+    // The opcode-name scan runs against the code with string literals removed.
+    // The encrypted program ships as base64 inside string literals and a random
+    // base64 blob can hold a short opcode substring by chance; the code outside
+    // strings carries no base64, so an opcode name there is a real leak.
+    let code = strip_string_literals(&out);
     for name in OP_NAMES {
         assert!(
-            !runtime_line.contains(name),
-            "opcode name {name} leaked into the shipped runtime"
+            !code.contains(name),
+            "opcode name {name} leaked into the shipped runtime code"
         );
     }
 
@@ -349,17 +348,39 @@ fn vm_chunk_runtime_is_mangled_and_names_free() {
         );
     }
 
-    // The runtime body is one minified line: no newline (it is a single line by
-    // construction) and no run of two or more spaces.
+    // Minified: no run of two or more spaces anywhere in the chunk.
     assert!(
-        !runtime_line.contains("  "),
+        !out.contains("  "),
         "the shipped runtime still has runs of whitespace"
     );
-    assert!(
-        out.lines().count() <= 5,
-        "the VM chunk is not compact: {} lines",
-        out.lines().count()
-    );
+}
+
+/// Blank out the content of every string and template literal, so a scan of the
+/// result sees only code. Used to keep the base64 pool from tripping the
+/// opcode-name check. A backslash escapes the next character inside a string.
+fn strip_string_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                    out.push(c);
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' || c == '`' {
+                    quote = Some(c);
+                }
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// A chunk with an out-of-subset construct still produces a valid fallback chunk
