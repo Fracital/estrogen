@@ -3,13 +3,11 @@
 //! The [`Obfuscator`](crate::Obfuscator) walks a built directory and writes each
 //! file back in place. The web demo has no such directory: a browser hands over
 //! one source string and wants the obfuscated string back. [`obfuscate_js`] runs
-//! the same literal-pool pass the directory walk runs over an app chunk, over a
-//! string, and returns the result. No file is read or written, and no thread
-//! pool is built, so it compiles and runs under `wasm32-unknown-unknown`.
+//! the same app-chunk passes as the directory walk and returns the result. It
+//! uses no filesystem or thread pool, so it runs on `wasm32-unknown-unknown`.
 //!
-//! This is the app-chunk transform only: string and template literals move into
-//! the encrypted pool, and the decoder is prepended. It does not take the proxy
-//! vendor path or the markup path, which both need a built tree to make sense.
+//! This is the app-chunk transform only: it pools string and template literals
+//! and shortens local bindings. It does not run the vendor or markup passes.
 
 use std::path::Path;
 
@@ -23,21 +21,18 @@ use crate::walk::FileKind;
 /// What an in-memory obfuscation produced.
 #[derive(Debug, Clone)]
 pub struct Obfuscated {
-    /// The obfuscated source. When nothing was eligible this is the input
-    /// unchanged.
+    /// The obfuscated source, or the original if nothing changed.
     pub code: String,
-    /// How many byte-range edits were spliced in. Zero means the input had no
-    /// string or template literal to pool, so the output equals the input.
+    /// Number of byte-range edits, including generated code and the watermark.
     pub edits: usize,
 }
 
 /// Obfuscate one JavaScript source string in memory.
 ///
-/// The source is parsed as an ES module, run through the literal-pool pass, and
-/// the edits are spliced in. The output is re-parsed and fails closed if it does
-/// not parse, and every configured canary is checked against the output, the
-/// same guarantees the file path gives. A source with no poolable literal comes
-/// back unchanged with `edits == 0`.
+/// The source is parsed as an ES module. The app-chunk passes produce one set
+/// of edits, and the result must parse and contain no configured canaries.
+/// Already watermarked input and input with no edits come back unchanged
+/// with `edits == 0`.
 ///
 /// This raises the cost of reading the code. It is not secrecy: the pool key
 /// ships in the output, right next to the decoder, so anyone can run it back.

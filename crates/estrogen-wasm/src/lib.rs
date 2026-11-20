@@ -1,8 +1,8 @@
 //! WebAssembly binding for estrogen.
 //!
-//! One export, [`obfuscate`], runs estrogen's app-chunk literal-pool pass over a
-//! JavaScript source string and returns the obfuscated source plus a count of
-//! edits. It is the engine behind the web demo: the same Rust pass the CLI runs
+//! [`obfuscate`] runs the app-chunk passes over a JavaScript source string and
+//! returns the new source and edit count. It is the engine behind the web demo:
+//! the same Rust code the CLI runs
 //! over a built file, compiled to `wasm32-unknown-unknown` and called from the
 //! browser. Nothing is read from or written to disk.
 //!
@@ -18,9 +18,9 @@ use wasm_bindgen::prelude::*;
 /// `{ code, edits }`.
 #[derive(Serialize)]
 struct Output {
-    /// The obfuscated source. Equal to the input when nothing was poolable.
+    /// The obfuscated source, or the original if nothing changed.
     code: String,
-    /// How many literals moved into the pool. Zero means the input had none.
+    /// Number of byte-range edits. Zero means no changes.
     edits: usize,
 }
 

@@ -13,10 +13,11 @@
 </div>
 
 A post-build web obfuscator. It takes a directory a bundler already produced and
-rewrites the JS, HTML and SVG in place: string and template literals into an
-encrypted per-file pool, proxy and store names into per-build substitutes, and
-embedded wasm names to match. It leaves no sensitive plaintext from the canary
-list, and it does not change what the code does.
+rewrites the JS, HTML and SVG in place. In app scripts it pools strings and
+template literals and shortens local names. In vendor scripts it replaces proxy
+and store names, plus the matching names in embedded wasm. It leaves no
+sensitive plaintext from the canary list, and it does not change what the code
+does.
 
 It also assembles the build it protects. `estrogen build` vendors packages and
 folders, from `node_modules` or a glob, into the served tree under per-build

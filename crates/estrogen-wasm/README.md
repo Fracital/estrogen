@@ -2,7 +2,7 @@
 
 The estrogen obfuscator compiled to WebAssembly, for running the pass in a
 browser. It takes one JavaScript source string and returns an obfuscated copy
-plus a count of how many literals it pooled.
+plus the number of edits.
 
 estrogen raises the cost of reading a build. It is not secrecy. The decoder key
 ships in the returned source, so the output runs back to the input in any JS
@@ -29,13 +29,13 @@ const { code, edits } = JSON.parse(
 );
 
 console.log(version()); // the engine version, e.g. "0.1.0"
-console.log(edits); // how many literals were pooled
+console.log(edits); // number of byte-range edits
 console.log(code); // the obfuscated source
 ```
 
 `obfuscate(source, seed)` returns a JSON string, so parse it. `code` is the
-obfuscated source and `edits` is how many string and template literals moved
-into the pool. It throws on a JavaScript parse error; catch it and keep your
+obfuscated source and `edits` counts the byte-range changes, including local
+renames and generated code. It throws on a JavaScript parse error; keep your
 previous output.
 
 A seed makes the output deterministic: the same source and seed give

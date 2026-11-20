@@ -177,9 +177,9 @@ const JS_OBF = 'https://github.com/javascript-obfuscator/javascript-obfuscator';
 					It works on standard JavaScript and Node source that parses, including
 					.mjs and .cjs. The browser demo runs one source string at a time through
 					the pass, or every .js, .mjs and .cjs file when you upload a folder. If
-					an input has no poolable string or template literal, the pass reports
-					zero edits and the output matches the input. A file that fails to parse
-					is copied through unchanged and noted as skipped.
+					the engine finds nothing to rewrite, it returns the input unchanged. In
+					a folder, a file that fails to parse is copied unchanged and listed as
+					skipped.
 				</p>
 			</div>
 

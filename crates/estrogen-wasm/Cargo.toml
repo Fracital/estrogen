@@ -11,11 +11,15 @@ description = "WebAssembly binding for estrogen: obfuscate one JavaScript source
 # cdylib is the wasm output; rlib lets the tests and docs build on the host.
 crate-type = ["cdylib", "rlib"]
 
-# Modern rustc emits bulk-memory and sign-extension ops by default. wasm-pack's
-# bundled wasm-opt is older than those, so it must be told to accept them or it
-# fails validation. The flags enable the same features rustc already used.
+# Accept the operations rustc emits, including saturating float conversion in
+# the OXC mangler. The wasm-pack optimizer needs these flags to validate them.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O2", "--enable-bulk-memory", "--enable-sign-ext"]
+wasm-opt = [
+    "-O2",
+    "--enable-bulk-memory",
+    "--enable-sign-ext",
+    "--enable-nontrapping-float-to-int",
+]
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false

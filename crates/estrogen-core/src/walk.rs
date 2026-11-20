@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+#[cfg(test)]
 use crate::format::MARKER;
+use crate::watermark;
 
 /// What kind of file this is, by extension. estrogen handles each kind with a
 /// different set of passes.
@@ -71,10 +73,10 @@ pub fn is_source_map(path: &Path) -> bool {
 /// Ported from `shouldProcessJs` in `obfuscate-build.mjs`: every JS chunk is in
 /// scope, with no size cap and no vendor exemption, including `sw.js` and the
 /// proxy runtime. The one gate is the already-processed marker: a file that
-/// carries [`MARKER`] has been obfuscated, and a second pass would encrypt the
-/// decoder the first pass added, so it is skipped.
+/// starts with an output watermark is skipped so a second pass does not
+/// rewrite its decoder.
 pub fn should_process_js(_path: &Path, content: &str) -> bool {
-    !content.contains(MARKER)
+    !watermark::marked_js(content)
 }
 
 /// Why a file in the walked tree is not obfuscated.
@@ -119,7 +121,7 @@ pub fn eligibility(path: &Path, content: Option<&str>) -> Eligibility {
             }
         }
     } else if let Some(text) = content {
-        if text.contains(MARKER) {
+        if watermark::marked_markup(text, kind == FileKind::Svg) {
             return Eligibility::Skip(SkipReason::AlreadyProcessed);
         }
     }
@@ -203,7 +205,7 @@ mod tests {
         assert!(should_process_js(Path::new("sw.js"), "x"));
         assert!(!should_process_js(
             Path::new("sw.js"),
-            &format!("{MARKER}x")
+            &format!("/* {MARKER} */x")
         ));
     }
 

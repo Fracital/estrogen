@@ -134,12 +134,19 @@ impl FileKeys {
         ))
     }
 
-    /// The per-file decoder name, `__frx$` followed by six hex digits, matching
-    /// `obfuscate-build.mjs`. The suffix is three bytes of the stream.
+    /// Four identifier digits encode all 24 random bits of the original suffix.
+    /// `$` is a valid first character even when the first digit is a number.
     pub fn decoder_name(&mut self) -> String {
         let mut suffix = [0u8; 3];
         self.stream.fill(&mut suffix);
-        format!("__frx${:02x}{:02x}{:02x}", suffix[0], suffix[1], suffix[2])
+        const DIGITS: &[u8; 64] =
+            b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$_";
+        let value = u32::from_be_bytes([0, suffix[0], suffix[1], suffix[2]]);
+        let mut name = String::from("$");
+        for shift in [18, 12, 6, 0] {
+            name.push(char::from(DIGITS[((value >> shift) & 63) as usize]));
+        }
+        name
     }
 }
 
@@ -189,11 +196,11 @@ mod tests {
     fn decoder_name_shape() {
         let opts = opts_with_seed(b"s", &[]);
         let name = FileKeys::new(&opts, b"x").unwrap().decoder_name();
-        assert!(name.starts_with("__frx$"));
-        assert_eq!(name.len(), "__frx$".len() + 6);
-        assert!(name["__frx$".len()..]
+        assert!(name.starts_with('$'));
+        assert_eq!(name.len(), 5);
+        assert!(name[1..]
             .bytes()
-            .all(|b| b.is_ascii_hexdigit()));
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$')));
     }
 
     #[test]

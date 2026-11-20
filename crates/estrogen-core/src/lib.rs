@@ -42,8 +42,9 @@
 //! The engine is built and tested against Fracital's
 //! `scripts/obfuscate-build.mjs`, cited per module. The passes in [`pass`]
 //! encrypt string and template literals into the ChaCha20 pool and emit its
-//! decoder ([`format`]), rename the proxy and store names in vendor files, map
-//! the embedded wasm names, and rewrite the HTML and SVG markup. The obfuscator
+//! decoder ([`mod@format`]), shorten local bindings in app scripts, rename proxy
+//! and store names in vendor files, map embedded wasm names, and rewrite HTML
+//! and SVG markup. The obfuscator
 //! also vendors files into a build ([`Obfuscator::build`]) and emits private V3
 //! source maps. The edit-and-splice core, config loading, the file walk and
 //! eligibility gate, and reporting sit underneath. [`Error::Engine`] now marks
@@ -68,6 +69,7 @@ mod sourcemap;
 mod vendor;
 pub mod walk;
 mod wasm;
+mod watermark;
 
 pub use api::{obfuscate_js, Obfuscated};
 pub use error::{Error, Result};

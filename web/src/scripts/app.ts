@@ -91,8 +91,7 @@ function runObfuscate(): void {
 		const result = JSON.parse(obfuscate(editor.getValue(), currentSeed()));
 		outputArea.value = result.code;
 		const n = result.edits as number;
-		editsCount.textContent =
-			n === 1 ? '1 literal pooled' : `${n} literals pooled`;
+		editsCount.textContent = n === 1 ? '1 edit' : `${n} edits`;
 		downloadBtn.disabled = false;
 		selectTab('output');
 	} catch (err) {
@@ -246,7 +245,7 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 	const seed = currentSeed();
 	const zip: Zippable = {};
 	const skipped: string[] = [];
-	let pooled = 0;
+	let edits = 0;
 	let obfuscated = 0;
 	let done = 0;
 
@@ -255,8 +254,9 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 			try {
 				const result = JSON.parse(obfuscate(await readText(file), seed));
 				zip[path] = encoder.encode(result.code);
-				pooled += (result.edits as number) ?? 0;
-				obfuscated += 1;
+				const count = (result.edits as number) ?? 0;
+				edits += count;
+				if (count > 0) obfuscated += 1;
 			} catch (err) {
 				// A file that fails to parse passes through unchanged, noted as a skip.
 				const message = err instanceof Error ? err.message : String(err);
@@ -269,14 +269,14 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 		done += 1;
 		const pct = Math.round((done / files.length) * 100);
 		progressFill.style.width = `${pct}%`;
-		progressText.textContent = `${done} / ${files.length} files, ${obfuscated} obfuscated, ${pooled} literals pooled`;
+		progressText.textContent = `${done} / ${files.length} files, ${obfuscated} obfuscated, ${edits} edits`;
 		if (done % 20 === 0) await new Promise((r) => setTimeout(r, 0));
 	}
 
 	if (skipped.length > 0) {
 		skips.textContent = `Passed through unchanged (parse error):\n${skipped.join('\n')}`;
 	}
-	progressText.textContent = `${files.length} files, ${obfuscated} obfuscated, ${pooled} literals pooled, ${skipped.length} skipped`;
+	progressText.textContent = `${files.length} files, ${obfuscated} obfuscated, ${edits} edits, ${skipped.length} skipped`;
 
 	const bytes = zipSync(zip, { level: 6 });
 	zipBlobUrl = URL.createObjectURL(

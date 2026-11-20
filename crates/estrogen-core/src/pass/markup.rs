@@ -50,7 +50,7 @@ const NEUTRAL_DESC: &str = "A fast, private workspace.";
 /// `engine` renames proxy names consistently with the JS files.
 pub(crate) fn collect_markup_edits(ctx: &FileContext, engine: &ProxyEngine) -> Result<EditSet> {
     // Already processed: the decoder a first run added must not be re-wrapped.
-    if ctx.source.contains(MARKER) {
+    if crate::watermark::marked_markup(ctx.source, ctx.kind == FileKind::Svg) {
         return Ok(EditSet::new());
     }
     let is_svg = ctx.kind == FileKind::Svg;
@@ -137,12 +137,8 @@ pub(crate) fn collect_markup_edits(ctx: &FileContext, engine: &ProxyEngine) -> R
 
     // Marker: an XML comment, after an optional <?xml ...?> declaration for
     // SVG so the declaration stays first; at the head for HTML.
-    let marker = format!("<!--{MARKER}-->");
-    let marker_at = if is_svg {
-        xml_decl_end(source, &lower)
-    } else {
-        0
-    };
+    let marker = format!("<!-- {MARKER} -->");
+    let marker_at = crate::watermark::markup_start(source, is_svg);
     edits.push(Edit::insert(marker_at, marker));
 
     // Fail closed: no canary may survive anywhere in the shell.
@@ -310,17 +306,6 @@ fn find_scripts(_source: &str, lower: &str) -> Vec<ScriptSpan> {
         pos = close + "</script>".len();
     }
     out
-}
-
-/// The byte offset just past an optional leading `<?xml ...?>` declaration.
-fn xml_decl_end(source: &str, lower: &str) -> usize {
-    let trimmed = source.len() - source.trim_start().len();
-    if lower[trimmed..].starts_with("<?xml") {
-        if let Some(end) = lower[trimmed..].find("?>") {
-            return trimmed + end + "?>".len();
-        }
-    }
-    0
 }
 
 /// Whether a byte can be part of an attribute name.
@@ -519,8 +504,8 @@ mod tests {
         let out = run(FileKind::Html, src);
         assert!(!out.contains("\"Scramjet\""));
         assert!(!out.contains("Go ad-free for $1"));
-        assert!(out.contains("__frx$"));
-        assert!(out.starts_with(&format!("<!--{MARKER}-->")));
+        assert!(out.contains("=(function(){"));
+        assert!(out.starts_with(&format!("<!-- {MARKER} -->")));
     }
 
     #[test]

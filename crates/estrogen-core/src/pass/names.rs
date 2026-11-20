@@ -25,7 +25,9 @@ use oxc_span::GetSpan;
 
 use crate::edit::{Edit, EditSet};
 use crate::error::{Error, Result};
-use crate::format::{PoolBuilder, MARKER};
+use crate::format::PoolBuilder;
+#[cfg(test)]
+use crate::format::MARKER;
 use crate::keys::FileKeys;
 use crate::pass::{with_parsed_js, FileContext};
 use crate::proxy::ProxyEngine;
@@ -36,9 +38,12 @@ use crate::proxy::ProxyEngine;
 /// place of the literal pass. It returns the byte-range edits; an empty set
 /// means nothing carried a proxy name and the file is left unchanged.
 pub fn collect_proxy_edits(ctx: &FileContext, engine: &ProxyEngine) -> Result<EditSet> {
+    if crate::watermark::marked_js(ctx.source) {
+        return Ok(EditSet::new());
+    }
     with_parsed_js(&ctx.path, ctx.source, |program| {
         let keys = FileKeys::new(ctx.options, ctx.source.as_bytes())?;
-        let pool = PoolBuilder::new(keys)?;
+        let pool = PoolBuilder::for_program(keys, program)?;
         let name = pool.name().to_string();
         let mut visitor = ProxyVisitor {
             source: ctx.source,
@@ -76,25 +81,8 @@ pub fn collect_proxy_edits(ctx: &FileContext, engine: &ProxyEngine) -> Result<Ed
         if let Some(err) = visitor.error {
             return Err(err);
         }
-        if visitor.pool.is_empty() && visitor.edits.is_empty() {
-            return Ok(EditSet::new());
-        }
-
-        let name = visitor.name;
-        let pool = visitor.pool.into_pool();
         let mut edits = dedupe(visitor.edits);
-        edits.push(Edit::insert(0, format!("/*{MARKER}*/")));
-        if !pool.is_empty() {
-            let prologue_end = program
-                .directives
-                .last()
-                .map(|d| d.span.end as usize)
-                .unwrap_or(0);
-            edits.push(Edit::insert(
-                prologue_end,
-                format!("{}\n", pool.emit_decoder(&name)),
-            ));
-        }
+        super::assemble_js(&mut edits, ctx.source, program, visitor.pool);
         Ok(edits)
     })
 }

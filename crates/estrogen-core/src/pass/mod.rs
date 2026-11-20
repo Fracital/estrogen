@@ -5,7 +5,7 @@
 //! reprints the AST; it locates ranges with `oxc_span` offsets and rewrites the
 //! original string. See [`crate::edit`] for why.
 //!
-//! The passes mirror `obfuscate-build.mjs`, one module each:
+//! The literal, vendor and markup transforms follow `obfuscate-build.mjs`:
 //! - [`literals`]: string and template literals into an encrypted pool.
 //! - [`names`]: the proxy and store name transform for vendor files, which also
 //!   maps the embedded wasm names through the crate's `wasm` module.
@@ -14,9 +14,10 @@
 //! A pass parses the file (so a parse failure fails closed), walks it, and
 //! returns the byte-range edits it wants; the obfuscator applies them and
 //! re-parses the output. Each JS file takes one transform: the proxy path for a
-//! vendor file, else the literal pool.
+//! vendor file, else the literal pool and local renames.
 
 pub mod literals;
+mod mangle;
 pub mod markup;
 pub mod names;
 
@@ -79,6 +80,36 @@ pub trait Pass {
     /// wants. A parse failure is returned as [`Error::Parse`], so a file estrogen
     /// cannot read never ships.
     fn collect_edits(&self, ctx: &FileContext) -> Result<EditSet>;
+}
+
+/// Insert the watermark after the hashbang and the decoder after directives.
+/// A local-only rename needs the watermark but no key or decoder in the file.
+fn assemble_js(
+    edits: &mut EditSet,
+    source: &str,
+    program: &oxc_ast::ast::Program<'_>,
+    pool: crate::format::PoolBuilder,
+) {
+    if edits.is_empty() {
+        return;
+    }
+    let start = crate::watermark::js_start(source);
+    edits.push(crate::edit::Edit::insert(
+        start,
+        format!("/* {} */", crate::format::MARKER),
+    ));
+    if !pool.is_empty() {
+        let name = pool.name().to_owned();
+        let decoder = pool.into_pool().emit_decoder(&name);
+        let (at, prefix) = program
+            .directives
+            .last()
+            .map_or((start, ""), |d| (d.span.end as usize, "\n"));
+        edits.push(crate::edit::Edit::insert(
+            at,
+            format!("{prefix}{decoder}\n"),
+        ));
+    }
 }
 
 /// Pick the OXC source type for a JS file. `.cjs` is a classic script; every
