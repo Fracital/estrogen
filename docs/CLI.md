@@ -16,6 +16,14 @@ directory, copying packages and folders in under per-build stamped names and
 obfuscating them or copying them verbatim, then obfuscates the rest. A plain
 `estrogen` run vendors nothing.
 
+`estrogen build` also writes a vendor manifest, `estrogen-vendor-manifest.json`
+under each directory, mapping each vendored file's public path to its stamped
+served path and carrying the build stamp, so the app can find what was renamed.
+Set `[options] manifest` in the config to move or disable it. See
+[Vendoring](VENDORING.md) for the config surface, the manifest shape, the
+rewrite assertions (`required` and `count`), and how a vendored `.wasm` is
+rewritten safely.
+
 ```sh
 estrogen dist
 estrogen dist public/app

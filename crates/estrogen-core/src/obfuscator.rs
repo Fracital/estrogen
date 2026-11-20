@@ -107,20 +107,39 @@ impl Obfuscator {
     pub fn build(&self, dist: &Path) -> Result<Report> {
         let mut report = Report::new(vec![dist.to_path_buf()]);
         let stamp = vendor::mint_stamp(self.options.seed.as_deref(), &self.canary_values())?;
+        let mut manifest = vendor::VendorManifest::new(&stamp);
 
         let mut vendored: HashSet<PathBuf> = HashSet::new();
         for input in &self.options.vendor {
+            // Sum each rewrite's matches across all the input's files, so a
+            // `required` or `count` assertion is about the input as a whole: the
+            // reference usually lives in one file (a loader) while others carry
+            // none.
+            let mut totals = vec![0usize; input.rewrite.len()];
             for vf in vendor::resolve(input, dist, &stamp)? {
-                let fr = self.vendor_one(&vf, input, &stamp)?;
+                let (fr, counts) = self.vendor_one(&vf, input, &stamp)?;
+                for (total, c) in totals.iter_mut().zip(counts) {
+                    *total += c;
+                }
+                manifest.add(dist, &vf);
                 vendored.insert(vf.dest);
                 report.push(fr);
             }
+            vendor::check_rewrites(input, &totals)?;
         }
 
         // Obfuscate everything else under dist (the app chunks and shells),
         // leaving the vendored files exactly as they were brought in.
         for fr in self.process_files(&walk_files(dist), &vendored, dist)? {
             report.push(fr);
+        }
+
+        // Write the manifest last, after the walk, so it is never itself walked
+        // or obfuscated. In check mode nothing is written.
+        if !self.options.check {
+            if let Some(path) = &self.options.manifest {
+                manifest.write(dist, path)?;
+            }
         }
         Ok(report)
     }
@@ -130,15 +149,27 @@ impl Obfuscator {
     /// input asks or keep it verbatim. A binary file is copied byte for byte. In
     /// every case the result is canary checked and the build fails closed on a
     /// surviving canary.
-    fn vendor_one(&self, vf: &VendorFile, input: &VendorInput, stamp: &str) -> Result<FileReport> {
+    fn vendor_one(
+        &self,
+        vf: &VendorFile,
+        input: &VendorInput,
+        stamp: &str,
+    ) -> Result<(FileReport, Vec<usize>)> {
         if let Some(parent) = vf.dest.parent() {
             fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
         let kind = FileKind::classify(&vf.dest);
 
+        // A wasm module is routed by extension, never by whether its bytes decode
+        // as UTF-8: a blind text replace over a `.wasm` corrupts its LEB128
+        // lengths. Rewrites, if any, edit only the name and data byte ranges.
+        if kind == FileKind::Wasm {
+            return self.vendor_wasm(vf, input, stamp, kind);
+        }
+
         match fs::read_to_string(&vf.src) {
             Ok(text) => {
-                let rewritten = vendor::apply_rewrites(&text, &input.rewrite, stamp);
+                let (rewritten, counts) = vendor::apply_rewrites(&text, &input.rewrite, stamp);
                 let mut set = EditSet::new();
                 if let Some(edit) = sourcemap_strip_edit(&rewritten) {
                     set.push(edit);
@@ -147,32 +178,60 @@ impl Obfuscator {
                 if !self.options.check {
                     fs::write(&vf.dest, &text).map_err(|e| Error::io(&vf.dest, e))?;
                 }
-                match input.mode {
+                let fr = match input.mode {
                     crate::options::VendorMode::Obfuscate if !self.options.check => {
                         let inner = self.obfuscate_file(&vf.dest)?;
-                        Ok(FileReport::vendored(&vf.dest, kind, inner.is_protected()))
+                        FileReport::vendored(&vf.dest, kind, inner.is_protected())
                     }
                     crate::options::VendorMode::Obfuscate => {
-                        Ok(FileReport::vendored(&vf.dest, kind, false))
+                        FileReport::vendored(&vf.dest, kind, false)
                     }
                     crate::options::VendorMode::Verbatim => {
                         self.scan_canaries(&vf.dest, text.as_bytes())?;
-                        Ok(FileReport::vendored(&vf.dest, kind, false))
+                        FileReport::vendored(&vf.dest, kind, false)
                     }
-                }
+                };
+                Ok((fr, counts))
             }
             Err(_) => {
-                // A binary file (wasm, an image): copy the bytes unchanged. Text
-                // rewrites and obfuscation do not apply; it is still canary
-                // checked.
+                // A non-wasm binary (an image, a font): copy the bytes unchanged.
+                // Text rewrites do not apply, so it contributes no matches; it is
+                // still canary checked.
                 let bytes = fs::read(&vf.src).map_err(|e| Error::io(&vf.src, e))?;
                 if !self.options.check {
                     fs::write(&vf.dest, &bytes).map_err(|e| Error::io(&vf.dest, e))?;
                 }
                 self.scan_canaries(&vf.dest, &bytes)?;
-                Ok(FileReport::vendored(&vf.dest, kind, false))
+                Ok((
+                    FileReport::vendored(&vf.dest, kind, false),
+                    vec![0; input.rewrite.len()],
+                ))
             }
         }
+    }
+
+    /// Bring one vendored wasm module in. With rewrites it edits only the name
+    /// and data byte ranges at equal length and re-validates
+    /// ([`vendor::apply_wasm_rewrites`]); with none it copies the bytes. In every
+    /// case it is canary checked and returns the per-rewrite match counts.
+    fn vendor_wasm(
+        &self,
+        vf: &VendorFile,
+        input: &VendorInput,
+        stamp: &str,
+        kind: FileKind,
+    ) -> Result<(FileReport, Vec<usize>)> {
+        let bytes = fs::read(&vf.src).map_err(|e| Error::io(&vf.src, e))?;
+        let (out, counts) = if input.rewrite.is_empty() {
+            (bytes, Vec::new())
+        } else {
+            vendor::apply_wasm_rewrites(&bytes, &input.rewrite, stamp, &vf.dest)?
+        };
+        if !self.options.check {
+            fs::write(&vf.dest, &out).map_err(|e| Error::io(&vf.dest, e))?;
+        }
+        self.scan_canaries(&vf.dest, &out)?;
+        Ok((FileReport::vendored(&vf.dest, kind, false), counts))
     }
 
     /// Fail closed if any canary appears verbatim in `bytes`.
@@ -755,6 +814,7 @@ mod tests {
         vi.rewrite = vec![Rewrite {
             find: "epoxy.wasm".to_string(),
             to: "ln.{stamp}.wasm".to_string(),
+            ..Rewrite::default()
         }];
         let obf = Obfuscator::new(vendor_opts(vec![vi])).unwrap();
         obf.build(&dist).unwrap();
@@ -866,5 +926,122 @@ mod tests {
         assert!(!dist.join("g").join("skip.css").exists());
         fs::remove_dir_all(&pkg).ok();
         fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_writes_a_vendor_manifest() {
+        let pkg = tmp_dir();
+        write(&pkg.join("sw.js"), "export const n = 1;\n");
+        let dist = tmp_dir();
+
+        let opts = vendor_opts(vec![input(&pkg, "assets", VendorMode::Verbatim, true)]);
+        let obf = Obfuscator::new(opts).unwrap();
+        obf.build(&dist).unwrap();
+
+        let stamp = vendor::mint_stamp(Some(b"vendor-seed"), &[]).unwrap();
+        let manifest = dist.join("estrogen-vendor-manifest.json");
+        assert!(manifest.exists(), "the manifest must be written under dist");
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(v["stamp"], stamp);
+        // The public path maps to the stamped served path, both relative to dist.
+        assert_eq!(
+            v["files"]["assets/sw.js"],
+            serde_json::Value::String(format!("assets/sw.{stamp}.js"))
+        );
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_check_mode_writes_no_manifest() {
+        let pkg = tmp_dir();
+        write(&pkg.join("sw.js"), "export const n = 1;\n");
+        let dist = tmp_dir();
+        let opts = Options {
+            check: true,
+            ..vendor_opts(vec![input(&pkg, "assets", VendorMode::Verbatim, true)])
+        };
+        let obf = Obfuscator::new(opts).unwrap();
+        obf.build(&dist).unwrap();
+        assert!(!dist.join("estrogen-vendor-manifest.json").exists());
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_fails_when_a_required_rewrite_misses() {
+        let pkg = tmp_dir();
+        // The loader does not mention the literal the rewrite expects: a reshape.
+        write(&pkg.join("loader.js"), "console.log('ready');\n");
+        let dist = tmp_dir();
+
+        let mut vi = input(&pkg, "assets", VendorMode::Verbatim, true);
+        vi.rewrite = vec![Rewrite {
+            find: "epoxy.wasm".to_string(),
+            to: "ln.{stamp}.wasm".to_string(),
+            ..Rewrite::default()
+        }];
+        let obf = Obfuscator::new(vendor_opts(vec![vi])).unwrap();
+        let err = obf.build(&dist).unwrap_err();
+        match err {
+            Error::Config { message, .. } => assert!(message.contains("required rewrite")),
+            other => panic!("expected a config error, got {other:?}"),
+        }
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    /// A minimal valid wasm module exporting one empty function under `name`.
+    fn wasm_exporting(name: &str) -> Vec<u8> {
+        let n = name.as_bytes();
+        let mut exp = vec![0x01, n.len() as u8];
+        exp.extend_from_slice(n);
+        exp.extend_from_slice(&[0x00, 0x00]);
+        let sec = |id: u8, body: &[u8]| {
+            let mut v = vec![id, body.len() as u8];
+            v.extend_from_slice(body);
+            v
+        };
+        let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        wasm.extend(sec(0x01, &[0x01, 0x60, 0x00, 0x00]));
+        wasm.extend(sec(0x03, &[0x01, 0x00]));
+        wasm.extend(sec(0x07, &exp));
+        wasm.extend(sec(0x0a, &[0x01, 0x02, 0x00, 0x0b]));
+        wasm
+    }
+
+    #[test]
+    fn build_rewrites_a_vendored_wasm_in_its_name_range() {
+        let pkg = tmp_dir();
+        let wasm = wasm_exporting("epoxy_add");
+        fs::write(pkg.join("core.wasm"), &wasm).unwrap();
+        let dist = tmp_dir();
+
+        let mut vi = input(&pkg, "assets", VendorMode::Verbatim, true);
+        // Same-length rename inside the wasm name range.
+        vi.rewrite = vec![Rewrite {
+            find: "epoxy".to_string(),
+            to: "ln0x0".to_string(),
+            ..Rewrite::default()
+        }];
+        let obf = Obfuscator::new(vendor_opts(vec![vi])).unwrap();
+        obf.build(&dist).unwrap();
+
+        let stamp = vendor::mint_stamp(Some(b"vendor-seed"), &[]).unwrap();
+        let dest = dist.join("assets").join(format!("core.{stamp}.wasm"));
+        // A wasm module is not UTF-8 in general, so read it as bytes.
+        let out_bytes = fs::read(&dest).unwrap();
+        assert_eq!(out_bytes.len(), wasm.len(), "the module keeps its length");
+        assert!(!bytes_contain(&out_bytes, b"epoxy_add"));
+        assert!(bytes_contain(&out_bytes, b"ln0x0_add"));
+        // It is still a walkable module.
+        assert!(crate::wasm::wasm_name_ranges(&out_bytes).is_ok());
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 }

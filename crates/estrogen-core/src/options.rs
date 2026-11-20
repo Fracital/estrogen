@@ -177,6 +177,9 @@ impl Default for ProxyConfig {
     }
 }
 
+/// The default path for the vendor manifest, under the dist root.
+pub const DEFAULT_VENDOR_MANIFEST: &str = "estrogen-vendor-manifest.json";
+
 /// The `[options]` table of an estrogen config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -185,6 +188,10 @@ struct ConfigOptions {
     jobs: Option<usize>,
     check: bool,
     vm: Option<bool>,
+    /// Where `build` writes the vendor manifest. Absent uses
+    /// [`DEFAULT_VENDOR_MANIFEST`]; an empty string turns it off. A relative path
+    /// lands under the dist root, an absolute path is used as is.
+    manifest: Option<String>,
 }
 
 /// How a vendored input is brought into the build.
@@ -201,12 +208,48 @@ pub enum VendorMode {
 
 /// One reference rewrite applied to a vendored file's text. `{stamp}` in `to`
 /// expands to the per-build stamp, so a reference can point at the stamped name.
+///
+/// A rewrite is a tripwire as much as a substitution. By default `required` is
+/// true: if `find` never appears across the input's files, the build fails
+/// instead of shipping a reshaped package with a dangling reference. This is
+/// what every reference script does by hand (Fracital and abstract-v2 both
+/// `throw` when a patched literal is missing). Set `required = false` for a
+/// rewrite that targets an optional fallback, such as the dead
+/// `new URL("epoxy.wasm")` an inline-wasm transport leaves behind. Set `count`
+/// to assert the exact number of occurrences across the input.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rewrite {
     /// The text to find.
     pub find: String,
     /// What to replace it with. `{stamp}` expands to the build stamp.
     pub to: String,
+    /// Fail the build when `find` is not present. True by default, so a package
+    /// reshape that drops the patched literal is caught at build time. Set it
+    /// false for a rewrite whose target may legitimately be absent.
+    #[serde(default = "default_required")]
+    pub required: bool,
+    /// When set, `find` must appear exactly this many times across the input's
+    /// files, or the build fails. `0` asserts the literal is absent. When unset,
+    /// `required` governs: at least one occurrence, or none required.
+    #[serde(default)]
+    pub count: Option<usize>,
+}
+
+impl Default for Rewrite {
+    fn default() -> Self {
+        Rewrite {
+            find: String::new(),
+            to: String::new(),
+            required: true,
+            count: None,
+        }
+    }
+}
+
+/// The default for [`Rewrite::required`]: true. A rewrite asserts its target is
+/// present unless told otherwise.
+fn default_required() -> bool {
+    true
 }
 
 /// One vendored input: a `[[vendor]]` table. It copies a package directory, a
@@ -269,6 +312,13 @@ pub struct Options {
     /// Inputs to copy into the dist before obfuscating, from `[[vendor]]`. Empty
     /// by default, so a plain obfuscate run vendors nothing.
     pub vendor: Vec<VendorInput>,
+    /// Where [`crate::Obfuscator::build`] writes the vendor manifest: the stamp
+    /// and the map from each vendored file's public path to its stamped served
+    /// path. A relative path lands under the dist root; an absolute path is used
+    /// as is. `None` writes no manifest. The default is
+    /// [`DEFAULT_VENDOR_MANIFEST`] under dist, so the app can locate what was
+    /// renamed.
+    pub manifest: Option<PathBuf>,
     /// Compile app chunks to the bytecode VM, the default transform for a
     /// non-vendor JS chunk. On by default. A chunk the VM cannot compile falls
     /// back to the literal-pool and name passes, so turning this off only
@@ -288,6 +338,7 @@ impl Default for Options {
             check: false,
             proxy: ProxyConfig::default(),
             vendor: Vec::new(),
+            manifest: Some(PathBuf::from(DEFAULT_VENDOR_MANIFEST)),
             vm: true,
         }
     }
@@ -314,6 +365,7 @@ impl Options {
             check: file.options.check,
             proxy: file.proxy,
             vendor: file.vendor,
+            manifest: resolve_manifest(file.options.manifest),
             vm: file.options.vm.unwrap_or(true),
         };
         opts.canaries.retain(|c| !c.value.is_empty());
@@ -321,6 +373,17 @@ impl Options {
             opts.jobs = default_jobs();
         }
         Ok(opts)
+    }
+}
+
+/// Resolve the config's `manifest` setting to a path. Absent takes
+/// [`DEFAULT_VENDOR_MANIFEST`], an empty string turns it off, any other string is
+/// the path.
+fn resolve_manifest(setting: Option<String>) -> Option<PathBuf> {
+    match setting {
+        None => Some(PathBuf::from(DEFAULT_VENDOR_MANIFEST)),
+        Some(s) if s.is_empty() => None,
+        Some(s) => Some(PathBuf::from(s)),
     }
 }
 
@@ -440,6 +503,64 @@ sourcemap = "/tmp/private-maps"
         let path = tmp_file("broken.toml", "this = = not toml");
         let err = Options::from_config(&path).unwrap_err();
         assert!(matches!(err, Error::Config { .. }));
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn manifest_defaults_on_and_is_configurable() {
+        // Absent: the default path under dist.
+        let a = tmp_file("a.toml", "");
+        assert_eq!(
+            Options::from_config(&a).unwrap().manifest,
+            Some(PathBuf::from(DEFAULT_VENDOR_MANIFEST))
+        );
+        fs::remove_file(&a).ok();
+
+        // A custom path.
+        let b = tmp_file("b.toml", "[options]\nmanifest = \"map/vendor.json\"\n");
+        assert_eq!(
+            Options::from_config(&b).unwrap().manifest,
+            Some(PathBuf::from("map/vendor.json"))
+        );
+        fs::remove_file(&b).ok();
+
+        // Empty turns it off.
+        let c = tmp_file("c.toml", "[options]\nmanifest = \"\"\n");
+        assert_eq!(Options::from_config(&c).unwrap().manifest, None);
+        fs::remove_file(&c).ok();
+    }
+
+    #[test]
+    fn rewrite_required_defaults_true_and_count_parses() {
+        let path = tmp_file(
+            "rw.toml",
+            r#"
+[[vendor]]
+from = "node_modules/epoxy"
+to = "assets/epoxy"
+
+[[vendor.rewrite]]
+find = "epoxy.wasm"
+to = "ln.{stamp}.wasm"
+
+[[vendor.rewrite]]
+find = "dead.wasm"
+to = "x"
+required = false
+
+[[vendor.rewrite]]
+find = "libcurl"
+to = "xxxxxxx"
+count = 2
+"#,
+        );
+        let o = Options::from_config(&path).unwrap();
+        let rw = &o.vendor[0].rewrite;
+        assert_eq!(rw.len(), 3);
+        assert!(rw[0].required, "required defaults to true");
+        assert_eq!(rw[0].count, None);
+        assert!(!rw[1].required);
+        assert_eq!(rw[2].count, Some(2));
         fs::remove_file(&path).ok();
     }
 }
