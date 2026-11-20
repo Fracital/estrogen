@@ -12,16 +12,23 @@ use crate::walk::{FileKind, SkipReason};
 /// What estrogen did with one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileStatus {
-    /// Eligible and obfuscated: `edits` byte-range edits were applied. The
-    /// engine is stubbed, so the identity milestone does not reach this yet.
+    /// Eligible and obfuscated: `edits` byte-range edits were applied.
     Obfuscated {
         /// How many edits were spliced in.
         edits: usize,
     },
-    /// Eligible and parsed, but no pass changed it. In the identity milestone
-    /// every eligible file lands here, because the passes return no edits.
-    /// `protected` is false: the file parsed but was not obfuscated.
+    /// Eligible and parsed, but no pass changed it: no literal, name or canary,
+    /// and no source-map comment. `protected` is false: the file parsed but was
+    /// not obfuscated, which is what `--check` flags.
     Unchanged,
+    /// Copied into the dist by a `[[vendor]]` input. `obfuscated` is true when it
+    /// was obfuscated on the way in, false when it was kept verbatim (a vendored
+    /// transport runtime). A verbatim vendored file is intentional, not a miss,
+    /// so it is not flagged as unprotected.
+    Vendored {
+        /// Whether the obfuscation pass ran over it.
+        obfuscated: bool,
+    },
     /// Not eligible, with the reason from the walk gate.
     Skipped(SkipReason),
 }
@@ -65,21 +72,36 @@ impl FileReport {
         }
     }
 
+    /// A report for a file copied in by a `[[vendor]]` input. `obfuscated` is
+    /// true when the obfuscation pass ran over it, false when it was kept
+    /// verbatim.
+    pub fn vendored(path: impl Into<PathBuf>, kind: FileKind, obfuscated: bool) -> Self {
+        FileReport {
+            path: path.into(),
+            kind,
+            status: FileStatus::Vendored { obfuscated },
+        }
+    }
+
     /// Whether this file was considered for processing (not skipped).
     pub fn is_eligible(&self) -> bool {
         !matches!(self.status, FileStatus::Skipped(_))
     }
 
-    /// Whether this file was actually obfuscated. An eligible file that was only
-    /// parsed and written back unchanged is not protected.
+    /// Whether this file was actually obfuscated: an obfuscated chunk, or a
+    /// vendored file that was obfuscated on the way in.
     pub fn is_protected(&self) -> bool {
-        matches!(self.status, FileStatus::Obfuscated { .. })
+        matches!(
+            self.status,
+            FileStatus::Obfuscated { .. } | FileStatus::Vendored { obfuscated: true }
+        )
     }
 
     /// Whether this file should have been protected but was not: eligible, yet
-    /// not obfuscated. This is what `--check` fails on.
+    /// left unchanged. A skipped or verbatim-vendored file is deliberate, so
+    /// only an unchanged eligible file counts. This is what `--check` fails on.
     pub fn is_unprotected(&self) -> bool {
-        self.is_eligible() && !self.is_protected()
+        matches!(self.status, FileStatus::Unchanged)
     }
 }
 
@@ -116,9 +138,14 @@ impl Report {
         self.files.len()
     }
 
-    /// How many files were obfuscated.
+    /// How many files were obfuscated in place (app chunks and shells). A
+    /// vendored file that was obfuscated on the way in is counted by
+    /// [`vendored`](Self::vendored), not here, so the two do not overlap.
     pub fn obfuscated(&self) -> usize {
-        self.files.iter().filter(|f| f.is_protected()).count()
+        self.files
+            .iter()
+            .filter(|f| matches!(f.status, FileStatus::Obfuscated { .. }))
+            .count()
     }
 
     /// How many eligible files were left unchanged.
@@ -134,6 +161,14 @@ impl Report {
         self.files
             .iter()
             .filter(|f| matches!(f.status, FileStatus::Skipped(_)))
+            .count()
+    }
+
+    /// How many files were copied in by a `[[vendor]]` input.
+    pub fn vendored(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|f| matches!(f.status, FileStatus::Vendored { .. }))
             .count()
     }
 

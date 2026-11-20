@@ -186,6 +186,50 @@ struct ConfigOptions {
     check: bool,
 }
 
+/// How a vendored input is brought into the build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VendorMode {
+    /// Copy the file as is. It is still source-map stripped and canary checked,
+    /// but not obfuscated, which is what a vendored transport runtime wants.
+    #[default]
+    Verbatim,
+    /// Run the obfuscation pass over the copied file on the way in.
+    Obfuscate,
+}
+
+/// One reference rewrite applied to a vendored file's text. `{stamp}` in `to`
+/// expands to the per-build stamp, so a reference can point at the stamped name.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Rewrite {
+    /// The text to find.
+    pub find: String,
+    /// What to replace it with. `{stamp}` expands to the build stamp.
+    pub to: String,
+}
+
+/// One vendored input: a `[[vendor]]` table. It copies a package directory, a
+/// folder, or a glob into the dist under a stamped neutral name, optionally
+/// rewriting references and obfuscating on the way in. This replaces the manual
+/// copy step each site keeps; the prior art is SystemYA's `prepare-stomp.mjs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendorInput {
+    /// A package directory, a folder, or a glob, relative to the working dir.
+    pub from: String,
+    /// The destination under the dist root.
+    pub to: String,
+    /// Verbatim (the default) or obfuscate on the way in.
+    #[serde(default)]
+    pub mode: VendorMode,
+    /// Insert the per-build stamp before the extension of each copied file, so
+    /// no served file names its package.
+    #[serde(default)]
+    pub stamp: bool,
+    /// Reference rewrites applied to each copied file's text.
+    #[serde(default)]
+    pub rewrite: Vec<Rewrite>,
+}
+
 /// The whole estrogen config file, before it becomes [`Options`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -194,6 +238,7 @@ struct ConfigFile {
     canary: Vec<Canary>,
     options: ConfigOptions,
     proxy: ProxyConfig,
+    vendor: Vec<VendorInput>,
 }
 
 /// Everything a run needs besides the input directories.
@@ -220,6 +265,9 @@ pub struct Options {
     pub check: bool,
     /// How the proxy vendor runtime is renamed. Defaults to Fracital's values.
     pub proxy: ProxyConfig,
+    /// Inputs to copy into the dist before obfuscating, from `[[vendor]]`. Empty
+    /// by default, so a plain obfuscate run vendors nothing.
+    pub vendor: Vec<VendorInput>,
 }
 
 impl Default for Options {
@@ -232,6 +280,7 @@ impl Default for Options {
             jobs: default_jobs(),
             check: false,
             proxy: ProxyConfig::default(),
+            vendor: Vec::new(),
         }
     }
 }
@@ -256,6 +305,7 @@ impl Options {
             jobs: file.options.jobs.unwrap_or_else(default_jobs),
             check: file.options.check,
             proxy: file.proxy,
+            vendor: file.vendor,
         };
         opts.canaries.retain(|c| !c.value.is_empty());
         if opts.jobs == 0 {

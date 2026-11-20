@@ -1,25 +1,53 @@
 //! Argument parsing and option assembly for the `estrogen` binary.
 //!
-//! [`Cli`] is the clap-derived argument set. [`Cli::build_options`] loads the
-//! config file when one is given, then overlays the flags that override it
-//! (`--canary`, `--names`, `--sourcemap`, `--seed`, `--jobs`, `--check`) and
-//! returns the [`Options`] the run uses.
+//! [`Cli`] is the clap-derived argument set. The flags live in [`Common`], shared
+//! by the default obfuscate-only run and the `build` subcommand that vendors the
+//! configured inputs into the dist first. [`Cli::build_options`] loads the config
+//! file when one is given, then overlays the flags that override it (`--canary`,
+//! `--names`, `--sourcemap`, `--seed`, `--jobs`, `--check`) and returns the
+//! [`Options`] the run uses.
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use estrogen_core::options::{load_name_map, CanaryList};
 use estrogen_core::{Error, Options};
 
-/// estrogen: a post-build web obfuscator. It rewrites a built directory in place.
+/// estrogen: a post-build web obfuscator. It rewrites a built directory in place,
+/// and with `build` it vendors the configured inputs into the dist first.
 #[derive(Debug, Parser)]
 #[command(name = "estrogen", version, about, long_about = None)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
+    /// The subcommand, or none for an obfuscate-only run.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Flags for the default obfuscate-only run.
+    #[command(flatten)]
+    pub common: Common,
+}
+
+/// The subcommands beyond the default obfuscate-only run.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Vendor the configured `[[vendor]]` inputs into the dist roots, then
+    /// obfuscate. Needs `[[vendor]]` tables in the config.
+    Build {
+        /// Flags for the build run.
+        #[command(flatten)]
+        common: Common,
+    },
+}
+
+/// The arguments shared by every run mode.
+#[derive(Debug, Clone, Args)]
+pub struct Common {
     /// One or more built directories to rewrite in place.
-    #[arg(value_name = "DIR", required = true)]
+    #[arg(value_name = "DIR")]
     pub dirs: Vec<PathBuf>,
 
-    /// estrogen config file (TOML): per-site names, canary list, options.
+    /// estrogen config file (TOML): per-site names, canary list, vendor inputs.
     #[arg(short = 'c', long = "config", value_name = "FILE")]
     pub config: Option<PathBuf>,
 
@@ -61,39 +89,53 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The active flags, from the subcommand or the top-level run.
+    pub fn common(&self) -> &Common {
+        match &self.command {
+            Some(Command::Build { common }) => common,
+            None => &self.common,
+        }
+    }
+
+    /// Whether this is a `build` run (vendor, then obfuscate).
+    pub fn is_build(&self) -> bool {
+        matches!(self.command, Some(Command::Build { .. }))
+    }
+
     /// The directories to process.
     pub fn dirs(&self) -> Vec<PathBuf> {
-        self.dirs.clone()
+        self.common().dirs.clone()
     }
 
     /// Assemble the run options: load the config, then overlay the flags.
     pub fn build_options(&self) -> Result<Options, Error> {
-        let mut options = match &self.config {
+        let common = self.common();
+        let mut options = match &common.config {
             Some(path) => Options::from_config(path)?,
             None => Options::default(),
         };
 
-        if let Some(path) = &self.canary {
+        if let Some(path) = &common.canary {
             options.canaries = CanaryList::from_json_file(path)?.canaries;
         }
-        if let Some(path) = &self.names {
+        if let Some(path) = &common.names {
             options.names = load_name_map(path)?;
         }
-        if let Some(dir) = &self.sourcemap {
+        if let Some(dir) = &common.sourcemap {
             options.sourcemap_dir = Some(dir.clone());
         }
-        if let Some(hex) = &self.seed {
+        if let Some(hex) = &common.seed {
             options.seed = Some(parse_hex(hex).map_err(|message| Error::Config {
                 path: PathBuf::from("--seed"),
                 message,
             })?);
         }
-        if let Some(jobs) = self.jobs {
+        if let Some(jobs) = common.jobs {
             if jobs > 0 {
                 options.jobs = jobs;
             }
         }
-        if self.check {
+        if common.check {
             options.check = true;
         }
 
@@ -134,28 +176,40 @@ mod tests {
     #[test]
     fn minimal_args_take_one_dir() {
         let cli = parse(&["estrogen", "dist"]);
-        assert_eq!(cli.dirs, vec![PathBuf::from("dist")]);
-        assert!(!cli.check);
-        assert!(!cli.quiet);
-        assert!(!cli.verbose);
+        assert_eq!(cli.dirs(), vec![PathBuf::from("dist")]);
+        assert!(!cli.is_build());
+        assert!(!cli.common().check);
+        assert!(!cli.common().quiet);
+        assert!(!cli.common().verbose);
     }
 
     #[test]
     fn several_dirs_are_accepted() {
         let cli = parse(&["estrogen", "dist", "aws/dist", "svg/jsdelivr"]);
-        assert_eq!(cli.dirs.len(), 3);
+        assert_eq!(cli.dirs().len(), 3);
     }
 
     #[test]
-    fn dir_is_required() {
-        assert!(Cli::try_parse_from(["estrogen"]).is_err());
+    fn no_dir_parses_with_an_empty_list() {
+        // dirs is validated in the front end, not by clap, so both run modes can
+        // share the flag set. An empty list is rejected at run time.
+        let cli = parse(&["estrogen"]);
+        assert!(cli.dirs().is_empty());
+    }
+
+    #[test]
+    fn build_subcommand_takes_dirs_and_flags() {
+        let cli = parse(&["estrogen", "build", "-c", "estrogen.toml", "dist"]);
+        assert!(cli.is_build());
+        assert_eq!(cli.dirs(), vec![PathBuf::from("dist")]);
+        assert_eq!(cli.common().config, Some(PathBuf::from("estrogen.toml")));
     }
 
     #[test]
     fn watch_flag_parses() {
         let cli = parse(&["estrogen", "--watch", "dist"]);
-        assert!(cli.watch);
-        assert!(!parse(&["estrogen", "dist"]).watch);
+        assert!(cli.common().watch);
+        assert!(!parse(&["estrogen", "dist"]).common().watch);
     }
 
     #[test]
@@ -178,14 +232,15 @@ mod tests {
             "-v",
             "dist",
         ]);
-        assert_eq!(cli.config, Some(PathBuf::from("estrogen.toml")));
-        assert_eq!(cli.canary, Some(PathBuf::from("canary.json")));
-        assert_eq!(cli.names, Some(PathBuf::from("names.json")));
-        assert_eq!(cli.sourcemap, Some(PathBuf::from("maps")));
-        assert_eq!(cli.seed.as_deref(), Some("00ff"));
-        assert_eq!(cli.jobs, Some(4));
-        assert!(cli.check);
-        assert!(cli.verbose);
+        let c = cli.common();
+        assert_eq!(c.config, Some(PathBuf::from("estrogen.toml")));
+        assert_eq!(c.canary, Some(PathBuf::from("canary.json")));
+        assert_eq!(c.names, Some(PathBuf::from("names.json")));
+        assert_eq!(c.sourcemap, Some(PathBuf::from("maps")));
+        assert_eq!(c.seed.as_deref(), Some("00ff"));
+        assert_eq!(c.jobs, Some(4));
+        assert!(c.check);
+        assert!(c.verbose);
     }
 
     #[test]
@@ -203,6 +258,7 @@ mod tests {
         assert!(opts.canaries.is_empty());
         assert!(opts.seed.is_none());
         assert!(!opts.check);
+        assert!(opts.vendor.is_empty());
     }
 
     #[test]

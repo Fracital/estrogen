@@ -11,6 +11,7 @@
 //! ([`Options::check`]) nothing is written at all; the report says what would
 //! happen.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,13 +21,14 @@ use rayon::ThreadPoolBuilder;
 use crate::edit::Edit;
 use crate::edit::EditSet;
 use crate::error::{Error, Result};
-use crate::options::Options;
+use crate::options::{Options, VendorInput};
 use crate::pass::literals::LiteralsPass;
 use crate::pass::markup::collect_markup_edits;
 use crate::pass::names::collect_proxy_edits;
 use crate::pass::{FileContext, Pass};
 use crate::proxy::ProxyEngine;
 use crate::report::{FileReport, Report};
+use crate::vendor::{self, VendorFile};
 use crate::walk::{eligibility, walk_files, Eligibility, FileKind};
 
 /// The obfuscator. Build it with [`Obfuscator::new`] from a set of options, then
@@ -67,22 +69,140 @@ impl Obfuscator {
     /// written. The run aborts on the first file that cannot be handled.
     pub fn obfuscate_dir(&self, dir: &Path) -> Result<Report> {
         let files = walk_files(dir);
+        let mut report = Report::new(vec![dir.to_path_buf()]);
+        for fr in self.process_files(&files, &HashSet::new())? {
+            report.push(fr);
+        }
+        Ok(report)
+    }
+
+    /// Obfuscate each file in `files` in parallel, skipping any path in
+    /// `exclude`, and collect the per-file reports. The first file that cannot
+    /// be handled aborts with its error.
+    fn process_files(
+        &self,
+        files: &[PathBuf],
+        exclude: &HashSet<PathBuf>,
+    ) -> Result<Vec<FileReport>> {
         let pool = ThreadPoolBuilder::new()
             .num_threads(self.options.jobs.max(1))
             .build()
             .map_err(|e| Error::Config {
-                path: dir.to_path_buf(),
+                path: PathBuf::from("<pool>"),
                 message: format!("could not start the worker pool: {e}"),
             })?;
 
-        let results: Vec<Result<FileReport>> =
-            pool.install(|| files.par_iter().map(|p| self.obfuscate_file(p)).collect());
+        let results: Vec<Result<FileReport>> = pool.install(|| {
+            files
+                .par_iter()
+                .filter(|p| !exclude.contains(*p))
+                .map(|p| self.obfuscate_file(p))
+                .collect()
+        });
+        results.into_iter().collect()
+    }
 
-        let mut report = Report::new(vec![dir.to_path_buf()]);
-        for r in results {
-            report.push(r?);
+    /// Vendor the configured `[[vendor]]` inputs into `dist`, then obfuscate the
+    /// rest of the tree. This is the build-glue entry point: it copies packages
+    /// and folders into the served tree under stamped neutral names, rewrites
+    /// their references, strips source maps, obfuscates the ones that ask for it
+    /// and the app chunks, and keeps the vendored transports verbatim but canary
+    /// checked. [`obfuscate_dir`](Self::obfuscate_dir) stays obfuscate-only.
+    ///
+    /// The per-build stamp is minted once and reused across every input, so a
+    /// reference rewritten to a stamped name matches the file that lands there.
+    pub fn build(&self, dist: &Path) -> Result<Report> {
+        let mut report = Report::new(vec![dist.to_path_buf()]);
+        let stamp = vendor::mint_stamp(self.options.seed.as_deref(), &self.canary_values())?;
+
+        let mut vendored: HashSet<PathBuf> = HashSet::new();
+        for input in &self.options.vendor {
+            for vf in vendor::resolve(input, dist, &stamp)? {
+                let fr = self.vendor_one(&vf, input, &stamp)?;
+                vendored.insert(vf.dest);
+                report.push(fr);
+            }
+        }
+
+        // Obfuscate everything else under dist (the app chunks and shells),
+        // leaving the vendored files exactly as they were brought in.
+        for fr in self.process_files(&walk_files(dist), &vendored)? {
+            report.push(fr);
         }
         Ok(report)
+    }
+
+    /// Bring one vendored file in: copy it to its destination, apply the input's
+    /// text rewrites and strip a source-map comment, then obfuscate it when the
+    /// input asks or keep it verbatim. A binary file is copied byte for byte. In
+    /// every case the result is canary checked and the build fails closed on a
+    /// surviving canary.
+    fn vendor_one(&self, vf: &VendorFile, input: &VendorInput, stamp: &str) -> Result<FileReport> {
+        if let Some(parent) = vf.dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
+        let kind = FileKind::classify(&vf.dest);
+
+        match fs::read_to_string(&vf.src) {
+            Ok(text) => {
+                let rewritten = vendor::apply_rewrites(&text, &input.rewrite, stamp);
+                let mut set = EditSet::new();
+                if let Some(edit) = sourcemap_strip_edit(&rewritten) {
+                    set.push(edit);
+                }
+                let text = set.apply(&rewritten)?;
+                if !self.options.check {
+                    fs::write(&vf.dest, &text).map_err(|e| Error::io(&vf.dest, e))?;
+                }
+                match input.mode {
+                    crate::options::VendorMode::Obfuscate if !self.options.check => {
+                        let inner = self.obfuscate_file(&vf.dest)?;
+                        Ok(FileReport::vendored(&vf.dest, kind, inner.is_protected()))
+                    }
+                    crate::options::VendorMode::Obfuscate => {
+                        Ok(FileReport::vendored(&vf.dest, kind, false))
+                    }
+                    crate::options::VendorMode::Verbatim => {
+                        self.scan_canaries(&vf.dest, text.as_bytes())?;
+                        Ok(FileReport::vendored(&vf.dest, kind, false))
+                    }
+                }
+            }
+            Err(_) => {
+                // A binary file (wasm, an image): copy the bytes unchanged. Text
+                // rewrites and obfuscation do not apply; it is still canary
+                // checked.
+                let bytes = fs::read(&vf.src).map_err(|e| Error::io(&vf.src, e))?;
+                if !self.options.check {
+                    fs::write(&vf.dest, &bytes).map_err(|e| Error::io(&vf.dest, e))?;
+                }
+                self.scan_canaries(&vf.dest, &bytes)?;
+                Ok(FileReport::vendored(&vf.dest, kind, false))
+            }
+        }
+    }
+
+    /// Fail closed if any canary appears verbatim in `bytes`.
+    fn scan_canaries(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        for canary in &self.options.canaries {
+            let needle = canary.value.as_bytes();
+            if !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle) {
+                return Err(Error::Canary {
+                    path: path.to_path_buf(),
+                    literal: canary.value.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The canary values, for the stamp mint.
+    fn canary_values(&self) -> Vec<String> {
+        self.options
+            .canaries
+            .iter()
+            .map(|c| c.value.clone())
+            .collect()
     }
 
     /// Obfuscate one file in place and report what happened to it.
@@ -363,5 +483,193 @@ mod tests {
             ..Options::default()
         };
         assert!(matches!(Obfuscator::new(opts), Err(Error::Engine(_))));
+    }
+
+    // Vendor pipeline tests.
+    use crate::options::{Rewrite, VendorInput, VendorMode};
+
+    fn write(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn vendor_opts(vendor: Vec<VendorInput>) -> Options {
+        Options {
+            seed: Some(b"vendor-seed".to_vec()),
+            vendor,
+            ..Options::default()
+        }
+    }
+
+    fn input(from: &Path, to: &str, mode: VendorMode, stamp: bool) -> VendorInput {
+        VendorInput {
+            from: from.display().to_string(),
+            to: to.to_string(),
+            mode,
+            stamp,
+            rewrite: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_vendors_a_folder_under_a_stamped_neutral_name() {
+        let pkg = tmp_dir();
+        write(&pkg.join("sw.js"), "export const n = 1;\n");
+        let dist = tmp_dir();
+
+        let opts = vendor_opts(vec![input(&pkg, "assets", VendorMode::Verbatim, true)]);
+        let obf = Obfuscator::new(opts).unwrap();
+        let report = obf.build(&dist).unwrap();
+
+        let stamp = vendor::mint_stamp(Some(b"vendor-seed"), &[]).unwrap();
+        let dest = dist.join("assets").join(format!("sw.{stamp}.js"));
+        assert!(dest.exists(), "stamped file missing: {}", dest.display());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "export const n = 1;\n");
+        assert_eq!(report.vendored(), 1);
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_obfuscate_mode_runs_the_pass() {
+        let pkg = tmp_dir();
+        write(&pkg.join("app.js"), "const a = 'secret value';\n");
+        let dist = tmp_dir();
+
+        let opts = vendor_opts(vec![input(&pkg, "a", VendorMode::Obfuscate, false)]);
+        let obf = Obfuscator::new(opts).unwrap();
+        let report = obf.build(&dist).unwrap();
+
+        let dest = dist.join("a").join("app.js");
+        let out = fs::read_to_string(&dest).unwrap();
+        assert!(out.contains(crate::format::MARKER));
+        assert!(!out.contains("'secret value'"));
+        assert_eq!(report.vendored(), 1);
+        assert!(report.protected_files().any(|f| f.path == dest));
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_rewrite_interpolates_the_stamp() {
+        let pkg = tmp_dir();
+        write(&pkg.join("loader.js"), "load('epoxy.wasm');\n");
+        let dist = tmp_dir();
+
+        let mut vi = input(&pkg, "assets", VendorMode::Verbatim, true);
+        vi.rewrite = vec![Rewrite {
+            find: "epoxy.wasm".to_string(),
+            to: "ln.{stamp}.wasm".to_string(),
+        }];
+        let obf = Obfuscator::new(vendor_opts(vec![vi])).unwrap();
+        obf.build(&dist).unwrap();
+
+        let stamp = vendor::mint_stamp(Some(b"vendor-seed"), &[]).unwrap();
+        let dest = dist.join("assets").join(format!("loader.{stamp}.js"));
+        let out = fs::read_to_string(&dest).unwrap();
+        assert!(
+            out.contains(&format!("ln.{stamp}.wasm")),
+            "rewrite missing: {out}"
+        );
+        assert!(!out.contains("epoxy.wasm"));
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_verbatim_strips_sourcemappingurl() {
+        let pkg = tmp_dir();
+        write(
+            &pkg.join("t.js"),
+            "const a = 1;\n//# sourceMappingURL=t.js.map\n",
+        );
+        let dist = tmp_dir();
+        let obf = Obfuscator::new(vendor_opts(vec![input(
+            &pkg,
+            "v",
+            VendorMode::Verbatim,
+            false,
+        )]))
+        .unwrap();
+        obf.build(&dist).unwrap();
+
+        let out = fs::read_to_string(dist.join("v").join("t.js")).unwrap();
+        assert!(
+            !out.contains("sourceMappingURL"),
+            "map link survived: {out}"
+        );
+        assert!(out.contains("const a = 1;"));
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_is_deterministic_under_a_seed() {
+        let pkg = tmp_dir();
+        write(&pkg.join("app.js"), "const a = 'x';\n");
+        let run = |dist: &Path| {
+            let obf = Obfuscator::new(vendor_opts(vec![input(
+                &pkg,
+                "a",
+                VendorMode::Obfuscate,
+                true,
+            )]))
+            .unwrap();
+            obf.build(dist).unwrap();
+        };
+        let d1 = tmp_dir();
+        let d2 = tmp_dir();
+        run(&d1);
+        run(&d2);
+        let stamp = vendor::mint_stamp(Some(b"vendor-seed"), &[]).unwrap();
+        let name = format!("app.{stamp}.js");
+        assert_eq!(
+            fs::read_to_string(d1.join("a").join(&name)).unwrap(),
+            fs::read_to_string(d2.join("a").join(&name)).unwrap()
+        );
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&d1).ok();
+        fs::remove_dir_all(&d2).ok();
+    }
+
+    #[test]
+    fn build_fails_closed_on_a_canary_in_a_vendored_file() {
+        let pkg = tmp_dir();
+        write(&pkg.join("t.js"), "// Fracital internal\nconst a = 1;\n");
+        let dist = tmp_dir();
+        let opts = Options {
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..vendor_opts(vec![input(&pkg, "v", VendorMode::Verbatim, false)])
+        };
+        let obf = Obfuscator::new(opts).unwrap();
+        let err = obf.build(&dist).unwrap_err();
+        assert!(matches!(err, Error::Canary { .. }));
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
+    }
+
+    #[test]
+    fn build_resolves_a_glob_from() {
+        let pkg = tmp_dir();
+        write(&pkg.join("keep.js"), "const a = 1;\n");
+        write(&pkg.join("skip.css"), "body{}\n");
+        let dist = tmp_dir();
+        let glob = format!("{}/**/*.js", pkg.display());
+        let obf = Obfuscator::new(vendor_opts(vec![VendorInput {
+            from: glob,
+            to: "g".to_string(),
+            mode: VendorMode::Verbatim,
+            stamp: false,
+            rewrite: Vec::new(),
+        }]))
+        .unwrap();
+        obf.build(&dist).unwrap();
+        assert!(dist.join("g").join("keep.js").exists());
+        assert!(!dist.join("g").join("skip.css").exists());
+        fs::remove_dir_all(&pkg).ok();
+        fs::remove_dir_all(&dist).ok();
     }
 }

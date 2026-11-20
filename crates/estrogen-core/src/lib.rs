@@ -60,12 +60,15 @@ pub mod options;
 pub mod pass;
 mod proxy;
 pub mod report;
+mod vendor;
 pub mod walk;
 mod wasm;
 
 pub use error::{Error, Result};
 pub use format::FORMAT_VERSION;
 pub use obfuscator::Obfuscator;
-pub use options::{Canary, CanaryList, NameMap, Options, ProxyConfig};
+pub use options::{
+    Canary, CanaryList, NameMap, Options, ProxyConfig, Rewrite, VendorInput, VendorMode,
+};
 pub use report::{FileReport, FileStatus, Report};
 pub use walk::{Eligibility, FileKind, SkipReason};
