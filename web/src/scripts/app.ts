@@ -93,6 +93,10 @@ interface OutputFile {
 	bytes: Uint8Array;
 	// The file as text, or null when it is not UTF-8 (binary, or holds NUL).
 	text: string | null;
+	// The engine's splice count, kept only to tell a rewritten file from an
+	// untouched one (which file to open first, whether it counts as obfuscated).
+	// Not shown: the count is meaningless for a VM chunk, which is one whole-file
+	// replacement.
 	edits: number;
 	skipped: boolean;
 	// The V3 source map JSON for this file, when the engine produced one. A
@@ -102,7 +106,7 @@ interface OutputFile {
 
 const obfuscateBtn = byId<HTMLButtonElement>('obfuscateBtn');
 const outputArea = byId<HTMLTextAreaElement>('output');
-const editsCount = byId('editsCount');
+const runSummary = byId('runSummary');
 const downloadBtn = byId<HTMLButtonElement>('downloadBtn');
 const downloadMapBtn = byId<HTMLButtonElement>('downloadMapBtn');
 const downloadAllBtn = byId<HTMLButtonElement>('downloadAllBtn');
@@ -207,15 +211,11 @@ function renderFiles(): void {
 		name.className = 'name';
 		name.textContent = entry.path.slice(slash + 1);
 		item.append(name);
-		if (entry.kind === 'file' && (entry.file.skipped || entry.file.edits > 0)) {
+		if (entry.kind === 'file' && entry.file.skipped) {
 			const badge = document.createElement('span');
-			badge.className = entry.file.skipped ? 'badge skip' : 'badge';
-			badge.textContent = entry.file.skipped
-				? 'skipped'
-				: String(entry.file.edits);
-			badge.title = entry.file.skipped
-				? 'Failed to parse, copied through unchanged'
-				: `${entry.file.edits} edits`;
+			badge.className = 'badge skip';
+			badge.textContent = 'skipped';
+			badge.title = 'Failed to parse, copied through unchanged';
 			item.append(badge);
 		}
 		item.addEventListener('click', () => showEntry(index));
@@ -432,12 +432,12 @@ function runObfuscate(): void {
 			],
 			'estrogen.zip',
 		);
-		editsCount.textContent = n === 1 ? '1 edit' : `${n} edits`;
+		runSummary.textContent = `1 file, ${n > 0 ? 1 : 0} obfuscated, 0 skipped`;
 		selectTab('output');
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		setOutputs([], 'estrogen.zip');
-		editsCount.textContent = `error: ${message}`;
+		runSummary.textContent = `error: ${message}`;
 		selectTab('output');
 	}
 }
@@ -449,7 +449,7 @@ obfuscateBtn.addEventListener('click', runObfuscate);
 byId('resetBtn').addEventListener('click', () => {
 	editor.setValue(SAMPLE);
 	setOutputs([], 'estrogen.zip');
-	editsCount.textContent = '';
+	runSummary.textContent = '';
 	uploadStatus.classList.remove('show');
 	downloadZipBtn.disabled = true;
 	selectTab('code');
@@ -627,7 +627,6 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 	const seed = currentSeed();
 	const results: OutputFile[] = [];
 	const skipped: string[] = [];
-	let edits = 0;
 	let obfuscated = 0;
 	let done = 0;
 
@@ -654,7 +653,6 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 					skipped: false,
 					map: mapOf(result),
 				};
-				edits += count;
 				if (count > 0) obfuscated += 1;
 			} catch (err) {
 				// A file that fails to parse passes through unchanged, noted as a skip.
@@ -668,14 +666,14 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 		results.push(out);
 		done += 1;
 		progressBar.value = Math.round((done / files.length) * 100);
-		progressText.textContent = `${done} / ${files.length} files, ${obfuscated} obfuscated, ${edits} edits`;
+		progressText.textContent = `${done} / ${files.length} files, ${obfuscated} obfuscated`;
 		if (done % 20 === 0) await new Promise((r) => setTimeout(r, 0));
 	}
 
 	if (skipped.length > 0) {
 		skips.textContent = `Passed through unchanged (parse error):\n${skipped.join('\n')}`;
 	}
-	const summary = `${files.length} files, ${obfuscated} obfuscated, ${edits} edits, ${skipped.length} skipped`;
+	const summary = `${files.length} files, ${obfuscated} obfuscated, ${skipped.length} skipped`;
 	progressText.textContent = summary;
 
 	const top = files[0]?.path.split('/')[0];
@@ -683,7 +681,7 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 		results,
 		top && top !== files[0]?.file.name ? `${top}.estrogen.zip` : 'estrogen.zip',
 	);
-	editsCount.textContent = summary;
+	runSummary.textContent = summary;
 	downloadZipBtn.disabled = false;
 	selectTab('output');
 }
@@ -721,6 +719,6 @@ init()
 		const message = err instanceof Error ? err.message : String(err);
 		obfuscateBtn.disabled = true;
 		obfuscateBtn.textContent = 'engine failed';
-		editsCount.textContent = message;
+		runSummary.textContent = message;
 		console.error(err);
 	});

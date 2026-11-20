@@ -125,8 +125,8 @@ fn print_report(report: &Report, verbose: bool) {
         for file in &report.files {
             let path = display_path(&file.path);
             match &file.status {
-                FileStatus::Obfuscated { edits } => {
-                    println!("  obfuscated  {path}  ({edits} edits)");
+                FileStatus::Obfuscated => {
+                    println!("  obfuscated  {path}");
                 }
                 FileStatus::Unchanged => {
                     println!("  unchanged   {path}");

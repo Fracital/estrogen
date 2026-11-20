@@ -334,7 +334,6 @@ impl Obfuscator {
             return Ok(FileReport::unchanged(path, kind));
         }
 
-        let edit_count = edits.len();
         let rewritten = edits.apply(&source)?;
         // Fail closed: a JS chunk that no longer parses is a pass bug, and estrogen
         // never writes a broken chunk over a working one.
@@ -357,7 +356,7 @@ impl Obfuscator {
                 self.write_sourcemap(path, root, &source, &edits)?;
             }
         }
-        Ok(FileReport::obfuscated(path, kind, edit_count))
+        Ok(FileReport::obfuscated(path, kind))
     }
 
     /// Try to compile an app chunk to the bytecode VM, the default transform for

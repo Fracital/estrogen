@@ -12,11 +12,9 @@ use crate::walk::{FileKind, SkipReason};
 /// What estrogen did with one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileStatus {
-    /// Eligible and obfuscated: `edits` byte-range edits were applied.
-    Obfuscated {
-        /// How many edits were spliced in.
-        edits: usize,
-    },
+    /// Eligible and obfuscated: a literal/name rewrite was spliced in, or the
+    /// chunk was replaced by its VM bytecode.
+    Obfuscated,
     /// Eligible and parsed, but no pass changed it: no literal, name or canary,
     /// and no source-map comment. `protected` is false: the file parsed but was
     /// not obfuscated, which is what `--check` flags.
@@ -45,12 +43,12 @@ pub struct FileReport {
 }
 
 impl FileReport {
-    /// A report for an eligible file that was obfuscated with `edits` edits.
-    pub fn obfuscated(path: impl Into<PathBuf>, kind: FileKind, edits: usize) -> Self {
+    /// A report for an eligible file that was obfuscated.
+    pub fn obfuscated(path: impl Into<PathBuf>, kind: FileKind) -> Self {
         FileReport {
             path: path.into(),
             kind,
-            status: FileStatus::Obfuscated { edits },
+            status: FileStatus::Obfuscated,
         }
     }
 
@@ -93,7 +91,7 @@ impl FileReport {
     pub fn is_protected(&self) -> bool {
         matches!(
             self.status,
-            FileStatus::Obfuscated { .. } | FileStatus::Vendored { obfuscated: true }
+            FileStatus::Obfuscated | FileStatus::Vendored { obfuscated: true }
         )
     }
 
@@ -144,7 +142,7 @@ impl Report {
     pub fn obfuscated(&self) -> usize {
         self.files
             .iter()
-            .filter(|f| matches!(f.status, FileStatus::Obfuscated { .. }))
+            .filter(|f| matches!(f.status, FileStatus::Obfuscated))
             .count()
     }
 
@@ -213,7 +211,7 @@ mod tests {
     #[test]
     fn counts_add_up() {
         let r = report_with(vec![
-            FileReport::obfuscated("a.js", FileKind::Js, 3),
+            FileReport::obfuscated("a.js", FileKind::Js),
             FileReport::unchanged("b.js", FileKind::Js),
             FileReport::skipped("c.css", FileKind::Other, SkipReason::Policy),
             FileReport::skipped("d.js.map", FileKind::Other, SkipReason::SourceMap),
@@ -233,7 +231,7 @@ mod tests {
 
     #[test]
     fn obfuscated_file_is_protected() {
-        let r = report_with(vec![FileReport::obfuscated("a.js", FileKind::Js, 2)]);
+        let r = report_with(vec![FileReport::obfuscated("a.js", FileKind::Js)]);
         assert!(!r.has_unprotected());
         assert_eq!(r.obfuscated(), 1);
     }
@@ -249,7 +247,7 @@ mod tests {
 
     #[test]
     fn absorb_merges_files() {
-        let mut a = report_with(vec![FileReport::obfuscated("a.js", FileKind::Js, 1)]);
+        let mut a = report_with(vec![FileReport::obfuscated("a.js", FileKind::Js)]);
         let b = report_with(vec![FileReport::unchanged("b.js", FileKind::Js)]);
         a.absorb(b);
         assert_eq!(a.total(), 2);
