@@ -18,6 +18,17 @@ fn transform(source: &str) -> String {
     obfuscate_js(source, &options(b"mangle-node")).unwrap().code
 }
 
+/// The edit-and-splice path with the VM off, so the top-level rename and the
+/// export rewrite run (the VM path is a separate whole-file replacement).
+fn splice(source: &str) -> String {
+    let opts = Options {
+        seed: Some(b"toplevel-node".to_vec()),
+        vm: false,
+        ..Options::default()
+    };
+    obfuscate_js(source, &opts).unwrap().code
+}
+
 fn compare_in_node(source: &str, output: &str, probe: &str) {
     let driver = format!(
         "import assert from 'node:assert/strict';\n\
@@ -211,4 +222,74 @@ fn escaped_local_binding_does_not_shadow_the_decoder() {
     // but the raw source does not contain the decoder name.
     let source = r"export function label() { const $aaaa = () => 7; return [$aaaa(), 'apricot']; }";
     check_decoder_collision(source, 14_994_058, "api.label()");
+}
+
+#[test]
+fn an_inline_const_export_is_hidden_but_resolves_by_name() {
+    let source =
+        "export const proxyRouteCookie = 1; export function readCookie() { return proxyRouteCookie; }";
+    let output = splice(source);
+    assert!(
+        !output.contains("export const proxyRouteCookie"),
+        "the inline export was not rewritten: {output}"
+    );
+    assert!(
+        output.contains("as proxyRouteCookie }"),
+        "the public name was dropped: {output}"
+    );
+    // The binding is hidden: only the public export name keeps the long spelling.
+    assert_eq!(output.matches("proxyRouteCookie").count(), 1, "{output}");
+    compare_module(source, &output, "[api.proxyRouteCookie, api.readCookie()]");
+}
+
+#[test]
+fn a_shorthand_export_resolves_after_the_binding_is_hidden() {
+    let source = "const internalBinding = 41; export function bump() { return internalBinding + 1; } export { internalBinding };";
+    let output = splice(source);
+    assert!(
+        !output.contains("const internalBinding"),
+        "binding not renamed: {output}"
+    );
+    assert!(
+        output.contains("as internalBinding }"),
+        "public name dropped: {output}"
+    );
+    compare_module(source, &output, "[api.internalBinding, api.bump()]");
+}
+
+#[test]
+fn an_aliased_export_keeps_its_alias_and_resolves() {
+    let source = "const localThing = 7; export { localThing as publicThing };";
+    let output = splice(source);
+    assert!(
+        !output.contains("localThing as"),
+        "local binding not renamed: {output}"
+    );
+    assert!(
+        output.contains("as publicThing }"),
+        "alias dropped: {output}"
+    );
+    compare_module(source, &output, "api.publicThing");
+}
+
+#[test]
+fn a_string_named_export_keeps_the_string_form_and_resolves() {
+    let source = "const localThing = 9; export { localThing as \"weird-name\" };";
+    let output = splice(source);
+    assert!(
+        output.contains("as \"weird-name\" }"),
+        "string export name dropped: {output}"
+    );
+    compare_module(source, &output, "api['weird-name']");
+}
+
+#[test]
+fn export_default_resolves_after_locals_are_hidden() {
+    let source = "const helperValue = 5; export default helperValue + 1;";
+    let output = splice(source);
+    assert!(
+        !output.contains("helperValue"),
+        "top-level local not renamed: {output}"
+    );
+    compare_module(source, &output, "api.default");
 }

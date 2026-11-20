@@ -1,16 +1,27 @@
-//! Shorten JavaScript locals without reprinting the AST.
+//! Shorten JavaScript names without reprinting the AST.
 //!
 //! OXC resolves each occurrence and assigns short names without changing scope
 //! resolution. This pass only writes identifier tokens. A shorthand property
 //! keeps its key and expands to `key:short` when its local binding changes.
+//!
+//! In a file that has `import` or `export` syntax (so it is an ES module, not a
+//! classic script whose top-level names may be globals) the pass also renames
+//! top-level bindings. An exported binding keeps the public name importers use:
+//! `export { proxyRouteCookie }` becomes `export { a as proxyRouteCookie }`, and
+//! `export const proxyRouteCookie = v` becomes `const a = v; export { a as
+//! proxyRouteCookie }`. The public export name stays a visible literal, because
+//! a static export name must be an identifier or a string literal, never a
+//! run-time expression. See `docs/TOPLEVEL-MANGLE.md`.
 
 use std::collections::{HashMap, HashSet};
 
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, Expression, Program};
+use oxc_ast::ast::{
+    BindingIdentifier, BindingPattern, Declaration, Expression, ModuleExportName, Program,
+};
 use oxc_ast::AstKind;
 use oxc_mangler::{MangleOptions, MangleOptionsKeepNames, Mangler};
 use oxc_semantic::{SemanticBuilder, SymbolId};
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::edit::{Edit, EditSet};
 use crate::error::Result;
@@ -41,6 +52,21 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     let scoping = semantic.scoping();
     let mut occurrences: HashMap<SymbolId, Occurrences<'_>> = HashMap::new();
     let mut shorthand = HashSet::new();
+    // Export-specifier locals that are shorthand (`export { x }`, where the local
+    // and the public name are the same token). Renaming the local here must keep
+    // the public name: `x` becomes `<mangled> as x`.
+    let mut export_shorthand: HashSet<Span> = HashSet::new();
+    // Symbols named by any `export { ... }` specifier. These are not candidates
+    // for the inline-export rename, since oxc does not rename a specifier local
+    // (it is a plain reference), so a fresh rename would break the specifier.
+    let mut exported_by_specifier: HashSet<SymbolId> = HashSet::new();
+    // `export const/let/var NAME = value` bindings oxc keeps, which the pass may
+    // rename itself and re-expose under the old public name.
+    let mut inline_exports: Vec<InlineExport<'_>> = Vec::new();
+    // Whether the file has module syntax, which proves it is a module and makes
+    // top-level renaming safe.
+    let mut has_module_syntax = false;
+
     for node in semantic.nodes().iter() {
         match node.kind() {
             // A with object can intercept a lookup that appears to be lexical.
@@ -101,9 +127,57 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
             // across both bindings, not only the one on the declaration node.
             AstKind::Function(function) => reserve_binding(function.id.as_ref(), &mut options),
             AstKind::Class(class) => reserve_binding(class.id.as_ref(), &mut options),
+            // Module syntax proves the file is a module, so its top-level
+            // bindings are module-scoped, not global.
+            AstKind::ImportDeclaration(_) => {
+                has_module_syntax = true;
+            }
+            AstKind::ExportNamedDeclaration(_)
+            | AstKind::ExportDefaultDeclaration(_)
+            | AstKind::ExportAllDeclaration(_)
+            | AstKind::ExportFromDeclaration(_) => {
+                has_module_syntax = true;
+            }
+            AstKind::ExportDeclaration(decl) => {
+                has_module_syntax = true;
+                if let Some(inline) = inline_export(decl.span, &decl.declaration) {
+                    inline_exports.push(inline);
+                }
+            }
+            // Never rename an import binding: the imported name is the other
+            // module's contract, and the pass does not rewrite import specifiers.
+            AstKind::ImportSpecifier(spec) => {
+                has_module_syntax = true;
+                options.reserved.insert(spec.local.name.as_str().into());
+            }
+            AstKind::ImportDefaultSpecifier(spec) => {
+                has_module_syntax = true;
+                options.reserved.insert(spec.local.name.as_str().into());
+            }
+            AstKind::ImportNamespaceSpecifier(spec) => {
+                has_module_syntax = true;
+                options.reserved.insert(spec.local.name.as_str().into());
+            }
+            AstKind::ExportSpecifier(spec) => {
+                if let ModuleExportName::IdentifierReference(local) = &spec.local {
+                    if let Some(symbol) = local
+                        .reference_id
+                        .get()
+                        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    {
+                        exported_by_specifier.insert(symbol);
+                    }
+                    if spec.local.span() == spec.exported.span() {
+                        export_shorthand.insert(spec.local.span());
+                    }
+                }
+            }
             _ => {}
         }
     }
+
+    // Top-level renaming is safe only once the file is known to be a module.
+    options.top_level = Some(has_module_syntax);
 
     options.reserved.extend(
         occurrences
@@ -114,6 +188,14 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     if occurrences.is_empty() {
         return Ok(EditSet::new());
     }
+    // A snapshot of the reserved names, read back after the mangler takes the
+    // options by value, to keep a fresh name clear of them.
+    let reserved_snapshot: Vec<String> = options
+        .reserved
+        .iter()
+        .map(|name| name.as_str().to_string())
+        .collect();
+
     Mangler::new()
         .with_options(options)
         .build_with_semantic(&mut semantic, program);
@@ -149,22 +231,91 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
         }
     }
 
+    // Final name for every symbol the pass renames. OXC's renames come first;
+    // the inline-export bindings OXC kept get a fresh name the pass allocates.
+    let mut final_names: HashMap<SymbolId, String> = HashMap::new();
+    for (symbol, entry) in &occurrences {
+        let target = scoping.symbol_name(*symbol);
+        if target != entry.name && !blocked.contains(entry.name) {
+            final_names.insert(*symbol, target.to_string());
+        }
+    }
+
+    let mut inline_rewrites: Vec<InlineRewrite> = Vec::new();
+    if has_module_syntax && !inline_exports.is_empty() {
+        let mut forbidden: HashSet<String> = HashSet::new();
+        forbidden.extend(scoping.symbol_names().map(str::to_string));
+        forbidden.extend(
+            scoping
+                .root_unresolved_references()
+                .keys()
+                .map(|name| name.as_str().to_string()),
+        );
+        forbidden.extend(reserved_snapshot);
+        for inline in &inline_exports {
+            // Skip a binding another export specifier also names, one oxc already
+            // renamed, or one the shorten check blocked: a fresh rename there is
+            // either unsafe or redundant.
+            if exported_by_specifier.contains(&inline.symbol)
+                || final_names.contains_key(&inline.symbol)
+                || blocked.contains(inline.name)
+            {
+                continue;
+            }
+            if scoping.symbol_name(inline.symbol) != inline.name {
+                continue; // oxc changed it against expectation; leave it alone.
+            }
+            let Some(fresh) = fresh_name(&forbidden, inline.name.len()) else {
+                continue; // no shorter name is free; leave the export unchanged.
+            };
+            forbidden.insert(fresh.clone());
+            final_names.insert(inline.symbol, fresh.clone());
+            inline_rewrites.push(InlineRewrite {
+                export_start: inline.export_span.start as usize,
+                decl_start: inline.decl_span.start as usize,
+                export_end: inline.export_span.end as usize,
+                fresh,
+                public: inline.name.to_string(),
+            });
+        }
+    }
+
     let mut edits = EditSet::new();
     for (symbol, entry) in occurrences {
-        let target = scoping.symbol_name(symbol);
-        if target == entry.name || blocked.contains(entry.name) {
+        let Some(final_name) = final_names.get(&symbol) else {
             continue;
-        }
+        };
         for span in entry.spans {
             let start = span.start as usize;
             let end = span.end as usize;
-            let replacement = if shorthand.contains(&span) {
-                format!("{}:{target}", &source[start..end])
+            let replacement = if export_shorthand.contains(&span) {
+                // `export { x }` -> `export { <mangled> as x }`.
+                format!("{final_name} as {}", format_export_name(entry.name))
+            } else if shorthand.contains(&span) {
+                format!("{}:{final_name}", &source[start..end])
             } else {
-                target.to_owned()
+                final_name.clone()
             };
             edits.push(Edit::replace(start, end, replacement));
         }
+    }
+    for rewrite in inline_rewrites {
+        // Drop the `export ` keyword before the declaration.
+        edits.push(Edit::replace(
+            rewrite.export_start,
+            rewrite.decl_start,
+            String::new(),
+        ));
+        // Re-expose the binding under its old public name. The leading `;`
+        // terminates the declaration whether or not it already ended in one.
+        edits.push(Edit::insert(
+            rewrite.export_end,
+            format!(
+                ";export {{ {} as {} }};",
+                rewrite.fresh,
+                format_export_name(&rewrite.public)
+            ),
+        ));
     }
     Ok(edits)
 }
@@ -172,6 +323,23 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
 struct Occurrences<'a> {
     name: &'a str,
     spans: Vec<Span>,
+}
+
+/// A `export const/let/var NAME = value` the pass may rename and re-expose.
+struct InlineExport<'a> {
+    symbol: SymbolId,
+    name: &'a str,
+    export_span: Span,
+    decl_span: Span,
+}
+
+/// The edits that hide one inline-declared export binding.
+struct InlineRewrite {
+    export_start: usize,
+    decl_start: usize,
+    export_end: usize,
+    fresh: String,
+    public: String,
 }
 
 fn occurrence<'a>(
@@ -205,6 +373,158 @@ fn keep_inferred_name(
             reserve_binding(Some(id), options);
         }
     }
+}
+
+/// An inline export the pass can hide: a single `const`/`let`/`var` declarator
+/// bound to one identifier, whose value is not a function or class (whose
+/// `.name` an importer could read). Everything else returns `None` and is left
+/// as oxc kept it.
+fn inline_export<'a>(export_span: Span, declaration: &Declaration<'a>) -> Option<InlineExport<'a>> {
+    let Declaration::VariableDeclaration(var) = declaration else {
+        return None;
+    };
+    if var.declarations.len() != 1 {
+        return None;
+    }
+    let declarator = &var.declarations[0];
+    let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+        return None;
+    };
+    if let Some(init) = &declarator.init {
+        if init.is_anonymous_function_definition() {
+            return None;
+        }
+    }
+    let symbol = id.symbol_id.get()?;
+    Some(InlineExport {
+        symbol,
+        name: id.name.as_str(),
+        export_span,
+        decl_span: var.span,
+    })
+}
+
+/// A public export name for the `as` clause: the identifier itself when it is a
+/// valid identifier, else a double-quoted string (the ES2022 arbitrary module
+/// name form). A binding name is always a valid identifier, so the string form
+/// only guards a public name that is not.
+fn format_export_name(name: &str) -> String {
+    if is_identifier_name(name) {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Whether `name` is a plain ASCII JavaScript identifier. Unicode identifiers
+/// are valid but are treated as needing the string form, which stays correct.
+fn is_identifier_name(name: &str) -> bool {
+    let mut chars = name.bytes();
+    match chars.next() {
+        Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {}
+        _ => return false,
+    }
+    chars.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+}
+
+const FIRST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
+const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$";
+
+/// The shortest identifier shorter than `max_len` that is free: not in
+/// `forbidden` and not a reserved word. Returns `None` when no candidate of
+/// length one or two qualifies, in which case the caller leaves the binding
+/// alone rather than make the output longer.
+fn fresh_name(forbidden: &HashSet<String>, max_len: usize) -> Option<String> {
+    if max_len <= 1 {
+        return None;
+    }
+    let mut n: u64 = 0;
+    loop {
+        let name = nth_name(n);
+        if name.len() >= max_len || name.len() > 2 {
+            return None;
+        }
+        if !is_reserved_word(&name) && !forbidden.contains(&name) {
+            return Some(name);
+        }
+        n += 1;
+    }
+}
+
+/// The `n`th candidate identifier, shortest first: 54 one-character names, then
+/// the two-character names, and so on.
+fn nth_name(mut n: u64) -> String {
+    let mut len = 1usize;
+    loop {
+        let count = 54u64 * 64u64.pow((len - 1) as u32);
+        if n < count {
+            break;
+        }
+        n -= count;
+        len += 1;
+    }
+    let mut bytes = vec![0u8; len];
+    for slot in bytes.iter_mut().skip(1).rev() {
+        *slot = REST[(n % 64) as usize];
+        n /= 64;
+    }
+    bytes[0] = FIRST[(n % 54) as usize];
+    String::from_utf8(bytes).expect("ascii name")
+}
+
+/// Whether `name` is a word that cannot be a binding name. A one-character name
+/// never is; this guards the two-character names (`if`, `in`, `do`, `of`, `as`).
+fn is_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "do" | "if"
+            | "in"
+            | "for"
+            | "let"
+            | "new"
+            | "try"
+            | "var"
+            | "case"
+            | "else"
+            | "enum"
+            | "eval"
+            | "null"
+            | "this"
+            | "true"
+            | "void"
+            | "with"
+            | "await"
+            | "break"
+            | "catch"
+            | "class"
+            | "const"
+            | "false"
+            | "super"
+            | "throw"
+            | "while"
+            | "yield"
+            | "delete"
+            | "export"
+            | "import"
+            | "return"
+            | "static"
+            | "switch"
+            | "typeof"
+            | "default"
+            | "extends"
+            | "finally"
+            | "continue"
+            | "debugger"
+            | "function"
+            | "arguments"
+            | "instanceof"
+            // Contextual words the pass already keeps out of the pool.
+            | "as"
+            | "of"
+            | "async"
+            | "get"
+            | "set"
+    )
 }
 
 #[cfg(test)]
@@ -272,5 +592,92 @@ mod tests {
     fn leaves_dynamic_with_scopes_alone() {
         let input = "function demo(longName) { with ({ longName: 1 }) { return longName; } }";
         assert_eq!(mangle(input, SourceType::cjs()), input);
+    }
+
+    #[test]
+    fn a_script_keeps_its_top_level_names() {
+        // No module syntax, so the file might be a classic script whose top-level
+        // `var` and `function` are globals. The pass must not rename them.
+        let input = "var topLevelGlobal = 1; function topLevelHelper() { return topLevelGlobal; }";
+        assert_eq!(mangle(input, SourceType::cjs()), input);
+    }
+
+    #[test]
+    fn a_shorthand_export_keeps_its_public_name() {
+        let input =
+            "const internalBinding = 1; useIt(internalBinding); export { internalBinding };";
+        let output = mangle(input, SourceType::mjs());
+        assert!(!output.contains("const internalBinding"));
+        // The public name survives behind an `as` clause.
+        assert!(output.contains("as internalBinding }"));
+    }
+
+    #[test]
+    fn an_aliased_export_keeps_its_public_alias() {
+        let input =
+            "const internalBinding = 1; useIt(internalBinding); export { internalBinding as publicName };";
+        let output = mangle(input, SourceType::mjs());
+        assert!(!output.contains("internalBinding as"));
+        assert!(output.contains("as publicName }"));
+    }
+
+    #[test]
+    fn an_inline_const_export_is_renamed_and_re_exposed() {
+        let input = "export const proxyRouteCookie = 1; useIt(proxyRouteCookie);";
+        let output = mangle(input, SourceType::mjs());
+        assert!(!output.contains("export const proxyRouteCookie"));
+        assert!(output.contains("as proxyRouteCookie }"));
+        // The binding and its reference moved together.
+        assert_eq!(output.matches("proxyRouteCookie").count(), 1);
+    }
+
+    #[test]
+    fn a_non_identifier_export_name_uses_the_string_form() {
+        let input = "const internalBinding = 1; useIt(internalBinding); export { internalBinding as \"weird-name\" };";
+        let output = mangle(input, SourceType::mjs());
+        assert!(output.contains("as \"weird-name\" }"));
+    }
+
+    #[test]
+    fn an_imported_binding_is_left_unmangled() {
+        let input = "import { importedName } from './m'; useIt(importedName);";
+        let output = mangle(input, SourceType::mjs());
+        assert!(output.contains("import { importedName }"));
+        // The reference keeps the imported name too.
+        assert_eq!(output.matches("importedName").count(), 2);
+    }
+
+    #[test]
+    fn a_re_export_is_left_unmangled() {
+        let input = "export { somethingElse } from './m';";
+        assert_eq!(mangle(input, SourceType::mjs()), input);
+    }
+
+    #[test]
+    fn an_exported_function_keeps_its_name() {
+        // A function `.name` is observable, so the inline-export rename skips it.
+        let input = "export function exportedFunction() { return 1; }";
+        let output = mangle(input, SourceType::mjs());
+        assert!(output.contains("export function exportedFunction"));
+    }
+
+    #[test]
+    fn format_export_name_quotes_only_non_identifiers() {
+        assert_eq!(format_export_name("plainName"), "plainName");
+        assert_eq!(format_export_name("$weird_1"), "$weird_1");
+        assert_eq!(format_export_name("weird-name"), "\"weird-name\"");
+        assert_eq!(format_export_name("has space"), "\"has space\"");
+    }
+
+    #[test]
+    fn fresh_name_is_short_free_and_not_a_keyword() {
+        let mut forbidden = HashSet::new();
+        forbidden.insert("a".to_string());
+        let name = fresh_name(&forbidden, 10).unwrap();
+        assert!(name.len() < 10);
+        assert_ne!(name, "a");
+        assert!(!is_reserved_word(&name));
+        // A one-character original cannot be shortened.
+        assert_eq!(fresh_name(&HashSet::new(), 1), None);
     }
 }
