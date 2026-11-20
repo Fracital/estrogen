@@ -161,7 +161,7 @@ fn vm_bytecode_matches_native_eval() {
          const fails = [];\n\
          for (const c of CASES) {{\n\
          \tlet vm, nat;\n\
-         \ttry {{ vm = __mk.createRuntime(c.program).run(); }} catch (e) {{ vm = {{ __err: e && e.constructor && e.constructor.name }}; }}\n\
+         \ttry {{ vm = __mk(c.program)(); }} catch (e) {{ vm = {{ __err: e && e.constructor && e.constructor.name }}; }}\n\
          \ttry {{ nat = (0, eval)(c.src); }} catch (e) {{ nat = {{ __err: e && e.constructor && e.constructor.name }}; }}\n\
          \tconst a = JSON.stringify(vm), b = JSON.stringify(nat);\n\
          \tif (!(Object.is(vm, nat) || a === b)) fails.push(c.src + '  vm=' + a + '  native=' + b);\n\
@@ -234,17 +234,24 @@ fn embedded_runtime_has_no_comments() {
         !runtime.contains('\n'),
         "embedded runtime still carries source newlines"
     );
-    // A string literal in the runtime survives minification intact.
+    // A string literal in the runtime survives minification intact (quote style
+    // is codegen's choice, so match the inner text only).
     assert!(
-        runtime.contains("'estrogen vm: '"),
-        "a runtime string literal was mangled by minification"
+        runtime.contains("Cannot access a lexical binding before initialization"),
+        "a runtime string literal was lost in minification"
     );
-    // It is a valid expression that node can evaluate and that exposes the entry
-    // point the chunk calls.
+    // The mangled, minified runtime is one compact line: no run of two or more
+    // spaces and no newline survive.
+    assert!(
+        !runtime.contains("  "),
+        "the minified runtime still has runs of whitespace"
+    );
+    // It is a valid expression that node can evaluate: it is the factory, and
+    // calling it with a program returns the entry function the chunk runs.
     if node_available("embedded_runtime_has_no_comments") {
         let script = format!(
             "const mk = {runtime};\n\
-             if (typeof mk.createRuntime !== 'function') {{ console.error('no createRuntime'); process.exit(1); }}\n\
+             if (typeof mk !== 'function') {{ console.error('no factory'); process.exit(1); }}\n\
              console.log('OK');\n",
             runtime = runtime,
         );
@@ -268,7 +275,7 @@ fn vm_function_chunk_leaks_no_plaintext() {
     let out = try_compile_chunk(src, &opts)
         .expect("compile should not error")
         .expect("a function chunk should VM-compile");
-    assert!(out.contains("createRuntime"), "expected a VM chunk:\n{out}");
+    assert!(out.contains("JSON.parse("), "expected a VM chunk:\n{out}");
     assert!(
         !out.contains("topSecretCanaryValue"),
         "the string literal leaked in the clear"
@@ -280,6 +287,78 @@ fn vm_function_chunk_leaks_no_plaintext() {
     assert!(
         !out.contains("reveal"),
         "the function name leaked in the clear"
+    );
+}
+
+/// The shipped VM runtime leaks no opcode name and no readable runtime
+/// identifier, and its body is one minified line. This is the obfuscation
+/// guarantee for the runtime itself, on top of the per-chunk canary scan.
+#[test]
+fn vm_chunk_runtime_is_mangled_and_names_free() {
+    use estrogen_core::vm::opcodes::OP_NAMES;
+
+    let opts = Options {
+        seed: Some(b"leak-scan-seed".to_vec()),
+        ..Options::default()
+    };
+    // A chunk that exercises many opcode groups (arithmetic, calls, control flow,
+    // slots, arrays, closures), so its runtime carries their handlers.
+    let src =
+        "function pow(b, e) { let r = 1; for (let i = 0; i < e; i++) { r = r * b; } return r; } \
+               const xs = [1, 2, 3].map((n) => n + 1); pow(2, xs.length);\n";
+    let out = try_compile_chunk(src, &opts)
+        .expect("compile should not error")
+        .expect("a function chunk should VM-compile");
+    assert!(out.contains("JSON.parse("), "expected a VM chunk:\n{out}");
+
+    // The chunk is one line per structural piece:
+    //   /* MARKER */\nconst NAME=<runtime>;\n<decoder>\nNAME(JSON.parse(..))();\n
+    // The runtime is the second line. The opcode-name scan runs against that
+    // line, not the whole chunk, because the encrypted program ships as base64
+    // and a random base64 blob can hold a short opcode substring by chance; the
+    // runtime line carries no base64, so the check there is exact.
+    let runtime_line = out.lines().nth(1).expect("the chunk has a runtime line");
+    assert!(
+        runtime_line.starts_with("const "),
+        "unexpected runtime line: {runtime_line}"
+    );
+    for name in OP_NAMES {
+        assert!(
+            !runtime_line.contains(name),
+            "opcode name {name} leaked into the shipped runtime"
+        );
+    }
+
+    // No readable runtime identifier or brand word survives. These are long or
+    // carry punctuation, so scanning the whole chunk is safe from base64 chance.
+    for ident in [
+        "estrogen",
+        "__estrogen_vm",
+        "ARITY",
+        "createRuntime",
+        "createClosure",
+        "decodeConst",
+        "HANDLERS",
+        "scopeAt",
+        "runtime",
+        ".run(",
+    ] {
+        assert!(
+            !out.contains(ident),
+            "runtime identifier {ident} leaked into the VM chunk"
+        );
+    }
+
+    // The runtime body is one minified line: no newline (it is a single line by
+    // construction) and no run of two or more spaces.
+    assert!(
+        !runtime_line.contains("  "),
+        "the shipped runtime still has runs of whitespace"
+    );
+    assert!(
+        out.lines().count() <= 5,
+        "the VM chunk is not compact: {} lines",
+        out.lines().count()
     );
 }
 

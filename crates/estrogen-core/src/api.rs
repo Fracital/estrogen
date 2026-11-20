@@ -166,7 +166,11 @@ mod tests {
         };
         let out = obfuscate_js("const a = 1 + 2; const b = a * 10; b - 1;\n", &opts).unwrap();
         assert!(out.code.contains(crate::format::MARKER));
-        assert!(out.code.contains(".run();"), "not a vm chunk: {}", out.code);
+        assert!(
+            out.code.contains("JSON.parse("),
+            "not a vm chunk: {}",
+            out.code
+        );
         assert!(out.map.is_none());
     }
 
@@ -179,7 +183,7 @@ mod tests {
             ..Options::default()
         };
         let out = obfuscate_js("import x from 'm'; const s = 'hello world'; x(s);", &opts).unwrap();
-        assert!(!out.code.contains(".run();"), "should have fallen back");
+        assert!(!out.code.contains("JSON.parse("), "should have fallen back");
         assert!(!out.code.contains("hello world"));
         assert!(out.map.is_some());
     }

@@ -14,7 +14,7 @@
 
 use serde_json::{Map, Value};
 
-use super::opcodes::OP_NAMES;
+use super::opcodes::{arity, OP_NAMES};
 
 const TABLE_SIZE: usize = 256;
 
@@ -51,20 +51,27 @@ impl Layout {
             .unwrap_or_else(|| panic!("estrogen vm: opcode {name} is not in the layout"))
     }
 
-    /// The layout as the JSON object the runtime reads:
-    /// `{ version, tableSize, byteOf, nameOf }`.
+    /// The layout as the JSON object the runtime reads: `{ version, tableSize,
+    /// ops }`, where `ops` maps each per-build opcode byte (as a string key) to a
+    /// two-element array `[stableIndex, arity]`. `stableIndex` is the opcode's
+    /// position in [`OP_NAMES`], which is the index the runtime looks a handler up
+    /// by; `arity` is how many operand numbers follow the byte in the code stream.
+    /// No opcode name is serialized, so the runtime dispatches numerically and
+    /// carries no opcode vocabulary.
     pub fn to_json(&self) -> Value {
-        let mut byte_of = Map::new();
-        let mut name_of = Map::new();
-        for (name, byte) in &self.byte_of {
-            byte_of.insert((*name).to_string(), Value::from(*byte));
-            name_of.insert(byte.to_string(), Value::from(*name));
+        let mut ops = Map::new();
+        for (index, name) in OP_NAMES.iter().enumerate() {
+            let byte = self.byte_of(name);
+            let op_arity = arity(name) as u64;
+            ops.insert(
+                byte.to_string(),
+                Value::Array(vec![Value::from(index as u64), Value::from(op_arity)]),
+            );
         }
         let mut obj = Map::new();
         obj.insert("version".to_string(), Value::from(1u32));
         obj.insert("tableSize".to_string(), Value::from(TABLE_SIZE as u64));
-        obj.insert("byteOf".to_string(), Value::Object(byte_of));
-        obj.insert("nameOf".to_string(), Value::Object(name_of));
+        obj.insert("ops".to_string(), Value::Object(ops));
         Value::Object(obj)
     }
 }

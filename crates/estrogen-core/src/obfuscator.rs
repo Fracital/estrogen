@@ -615,10 +615,12 @@ mod tests {
 
         let out = fs::read_to_string(&js).unwrap();
         assert!(out.contains(crate::format::MARKER));
-        // The VM runtime and its entry call are present; the literal-pool decode
-        // call shape (`NAME(0)`) is not what drives this chunk.
-        assert!(out.contains("createRuntime"), "runtime missing: {out}");
-        assert!(out.contains(".run();"), "vm entry call missing");
+        // The VM runtime and its entry call are present. A VM chunk decodes its
+        // program with `JSON.parse(...)` and ends in the `)();` entry call; a
+        // literal-pool chunk does neither. The runtime is mangled, so it carries
+        // no `createRuntime`/`run` tokens to key on.
+        assert!(out.contains("JSON.parse("), "runtime missing: {out}");
+        assert!(out.trim_end().ends_with(")();"), "vm entry call missing");
         assert_eq!(report.total(), 1);
         assert!(!report.has_unprotected());
         fs::remove_dir_all(&dir).ok();
@@ -645,7 +647,7 @@ mod tests {
         // The literal-pool decoder is present, and the VM runtime is not: this
         // chunk took the fallback path.
         assert!(out.contains("=(function(){"), "literal decoder missing");
-        assert!(!out.contains("createRuntime"), "should not be a vm chunk");
+        assert!(!out.contains("JSON.parse("), "should not be a vm chunk");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -677,7 +679,7 @@ mod tests {
         let report = obf.obfuscate_dir(&dir).unwrap();
 
         let out = fs::read_to_string(&js).unwrap();
-        assert!(out.contains("createRuntime"), "expected a vm chunk");
+        assert!(out.contains("JSON.parse("), "expected a vm chunk");
         assert!(!out.contains("topSecretValue"), "string canary leaked");
         assert!(!out.contains("secretBrand"), "name canary leaked");
         assert!(!report.has_unprotected());
