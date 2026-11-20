@@ -1,5 +1,11 @@
 # crack
 
+[![npm](https://img.shields.io/npm/v/@sysce/crack?maxAge=3600&label=npm)](https://www.npmjs.com/package/@sysce/crack)
+[![CI](https://github.com/Fracital/crack/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Fracital/crack/actions/workflows/ci.yml)
+[![license: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/Fracital/crack?style=flat&color=orange)](https://github.com/Fracital/crack/issues)
+[![GitHub stars](https://img.shields.io/github/stars/Fracital/crack?style=flat&color=orange)](https://github.com/Fracital/crack/stargazers)
+
 A post-build web obfuscator. It takes a directory a bundler already produced and
 rewrites the JS, HTML and SVG in place: string and template literals into an
 encrypted per-file pool, proxy and store names into per-build substitutes, and
