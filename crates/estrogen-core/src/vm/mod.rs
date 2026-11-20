@@ -25,6 +25,8 @@ mod layout;
 pub mod opcodes;
 mod program;
 
+use std::sync::OnceLock;
+
 use oxc_allocator::Allocator;
 use oxc_diagnostics::Severity;
 use oxc_parser::Parser;
@@ -111,11 +113,105 @@ fn emit_chunk(program_json: &str, source: &str, options: &Options) -> Result<Str
 }
 
 /// The runtime execution core as an inlinable expression. The vendored file is
-/// an ES module; this strips its `export` and wraps the body in an IIFE that
-/// returns the one entry point the chunk calls.
+/// an ES module; this strips its `export`, minifies the body (so the shipped
+/// runtime carries no comments and no source formatting, see [`minify_js`]), and
+/// wraps it in an IIFE that returns the one entry point the chunk calls.
 pub fn runtime_iife() -> String {
-    let body = RUNTIME_JS.replace("export { createRuntime, ARITY };", "");
-    format!("(function(){{\n{body}\nreturn {{ createRuntime }};\n}})()")
+    format!(
+        "(function(){{{body}return {{ createRuntime }};}})()",
+        body = minified_runtime_body(),
+    )
+}
+
+/// The runtime body, with its `export` removed and comments plus formatting
+/// stripped. Computed once and cached, because every VM chunk inlines it.
+fn minified_runtime_body() -> &'static str {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let src = RUNTIME_JS.replace("export { createRuntime, ARITY };", "");
+        minify_js(&src)
+    })
+}
+
+/// Strip JavaScript comments and collapse insignificant whitespace, so the
+/// embedded runtime ships compact and comment-free instead of as readable
+/// source. This is a small tokenizer, not a regex pass: it tracks string and
+/// template literals so a `//` or `/* */` inside a string is left alone, and it
+/// only removes comments and extra whitespace. Every statement in `runtime.js`
+/// ends with a semicolon (Prettier's default), so collapsing newlines to a
+/// single space never changes meaning. `runtime.js` has no regex literals, so
+/// `/` is only ever a comment start or an operator; a space in place of consumed
+/// whitespace or a comment is always a safe token separator.
+fn minify_js(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    // A run of whitespace or a comment is pending: emit one separating space
+    // before the next real token, unless the output is empty or already ends in
+    // a space.
+    let mut pending_space = false;
+    while i < n {
+        let c = chars[i];
+        // Line comment: drop to end of line.
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            i += 2;
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            pending_space = true;
+            continue;
+        }
+        // Block comment: drop to the closing */.
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            pending_space = true;
+            continue;
+        }
+        // String or template literal: copy verbatim to the matching delimiter.
+        if c == '\'' || c == '"' || c == '`' {
+            if pending_space && !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(c);
+            i += 1;
+            while i < n {
+                let d = chars[i];
+                out.push(d);
+                i += 1;
+                if d == '\\' {
+                    if i < n {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if d == c {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            pending_space = true;
+            i += 1;
+            continue;
+        }
+        if pending_space {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            pending_space = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// Derive the opcode-layout seed for a file. Under a fixed `Options::seed` it is

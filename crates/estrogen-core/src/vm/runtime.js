@@ -2,13 +2,21 @@
 //
 // This is the stack-bytecode interpreter estrogen's VM pass compiles to. It is a
 // trimmed, dependency-free port of abulxt's shield runtime-template.js: the
-// handler-table dispatch, the slot-based scope model, and the opcode handler
-// bodies are copied byte-for-byte for the opcodes estrogen's compiler emits, so a
-// program this file runs has the exact bytecode and constant-pool shape the
-// shield runtime executes. The parts of the shield runtime that the slice does
-// not need are left out: XChaCha20-Poly1305 decryption (estrogen wraps the
-// program in its own ChaCha20 pool decoder instead), the anti-tamper snapshot,
-// the async/class/module/exception handlers, and the whole-chunk loader.
+// handler-table dispatch, the slot-based scope model, the closure model, and the
+// opcode handler bodies are copied byte-for-byte for the opcodes estrogen's
+// compiler emits, so a program this file runs has the exact bytecode and
+// constant-pool shape the shield runtime executes. It runs the compiler's
+// subset: expressions, let/const declarations, functions (declarations,
+// expressions, arrows), closures with lexical capture, and control flow
+// (if/while/do/for/switch with break/continue). The parts of the shield runtime
+// that estrogen does not emit yet are left out: XChaCha20-Poly1305 decryption
+// (estrogen wraps the program in its own ChaCha20 pool decoder instead), the
+// anti-tamper snapshot, the async/class/module handlers, the try/catch/finally
+// handler stack, and the whole-chunk loader.
+//
+// This file is the maintainable source. The VM pass minifies it (comments and
+// extra whitespace stripped) before it ships inside a chunk, so the shipped
+// runtime is compact, while this copy stays readable. See vm/mod.rs.
 //
 // The program shape is { version, layout, consts, functions, mainIndex }, where
 // layout is { version, tableSize, byteOf, nameOf }, a function is
@@ -231,14 +239,47 @@ function createRuntime(program, options) {
 		};
 	}
 
+	// Wrap a function def in a JS closure. ctx carries the defining frame's scope
+	// (lexical capture) and this value (used by arrows). A plain function takes
+	// its this from the call site; an arrow takes it from ctx. Calling the
+	// closure makes a fresh frame whose base scope's parent is the captured scope,
+	// so slot addresses resolve across the closure boundary.
+	function createClosure(def, ctx) {
+		const fn = function (...callArgs) {
+			const thisVal = def.isArrow ? ctx.arrowThis : this;
+			return runSync(makeFrame(def, ctx.scope, thisVal, callArgs));
+		};
+		try {
+			Object.defineProperty(fn, 'length', {
+				value: def.numParams,
+				configurable: true,
+			});
+		} catch (e) {}
+		if (def.name) {
+			try {
+				Object.defineProperty(fn, 'name', {
+					value: def.name,
+					configurable: true,
+				});
+			} catch (e) {}
+		}
+		return fn;
+	}
+
 	function callValue(fn, thisArg, args) {
 		if (typeof fn !== 'function')
 			throw new TypeError(String(fn) + ' is not a function');
 		return Reflect.apply(fn, thisArg, args);
 	}
 
+	// Perform a return. estrogen does not emit the try/catch/finally handler
+	// stack yet, so a return leaves the frame directly with a return signal.
+	function doReturn(frame, value) {
+		return { type: 'return', value };
+	}
+
 	// The one interpreter loop. Returns a signal: {type:'return'|'halt', value}
-	// or {type:'throw', value}. The slice has no in-frame handlers, so a thrown
+	// or {type:'throw', value}. The subset has no in-frame handlers, so a thrown
 	// error propagates straight out.
 	function runFrame(frame) {
 		const code = frame.code;
@@ -254,7 +295,9 @@ function createRuntime(program, options) {
 				consts,
 				functions,
 				globals,
+				createClosure,
 				callValue,
+				doReturn,
 			);
 			if (sig) return sig;
 		}
@@ -359,6 +402,26 @@ const HANDLERS = {
 			kind: arg & 3,
 			init: (arg & 3) === 0,
 		};
+	},
+	// arg packs slot<<8 | argIndex: bind a plain parameter to its slot.
+	BIND_PARAM(frame, arg) {
+		frame.scope.slots[arg >>> 8] = {
+			v: frame.args[arg & 0xff],
+			kind: 0,
+			init: true,
+		};
+	},
+	// Store a freshly made closure into a hoisted function-declaration slot.
+	DEF_FUNC_SLOT(frame, arg) {
+		frame.scope.slots[arg] = { v: frame.stack.pop(), kind: 0, init: true };
+	},
+
+	// Block scopes: a fresh child scope for a lexical block, popped on exit.
+	ENTER_SCOPE(frame) {
+		frame.scope = { parent: frame.scope, slots: [] };
+	},
+	EXIT_SCOPE(frame) {
+		frame.scope = frame.scope.parent;
 	},
 
 	LOAD_GLOBAL(frame, arg, consts, functions, globals) {
@@ -548,6 +611,21 @@ const HANDLERS = {
 		const o = s.pop();
 		s.push(o[k]);
 	},
+	SET_PROP(frame, arg, consts) {
+		const s = frame.stack;
+		const v = s.pop();
+		const o = s.pop();
+		o[consts[arg]] = v;
+		s.push(v);
+	},
+	SET_PROP_DYN(frame) {
+		const s = frame.stack;
+		const v = s.pop();
+		const k = s.pop();
+		const o = s.pop();
+		o[k] = v;
+		s.push(v);
+	},
 
 	JMP(frame, arg) {
 		frame.pc = arg;
@@ -574,14 +652,22 @@ const HANDLERS = {
 		else s.pop();
 	},
 
-	CALL(frame, arg, consts, functions, globals, callValue) {
+	CALL(frame, arg, consts, functions, globals, createClosure, callValue) {
 		const s = frame.stack;
 		const args = new Array(arg);
 		for (let i = arg - 1; i >= 0; i--) args[i] = s.pop();
 		const fn = s.pop();
 		s.push(callValue(fn, undefined, args));
 	},
-	CALL_METHOD(frame, arg, consts, functions, globals, callValue) {
+	CALL_METHOD(
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+	) {
 		const s = frame.stack;
 		const args = new Array(arg);
 		for (let i = arg - 1; i >= 0; i--) args[i] = s.pop();
@@ -597,6 +683,36 @@ const HANDLERS = {
 		if (typeof ctor !== 'function')
 			throw new TypeError(String(ctor) + ' is not a constructor');
 		s.push(Reflect.construct(ctor, args));
+	},
+	MAKE_FUNC(frame, arg, consts, functions, globals, createClosure) {
+		const def = functions[arg];
+		frame.stack.push(
+			createClosure(def, { scope: frame.scope, arrowThis: frame.thisVal }),
+		);
+	},
+	RETURN(
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+	) {
+		return doReturn(frame, frame.stack.pop());
+	},
+	RETURN_UNDEF(
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+	) {
+		return doReturn(frame, undefined);
 	},
 
 	ARR_EMPTY(frame) {

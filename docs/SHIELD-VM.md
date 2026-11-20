@@ -115,6 +115,16 @@ encrypted pool. Every local binding name is gone, because locals compile to slot
 indices. So a VM chunk carries no plaintext from the canary list, which the
 obfuscator's output scan checks the same way it checks every other chunk.
 
+The runtime execution core ships minified. `vm/runtime.js` is the maintainable
+source, with comments and Prettier formatting; `vm/mod.rs` strips the comments
+and collapses the whitespace before it inlines the body, so the shipped runtime
+is one compact line and does not read like annotated source. The minifier is a
+small tokenizer, not a text pass: it tracks string and template literals, so a
+`//` inside a string is left alone, and `runtime.js` has no regex literals, so a
+`/` is only ever a comment start or an operator. `embedded_runtime_has_no_comments`
+proves the embedded runtime has no comments and still loads in node, and the
+corpus test runs the whole program suite through the minified runtime.
+
 ## Where it sits in the pass architecture
 
 estrogen's other passes edit the source bytes and splice (`edit.rs`): a pass returns
@@ -207,62 +217,93 @@ doc does not claim it.
 The compiler handles a sound subset. Everything else declines, and the chunk
 falls back. The subset:
 
-- A module body of expression statements and `let`/`const` declarations with
-  plain identifier bindings.
+- A module body of expression statements, `let`/`const` declarations with plain
+  identifier bindings, and function declarations (hoisted and callable before
+  their textual position, so recursion works).
+- Functions: declarations, anonymous function expressions, and arrow functions
+  with an expression or a block body. Plain identifier parameters, `return`,
+  recursion, nested functions, and lexical closure capture. A name resolves to a
+  packed `(depth, index)` slot that walks the runtime scope chain, which spans
+  the closure boundary because a closure's base scope points at the defining
+  frame's scope. `this` is the call-site receiver for a plain function and the
+  defining `this` for an arrow.
+- Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `switch`, and
+  unlabeled `break`/`continue`. A lexical block pushes a runtime scope
+  (`ENTER_SCOPE`/`EXIT_SCOPE`); a block with no lexical declaration is elided. A
+  `break` or `continue` that jumps out of blocks emits the `EXIT_SCOPE`s it
+  skips, so the scope chain is at the depth its landing site expects. A `switch`
+  holds its discriminant in a temp slot, not on the operand stack, so a jump out
+  of it never leaves a stray value.
 - Literals: number, string, boolean, null, BigInt, and a template with no
   substitutions.
-- Identifiers: a top-level `let`/`const` resolves to a slot; any other name
-  resolves to a global.
 - Member access (static `a.b` and computed `a[b]`), calls and method calls, and
   `new`.
 - Unary operators (`-`, `+`, `!`, `~`, `typeof`, `void`), every plain binary
   operator (arithmetic, comparison, equality, bitwise, shift, `in`,
   `instanceof`), the logical operators (`&&`, `||`, `??`) with short-circuit
   jumps, and the conditional operator.
+- Assignment: plain and compound (`+=` and friends) and logical (`&&=`, `||=`,
+  `??=`) to an identifier, and plain `=` to a member. Update (`++`/`--`) on an
+  identifier, lowered the way the shield lowers it (coerce with `POS`, then add
+  `+/-1`), which is correct for number and string operands.
 - Array and object literals with plain elements and static keys, and sequence
   expressions.
 
 Falls back (declines, so the literal and name passes run instead):
 
-- Functions, arrow functions, and classes.
-- `import` and `export` (the whole-chunk loader is not ported yet, so a module
-  with imports or exports is out of scope).
-- Control-flow statements (`if`, `for`, `while`, `switch`, `try`, `return`,
-  `throw`, labels, blocks).
-- `var` and `using`, destructuring bindings, assignment and update expressions,
-  optional chaining, spread, templates with substitutions, tagged templates,
-  `await`, and `yield`.
+- Classes, `import`, and `export` (the whole-chunk loader is not ported yet, so
+  a module with imports or exports is out of scope).
+- `try`/`catch`/`finally`, for-of and for-in, labeled `break`/`continue`, and a
+  `switch` case that declares a lexical binding.
+- Named function expressions, default, rest, and destructured parameters,
+  generators, `async`, and `arguments`.
+- A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
+  binding where native makes one per iteration, so it declines rather than
+  observe the difference wrongly.
+- `var` and `using`, destructuring bindings, compound or update assignment to a
+  member, a BigInt operand of `++`/`--`, optional chaining, spread, templates
+  with substitutions, tagged templates, `await`, and `yield`.
 
 ## The proof
 
 `crates/estrogen-core/tests/vm_node.rs` compiles a corpus of supported sources to
 VM programs in Rust, then runs each program through the vendored runtime in
 `node` and compares the result to native `eval` of the same source. A mismatch
-fails the test. The corpus covers literals, slot locals, globals, member access,
-calls and method calls, `new`, every operator group above, arrays, objects,
-sequences, and a no-substitution template. A second test asserts that each
-out-of-subset construct declines, so the fallback classification is checked too.
-If `node` is not on PATH the test prints a SKIP rather than passing without
-verifying.
+fails the test. The corpus covers the expression subset (literals, slot locals,
+globals, member access, calls and method calls, `new`, every operator group,
+arrays, objects, sequences, and a no-substitution template); functions and
+closures (recursion with factorial, a closure counter, an arrow capturing an
+outer variable, a higher-order map and reduce, nested functions, a method call
+reading `this`, and postfix update); and control flow (if/else, while, do/while,
+a C-style for summing an array, break, continue, switch with break, default, and
+fall-through, and nested loops with inner break/continue and a block-scoped
+local, which proves jump backpatching and scope unwinding). A second test asserts
+that each out-of-subset construct declines, including a `for (let ...)` captured
+by a closure, so the fallback classification is checked too. A third test proves
+the embedded runtime has no comments and still loads in node. A fourth compiles a
+function chunk whose string value, local name, and function name are all canaries
+and asserts none survives in the clear. If `node` is not on PATH the running
+tests print a SKIP rather than passing without verifying.
 
 At the obfuscator level, `obfuscator.rs` tests assert that a compilable chunk
-becomes a VM chunk, that a chunk with a top-level function falls back to the
-literal decoder, and that a VM chunk whose string value and binding name are both
-on the canary list leaks neither (the string is encrypted, the name is a slot),
-so the build does not fail closed on it.
+becomes a VM chunk, that a chunk outside the subset (an `export`) falls back to
+the literal decoder, and that a VM chunk whose string value and binding name are
+both on the canary list leaks neither (the string is encrypted, the name is a
+slot), so the build does not fail closed on it.
 
 ## Remaining work to full default-on coverage
 
-The subset above is small on purpose. Reaching the point where the VM compiles a
-real app bundle, the way the shield's 25-of-25 integration proof does, is a large
-amount of further work. In rough dependency order:
+Functions, closures, and the common control-flow statements now compile (see the
+subset above). Reaching the point where the VM compiles a real app bundle, the
+way the shield's 25-of-25 integration proof does, is still a large amount of
+further work. In rough dependency order:
 
-1. Functions and closures: `MAKE_FUNC`, nested `FunctionDef`s, parameter binding
-   (including `BIND_PARAM`), `arguments`, `return`, and arrow `this` capture.
-   This is the single biggest gap, because a real chunk is almost all functions.
-2. Control flow: `if`/`for`/`while`/`switch`, `break`/`continue` (including
-   across a `finally`, which the shield routes through completion records),
-   blocks and block-scope elision, and the `try`/`catch`/`finally` handler stack.
+1. The rest of the function surface: `arguments`, named function expressions,
+   default, rest, and destructured parameters, generators, and `async`.
+2. The rest of control flow: the `try`/`catch`/`finally` handler stack and
+   `break`/`continue` across a `finally` (which the shield routes through
+   completion records), for-of and for-in, labeled `break`/`continue`, and a
+   `switch` case that declares a lexical binding.
 3. ES modules and the loader: the module descriptor (`imports`, `exports`,
    `reexports`, `deps`, `exportSlots`), the module ops, and a port of the shield's
    `loader-template.js` so VM chunks can import each other and native chunks. A
@@ -278,9 +319,10 @@ amount of further work. In rough dependency order:
    chunk), the emit-time guard against a chunk naming a renamed sibling file, and
    the per-chunk integrity hash and anti-tamper checks (P7), which estrogen does
    not emit yet.
-7. Destructuring, assignment and update expressions, templates with
-   substitutions, spread, optional chaining, and the other expression forms the
-   slice declines.
+7. The rest of the expression surface: destructuring, compound and update
+   assignment to a member, a BigInt operand of `++`/`--`, templates with
+   substitutions, spread, optional chaining, and the other forms the compiler
+   declines.
 8. A shared runtime bootstrap. Today a VM chunk inlines the runtime, which is
    fine for the import-free chunks the slice compiles but would duplicate the
    runtime across many chunks once the loader lands. The shield emits one

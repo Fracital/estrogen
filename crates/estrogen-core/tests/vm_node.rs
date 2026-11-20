@@ -10,7 +10,8 @@
 use std::io::Write;
 use std::process::Command;
 
-use estrogen_core::vm::{compile_module_json, runtime_iife};
+use estrogen_core::options::Options;
+use estrogen_core::vm::{compile_module_json, runtime_iife, try_compile_chunk};
 
 /// Whether `node` can be run. Prints a SKIP line and returns false when not.
 fn node_available(test: &str) -> bool {
@@ -45,7 +46,7 @@ fn run_node(code: &str, tag: &str) -> (bool, String, String) {
 /// globals, member access, calls and method calls, `new`, unary and binary
 /// operators, logical and conditional operators, arrays, objects, sequences, and
 /// no-substitution templates.
-const SUPPORTED: &[&str] = &[
+const EXPRESSIONS: &[&str] = &[
     "1 + 2 * 3",
     "(10 - 4) / 2",
     "2 ** 10",
@@ -78,6 +79,65 @@ const SUPPORTED: &[&str] = &[
     "'ABC'.toLowerCase() + '-' + 'z'.toUpperCase()",
 ];
 
+/// Functions, closures, assignment, and update. Each module ends in the value to
+/// compare.
+const FUNCTIONS: &[&str] = &[
+    // recursion
+    "function fact(n) { if (n <= 1) return 1; return n * fact(n - 1); } fact(5)",
+    // mutual-ish nesting and lexical capture of an outer local
+    "function outer() { const a = 2; function inner() { return a * 3; } return inner(); } outer()",
+    // closure counter via assignment
+    "function make() { let c = 0; return function () { c = c + 1; return c; }; } const f = make(); f(); f(); f()",
+    // closure counter via prefix update, two independent closures stay separate
+    "function make() { let c = 0; return function () { return ++c; }; } const a = make(); const b = make(); a(); a(); b()",
+    // arrow expression body capturing an outer const
+    "const base = 10; const add = (x) => x + base; add(5)",
+    // arrow block body with a local
+    "const f = (a, b) => { const s = a + b; return s * 2; }; f(3, 4)",
+    // higher-order: map with an arrow
+    "[1, 2, 3].map((x) => x * 2)",
+    // higher-order: reduce with an arrow capturing nothing
+    "[1, 2, 3, 4].reduce((acc, x) => acc + x, 0)",
+    // method call: `this` is the receiver
+    "const obj = { v: 7, get: function () { return this.v; } }; obj.get()",
+    // default parameters are not emulated, so a plain-param function is used
+    "function pow(b, e) { let r = 1; for (let i = 0; i < e; i++) { r = r * b; } return r; } pow(2, 8)",
+    // postfix update returns the old value
+    "let i = 5; const old = i++; [old, i]",
+];
+
+/// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
+/// and nested loops (jump backpatching). Each module ends in the value.
+const CONTROL: &[&str] = &[
+    // if / else
+    "let r; if (3 > 2) { r = 'a'; } else { r = 'b'; } r",
+    "let r; if (3 < 2) { r = 'a'; } else { r = 'b'; } r",
+    // while
+    "let i = 0; let s = 0; while (i < 5) { s = s + i; i = i + 1; } s",
+    // do / while runs the body once even when the test is false
+    "let i = 10; let s = 0; do { s = s + 1; i++; } while (i < 3); s",
+    // C-style for summing an array
+    "const arr = [1, 2, 3, 4]; let sum = 0; for (let i = 0; i < arr.length; i++) { sum += arr[i]; } sum",
+    // break
+    "let s = 0; for (let i = 0; i < 10; i++) { if (i === 5) break; s += i; } s",
+    // continue
+    "let s = 0; for (let i = 0; i < 6; i++) { if (i % 2 === 0) continue; s += i; } s",
+    // switch with break
+    "let x = 2; let r; switch (x) { case 1: r = 'a'; break; case 2: r = 'b'; break; default: r = 'c'; } r",
+    // switch default
+    "let x = 9; let r; switch (x) { case 1: r = 'a'; break; default: r = 'd'; } r",
+    // switch fall-through
+    "let x = 1; let r = ''; switch (x) { case 1: r += '1'; case 2: r += '2'; break; default: r += 'd'; } r",
+    // nested loops (backpatching): sum of i*j
+    "let t = 0; for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { t += i * j; } } t",
+    // nested loops with inner break and continue
+    "let t = 0; for (let i = 0; i < 3; i++) { for (let j = 0; j < 4; j++) { if (j === i) continue; if (j > 2) break; t += 1; } } t",
+    // nested loops with a block-scoped local in the outer body and a continue
+    "let out = 0; for (let i = 0; i < 3; i++) { let b = i * 10; for (let j = 0; j < 2; j++) { if (j === 1) continue; out += b + j; } } out",
+    // while with break and continue
+    "let i = 0; let s = 0; while (true) { i++; if (i > 10) break; if (i % 2 === 0) continue; s += i; } s",
+];
+
 #[test]
 fn vm_bytecode_matches_native_eval() {
     if !node_available("vm_bytecode_matches_native_eval") {
@@ -86,7 +146,7 @@ fn vm_bytecode_matches_native_eval() {
     // Build one node script that runs every case through the vendored runtime and
     // compares to native eval, so the whole corpus is one node invocation.
     let mut cases = String::from("const CASES = [\n");
-    for src in SUPPORTED {
+    for src in EXPRESSIONS.iter().chain(FUNCTIONS).chain(CONTROL) {
         let json = compile_module_json(src, "vm-node-seed")
             .unwrap_or_else(|| panic!("supported source did not compile: {src}"));
         let src_lit = serde_json::to_string(src).unwrap();
@@ -124,20 +184,26 @@ fn vm_bytecode_matches_native_eval() {
 #[test]
 fn unsupported_constructs_decline() {
     let unsupported = [
-        "function f() { return 1; }",
-        "const g = (x) => x + 1; g(2)",
         "var z = 1; z",
         "import x from './y.js'; x",
         "export const q = 1;",
         "class C {}",
         "const [a, b] = [1, 2]; a",
-        "let obj = {}; obj.x = 1;",
-        "let i = 0; i++",
+        "function* gen() { yield 1; }",
+        "async function af() { return 1; }",
+        "const g = (...rest) => rest.length; g(1, 2)",
+        "function withArgs() { return arguments.length; } withArgs(1, 2)",
+        "const named = function self() { return self; };",
         "`a${1}b`",
         "const o = { x: 1 }; o?.x",
         "await Promise.resolve(1)",
         "for (const k of [1]) {}",
-        "if (true) { 1 } else { 2 }",
+        "for (const k in { a: 1 }) {}",
+        "try { 1; } catch (e) {}",
+        "outer: for (;;) { break outer; }",
+        // a for-let binding captured by a closure must decline, because estrogen
+        // uses one binding where native makes one per iteration.
+        "const fns = []; for (let i = 0; i < 3; i++) { fns.push(() => i); } fns[0]()",
     ];
     for src in unsupported {
         assert!(
@@ -145,4 +211,91 @@ fn unsupported_constructs_decline() {
             "expected the VM to decline (fall back) for: {src}"
         );
     }
+}
+
+/// The runtime embedded in a VM chunk must ship compact and comment-free, so the
+/// output does not read like plain annotated source.
+#[test]
+fn embedded_runtime_has_no_comments() {
+    let runtime = runtime_iife();
+    assert!(
+        !runtime.contains("//"),
+        "embedded runtime has a line comment"
+    );
+    assert!(
+        !runtime.contains("/*"),
+        "embedded runtime has a block comment"
+    );
+    assert!(
+        !runtime.contains("*/"),
+        "embedded runtime has a block comment"
+    );
+    assert!(
+        !runtime.contains('\n'),
+        "embedded runtime still carries source newlines"
+    );
+    // A string literal in the runtime survives minification intact.
+    assert!(
+        runtime.contains("'estrogen vm: '"),
+        "a runtime string literal was mangled by minification"
+    );
+    // It is a valid expression that node can evaluate and that exposes the entry
+    // point the chunk calls.
+    if node_available("embedded_runtime_has_no_comments") {
+        let script = format!(
+            "const mk = {runtime};\n\
+             if (typeof mk.createRuntime !== 'function') {{ console.error('no createRuntime'); process.exit(1); }}\n\
+             console.log('OK');\n",
+            runtime = runtime,
+        );
+        let (ok, stdout, stderr) = run_node(&script, "minify");
+        assert!(ok, "minified runtime failed to load:\n{stderr}");
+        assert!(stdout.starts_with("OK"), "unexpected output: {stdout}");
+    }
+}
+
+/// A VM chunk whose compiled function carries a canary string and a
+/// canary-named local must leak neither: the string lives in the encrypted pool
+/// and the name compiles to a slot index.
+#[test]
+fn vm_function_chunk_leaks_no_plaintext() {
+    let src = "function reveal() { const secretCanaryLocal = 'topSecretCanaryValue'; \
+               return secretCanaryLocal; } reveal();\n";
+    let opts = Options {
+        seed: Some(b"leak-seed".to_vec()),
+        ..Options::default()
+    };
+    let out = try_compile_chunk(src, &opts)
+        .expect("compile should not error")
+        .expect("a function chunk should VM-compile");
+    assert!(out.contains("createRuntime"), "expected a VM chunk:\n{out}");
+    assert!(
+        !out.contains("topSecretCanaryValue"),
+        "the string literal leaked in the clear"
+    );
+    assert!(
+        !out.contains("secretCanaryLocal"),
+        "the local binding name leaked in the clear"
+    );
+    assert!(
+        !out.contains("reveal"),
+        "the function name leaked in the clear"
+    );
+}
+
+/// A chunk with an out-of-subset construct still produces a valid fallback chunk
+/// through the obfuscator, and the VM declines it.
+#[test]
+fn unsupported_chunk_still_declines_at_the_api() {
+    let opts = Options {
+        seed: Some(b"fallback-seed".to_vec()),
+        ..Options::default()
+    };
+    // A class is outside the subset; the VM must decline so the caller falls back.
+    let declined = try_compile_chunk("class C { m() { return 1; } }\n", &opts)
+        .expect("compile should not error");
+    assert!(
+        declined.is_none(),
+        "a class chunk must decline to the fallback path"
+    );
 }
