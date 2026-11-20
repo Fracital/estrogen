@@ -31,7 +31,9 @@ use crate::error::{Error, Result};
 use crate::format::MARKER;
 use crate::options::Options;
 use crate::pass::literals::LiteralsPass;
+use crate::pass::names::collect_proxy_edits;
 use crate::pass::{FileContext, Pass};
+use crate::proxy::ProxyEngine;
 use crate::walk::FileKind;
 
 /// Neutral shell text used when a static `<title>` carried a canary.
@@ -39,118 +41,122 @@ const NEUTRAL_TITLE: &str = "Workspace";
 /// Neutral shell text used when a description `<meta>` carried a canary.
 const NEUTRAL_DESC: &str = "A fast, private workspace.";
 
-/// The HTML and SVG markup pass.
-#[derive(Debug, Default)]
-pub struct MarkupPass;
+/// Collect the HTML or SVG markup pass edits for one file.
+///
+/// Neutralizes a canary `<title>` or description `<meta>`, and obfuscates each
+/// inline `<script>` that leaks a canary or a proxy name. A canary body takes
+/// the app (literal pool) transform; a proxy-only body takes the proxy
+/// transform, matching the reference `obfuscateInlineScript`. The build-wide
+/// `engine` renames proxy names consistently with the JS files.
+pub(crate) fn collect_markup_edits(ctx: &FileContext, engine: &ProxyEngine) -> Result<EditSet> {
+    // Already processed: the decoder a first run added must not be re-wrapped.
+    if ctx.source.contains(MARKER) {
+        return Ok(EditSet::new());
+    }
+    let is_svg = ctx.kind == FileKind::Svg;
+    let source = ctx.source;
+    let lower = source.to_ascii_lowercase();
 
-impl Pass for MarkupPass {
-    fn name(&self) -> &'static str {
-        "markup"
+    let mut edits = EditSet::new();
+    let mut changed = false;
+
+    // Title: the first <title>...</title> whose text carries a canary.
+    if let Some((inner, _close)) = find_title_inner(&lower) {
+        if has_canary(&source[inner.clone()], ctx.options) {
+            edits.push(Edit::replace(inner.start, inner.end, NEUTRAL_TITLE));
+            changed = true;
+        }
     }
 
-    fn collect_edits(&self, ctx: &FileContext) -> Result<EditSet> {
-        // Already processed: the decoder a first run added must not be re-wrapped.
-        if ctx.source.contains(MARKER) {
-            return Ok(EditSet::new());
+    // Description <meta>: replace a canary content value with neutral text.
+    for tag in find_tags(&lower, "<meta") {
+        let tag_src = &source[tag.clone()];
+        let tag_low = &lower[tag.clone()];
+        if attr_value(tag_low, "name").map(|r| tag_src[r].eq_ignore_ascii_case("description"))
+            != Some(true)
+        {
+            continue;
         }
-        let is_svg = ctx.kind == FileKind::Svg;
-        let source = ctx.source;
-        let lower = source.to_ascii_lowercase();
-
-        let mut edits = EditSet::new();
-        let mut changed = false;
-
-        // Title: the first <title>...</title> whose text carries a canary.
-        if let Some((inner, _close)) = find_title_inner(&lower) {
-            if has_canary(&source[inner.clone()], ctx.options) {
-                edits.push(Edit::replace(inner.start, inner.end, NEUTRAL_TITLE));
+        if let Some(val) = attr_value(tag_low, "content") {
+            if has_canary(&tag_src[val.clone()], ctx.options) {
+                let start = tag.start + val.start;
+                let end = tag.start + val.end;
+                edits.push(Edit::replace(start, end, NEUTRAL_DESC));
                 changed = true;
             }
         }
+    }
 
-        // Description <meta>: replace a canary content value with neutral text.
-        for tag in find_tags(&lower, "<meta") {
-            let tag_src = &source[tag.clone()];
-            let tag_low = &lower[tag.clone()];
-            if attr_value(tag_low, "name").map(|r| tag_src[r].eq_ignore_ascii_case("description"))
-                != Some(true)
-            {
-                continue;
-            }
-            if let Some(val) = attr_value(tag_low, "content") {
-                if has_canary(&tag_src[val.clone()], ctx.options) {
-                    let start = tag.start + val.start;
-                    let end = tag.start + val.end;
-                    edits.push(Edit::replace(start, end, NEUTRAL_DESC));
-                    changed = true;
-                }
-            }
+    // Inline <script>s that leak a canary.
+    for script in find_scripts(source, &lower) {
+        let attrs_src = &source[script.attrs.clone()];
+        let attrs_low = &lower[script.attrs.clone()];
+        if attr_value(attrs_low, "src").is_some() {
+            continue; // external script
         }
-
-        // Inline <script>s that leak a canary.
-        for script in find_scripts(source, &lower) {
-            let attrs_src = &source[script.attrs.clone()];
-            let attrs_low = &lower[script.attrs.clone()];
-            if attr_value(attrs_low, "src").is_some() {
-                continue; // external script
-            }
-            let body = &source[script.body.clone()];
-            if body.trim().is_empty() {
-                continue;
-            }
-            // Milestone 5 handles the canary case (app path). A script that only
-            // carries a proxy name is left for the names pass.
-            if !has_canary(body, ctx.options) {
-                continue;
-            }
-            let is_module = attr_value(attrs_low, "type")
-                .map(|r| attrs_src[r].eq_ignore_ascii_case("module"))
-                == Some(true);
-
-            let js = if is_svg {
-                xml_script_to_js(body)
-            } else {
-                body.to_string()
-            };
-            let obf = obfuscate_inline_js(&js, is_module, ctx.options, &ctx.path)?;
-            if obf != js {
-                let replacement = if is_svg { wrap_cdata(&obf) } else { obf };
-                edits.push(Edit::replace(
-                    script.body.start,
-                    script.body.end,
-                    replacement,
-                ));
-                changed = true;
-            }
+        let body = &source[script.body.clone()];
+        if body.trim().is_empty() {
+            continue;
         }
-
-        if !changed {
-            return Ok(EditSet::new());
+        // A canary body takes the app (literal pool) transform; a body that
+        // only carries a proxy name takes the proxy transform, matching the
+        // reference obfuscateInlineScript. A body with neither is left as is.
+        let body_has_canary = has_canary(body, ctx.options);
+        let body_has_proxy = engine.has_proxy_name(body);
+        if !body_has_canary && !body_has_proxy {
+            continue;
         }
+        let is_module = attr_value(attrs_low, "type")
+            .map(|r| attrs_src[r].eq_ignore_ascii_case("module"))
+            == Some(true);
 
-        // Marker: an XML comment, after an optional <?xml ...?> declaration for
-        // SVG so the declaration stays first; at the head for HTML.
-        let marker = format!("<!--{MARKER}-->");
-        let marker_at = if is_svg {
-            xml_decl_end(source, &lower)
+        let js = if is_svg {
+            xml_script_to_js(body)
         } else {
-            0
+            body.to_string()
         };
-        edits.push(Edit::insert(marker_at, marker));
-
-        // Fail closed: no canary may survive anywhere in the shell.
-        let applied = edits.apply(source)?;
-        for canary in &ctx.options.canaries {
-            if !canary.value.is_empty() && applied.contains(&canary.value) {
-                return Err(Error::Canary {
-                    path: ctx.path.clone(),
-                    literal: canary.value.clone(),
-                });
-            }
+        let obf = if body_has_canary {
+            obfuscate_inline_js(&js, is_module, ctx.options, &ctx.path)?
+        } else {
+            obfuscate_inline_proxy(&js, is_module, ctx.options, engine, &ctx.path)?
+        };
+        if obf != js {
+            let replacement = if is_svg { wrap_cdata(&obf) } else { obf };
+            edits.push(Edit::replace(
+                script.body.start,
+                script.body.end,
+                replacement,
+            ));
+            changed = true;
         }
-
-        Ok(edits)
     }
+
+    if !changed {
+        return Ok(EditSet::new());
+    }
+
+    // Marker: an XML comment, after an optional <?xml ...?> declaration for
+    // SVG so the declaration stays first; at the head for HTML.
+    let marker = format!("<!--{MARKER}-->");
+    let marker_at = if is_svg {
+        xml_decl_end(source, &lower)
+    } else {
+        0
+    };
+    edits.push(Edit::insert(marker_at, marker));
+
+    // Fail closed: no canary may survive anywhere in the shell.
+    let applied = edits.apply(source)?;
+    for canary in &ctx.options.canaries {
+        if !canary.value.is_empty() && applied.contains(&canary.value) {
+            return Err(Error::Canary {
+                path: ctx.path.clone(),
+                literal: canary.value.clone(),
+            });
+        }
+    }
+
+    Ok(edits)
 }
 
 /// Whether any canary value is a substring of `s`.
@@ -197,6 +203,49 @@ fn run_literals(body: &str, as_module: bool, options: &Options, hint: &Path) -> 
     let path = Path::new(&name);
     let ctx = FileContext::new(path, FileKind::Js, body, options);
     let edits = LiteralsPass.collect_edits(&ctx)?;
+    edits.apply(body)
+}
+
+/// Obfuscate an inline script body through the proxy transform, with the same
+/// module/script fallback as the app path.
+fn obfuscate_inline_proxy(
+    body: &str,
+    is_module: bool,
+    options: &Options,
+    engine: &ProxyEngine,
+    hint: &Path,
+) -> Result<String> {
+    let order = if is_module {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    let mut last_err = None;
+    for &as_module in &order {
+        match run_proxy(body, as_module, options, engine, hint) {
+            Ok(code) => return Ok(code),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("at least one attempt ran"))
+}
+
+/// Run the proxy transform over one JS string and return the rewritten source.
+fn run_proxy(
+    body: &str,
+    as_module: bool,
+    options: &Options,
+    engine: &ProxyEngine,
+    hint: &Path,
+) -> Result<String> {
+    let stem = hint
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("inline");
+    let name = format!("{stem}.{}", if as_module { "mjs" } else { "cjs" });
+    let path = Path::new(&name);
+    let ctx = FileContext::new(path, FileKind::Js, body, options);
+    let edits = collect_proxy_edits(&ctx, engine)?;
     edits.apply(body)
 }
 
@@ -448,7 +497,8 @@ mod tests {
             "index.html"
         };
         let ctx = FileContext::new(name, kind, src, &o);
-        let edits = MarkupPass.collect_edits(&ctx).unwrap();
+        let engine = ProxyEngine::new(&o.proxy, &o.canaries, o.seed.as_deref()).unwrap();
+        let edits = collect_markup_edits(&ctx, &engine).unwrap();
         edits.apply(src).unwrap()
     }
 
@@ -482,6 +532,20 @@ mod tests {
     }
 
     #[test]
+    fn proxy_only_inline_script_takes_the_proxy_transform() {
+        // A body with a proxy name but no canary is renamed through the proxy
+        // path (M3 widening), so the proxy name does not survive verbatim.
+        let o = opts();
+        let engine = ProxyEngine::new(&o.proxy, &o.canaries, o.seed.as_deref()).unwrap();
+        let src = "<html><body><script>var x = scramjet.client;</script></body></html>";
+        let ctx = FileContext::new("index.html", FileKind::Html, src, &o);
+        let edits = collect_markup_edits(&ctx, &engine).unwrap();
+        let out = edits.apply(src).unwrap();
+        assert!(!out.contains("scramjet"), "proxy name survived: {out}");
+        assert!(out.contains(MARKER));
+    }
+
+    #[test]
     fn no_canary_document_is_unchanged() {
         let o = Options {
             seed: Some(b"s".to_vec()),
@@ -493,7 +557,8 @@ mod tests {
         };
         let clean = r#"<html><head><title>Workspace</title><script>var x = "plain";</script></head></html>"#;
         let ctx = FileContext::new("index.html", FileKind::Html, clean, &o);
-        let edits = MarkupPass.collect_edits(&ctx).unwrap();
+        let engine = ProxyEngine::new(&o.proxy, &o.canaries, o.seed.as_deref()).unwrap();
+        let edits = collect_markup_edits(&ctx, &engine).unwrap();
         assert!(edits.is_empty());
         assert_eq!(edits.apply(clean).unwrap(), clean);
     }
@@ -525,7 +590,8 @@ mod tests {
         let once = run(FileKind::Html, src);
         let o = opts();
         let ctx = FileContext::new("index.html", FileKind::Html, &once, &o);
-        let edits = MarkupPass.collect_edits(&ctx).unwrap();
+        let engine = ProxyEngine::new(&o.proxy, &o.canaries, o.seed.as_deref()).unwrap();
+        let edits = collect_markup_edits(&ctx, &engine).unwrap();
         assert!(
             edits.is_empty(),
             "a marked document must not be re-processed"

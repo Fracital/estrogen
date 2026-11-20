@@ -17,11 +17,12 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
+use crate::edit::Edit;
 use crate::edit::EditSet;
 use crate::error::{Error, Result};
 use crate::options::Options;
 use crate::pass::literals::LiteralsPass;
-use crate::pass::markup::MarkupPass;
+use crate::pass::markup::collect_markup_edits;
 use crate::pass::names::collect_proxy_edits;
 use crate::pass::{FileContext, Pass};
 use crate::proxy::ProxyEngine;
@@ -44,6 +45,14 @@ impl Obfuscator {
     /// the proxy config does not compile (a bad names regex or vendor glob).
     pub fn new(options: Options) -> Result<Self> {
         let proxy = ProxyEngine::new(&options.proxy, &options.canaries, options.seed.as_deref())?;
+        // TODO(sourcemap): emit a V3 map from the edit list when a dir is set.
+        // Until then estrogen fails closed rather than silently ship no map for a
+        // build that asked for one.
+        if options.sourcemap_dir.is_some() {
+            return Err(Error::Engine(
+                "source map emission is not implemented yet; omit --sourcemap",
+            ));
+        }
         Ok(Obfuscator { options, proxy })
     }
 
@@ -103,7 +112,7 @@ impl Obfuscator {
         // JS chunk gets full literal encryption, and HTML/SVG run the markup
         // pass. This mirrors the reference's `isProxyVendor ? proxy : app` split.
         let ctx = FileContext::new(path, kind, &source, &self.options);
-        let edits = match kind {
+        let mut edits = match kind {
             FileKind::Js => {
                 if self.proxy.is_vendor(path) {
                     collect_proxy_edits(&ctx, &self.proxy)?
@@ -111,13 +120,22 @@ impl Obfuscator {
                     LiteralsPass.collect_edits(&ctx)?
                 }
             }
-            FileKind::Html | FileKind::Svg => MarkupPass.collect_edits(&ctx)?,
+            FileKind::Html | FileKind::Svg => collect_markup_edits(&ctx, &self.proxy)?,
             FileKind::Wasm | FileKind::Other => EditSet::new(),
         };
 
+        // Strip any bundler sourceMappingURL comment from a processed JS chunk.
+        // Its map points at the pre-obfuscation source and must never ship.
+        if kind == FileKind::Js {
+            if let Some(edit) = sourcemap_strip_edit(&source) {
+                edits.push(edit);
+            }
+        }
+
         if edits.is_empty() {
-            // Identity milestone: the passes make no edits, so the file is left
-            // exactly as it was. It counts as unprotected in a check.
+            // Nothing to rewrite: no literal, name or canary, and no source-map
+            // comment. The file is left exactly as it was, and counts as
+            // unprotected in a check.
             return Ok(FileReport::unchanged(path, kind));
         }
 
@@ -127,6 +145,16 @@ impl Obfuscator {
         // never writes a broken chunk over a working one.
         if kind == FileKind::Js {
             crate::pass::ensure_js_reparses(path, &rewritten)?;
+        }
+        // Fail closed: no canary literal may survive verbatim in the output. This
+        // is the check-plaintext-leaks guarantee enforced at write time.
+        for canary in &self.options.canaries {
+            if !canary.value.is_empty() && rewritten.contains(&canary.value) {
+                return Err(Error::Canary {
+                    path: path.to_path_buf(),
+                    literal: canary.value.clone(),
+                });
+            }
         }
         if !self.options.check {
             write_preserving_bom(path, &source, &rewritten)?;
@@ -142,6 +170,31 @@ impl Obfuscator {
         }
         Ok(combined)
     }
+}
+
+/// An edit that deletes a trailing bundler `sourceMappingURL` comment, or
+/// `None` when the chunk has none. Both the `//#` and `//@` spellings are
+/// handled, and one preceding newline is removed so no blank line is left. A
+/// match that is not the last content in the file is left alone, matching the
+/// reference's end-of-file anchor.
+fn sourcemap_strip_edit(source: &str) -> Option<Edit> {
+    let start = ["//# sourceMappingURL=", "//@ sourceMappingURL="]
+        .iter()
+        .filter_map(|m| source.rfind(m))
+        .max()?;
+    let line_end = source[start..]
+        .find('\n')
+        .map(|n| start + n)
+        .unwrap_or(source.len());
+    if !source[line_end..].chars().all(char::is_whitespace) {
+        return None;
+    }
+    let del_start = if source[..start].ends_with('\n') {
+        start - 1
+    } else {
+        start
+    };
+    Some(Edit::replace(del_start, line_end, String::new()))
 }
 
 /// Write `rewritten` to `path`, keeping a UTF-8 byte-order mark if the original
@@ -250,5 +303,65 @@ mod tests {
         assert_eq!(fs::read_to_string(&js).unwrap(), original);
         assert_eq!(report.total(), 1);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sourcemap_strip_helper_only_strips_a_trailing_comment() {
+        assert!(sourcemap_strip_edit("const a=1;").is_none());
+        assert!(sourcemap_strip_edit("x\n//# sourceMappingURL=a.map").is_some());
+        assert!(sourcemap_strip_edit("//@ sourceMappingURL=a.map\n").is_some());
+        // A match with real code after it is not a bundler link; leave it.
+        assert!(sourcemap_strip_edit("//# sourceMappingURL=a.map\ncode()").is_none());
+    }
+
+    #[test]
+    fn sourcemappingurl_is_stripped_from_output() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        fs::write(&js, "const a = 'x';\n//# sourceMappingURL=app.js.map\n").unwrap();
+
+        let opts = Options {
+            seed: Some(b"seed".to_vec()),
+            ..Options::default()
+        };
+        let obf = Obfuscator::new(opts).unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(
+            !out.contains("sourceMappingURL"),
+            "map link survived: {out}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_surviving_canary_fails_the_build() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // "Fracital" is an identifier, not a string, so the literal pass does
+        // not touch it; the output scan must catch the leak and fail closed.
+        fs::write(&js, "const Fracital = 'x';").unwrap();
+
+        let opts = Options {
+            seed: Some(b"seed".to_vec()),
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..Options::default()
+        };
+        let obf = Obfuscator::new(opts).unwrap();
+        let err = obf.obfuscate_dir(&dir).unwrap_err();
+        assert!(matches!(err, Error::Canary { .. }));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sourcemap_dir_is_a_clear_not_implemented_error() {
+        let opts = Options {
+            sourcemap_dir: Some(PathBuf::from("/tmp/maps")),
+            ..Options::default()
+        };
+        assert!(matches!(Obfuscator::new(opts), Err(Error::Engine(_))));
     }
 }

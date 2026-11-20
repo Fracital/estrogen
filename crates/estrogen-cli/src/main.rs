@@ -3,14 +3,9 @@
 //! estrogen rewrites an already-built output directory in place, hiding the
 //! sensitive plaintext a site commits to not shipping verbatim. This front end
 //! parses the arguments, loads the config and its overrides, walks each
-//! directory through [`estrogen_core`], prints a report, and sets the exit code. It
-//! fails closed: any file estrogen cannot handle aborts the run with a nonzero
-//! exit.
-//!
-//! The obfuscation engine is not built yet. The passes are identity stubs, so a
-//! normal run parses every eligible file (failing closed on a parse error) and
-//! writes it back unchanged. `--check` then reports those files as unprotected
-//! and exits nonzero, which is the honest state until the engine lands.
+//! directory through [`estrogen_core`], prints a report, and sets the exit code.
+//! It fails closed: any file estrogen cannot handle aborts the run with a
+//! nonzero exit.
 
 mod cli;
 
@@ -46,6 +41,10 @@ fn main() -> ExitCode {
 /// Load options, run the obfuscator over every directory, print the report, and
 /// return the exit code. Errors come back as a message for `main` to print.
 fn run(cli: &Cli) -> Result<u8, String> {
+    if cli.watch {
+        return Err("watch mode is not implemented yet".to_string());
+    }
+
     let options = cli.build_options().map_err(|e| e.to_string())?;
     let check = options.check;
     let quiet = cli.quiet;
@@ -102,8 +101,8 @@ fn print_report(report: &Report, verbose: bool) {
 
     if report.obfuscated() == 0 && report.unchanged() > 0 {
         println!(
-            "estrogen: the obfuscation engine is stubbed, so {} eligible file(s) were \
-             left unchanged, not protected",
+            "estrogen: {} eligible file(s) had nothing to rewrite and were left \
+             unchanged, not protected",
             report.unchanged()
         );
     }

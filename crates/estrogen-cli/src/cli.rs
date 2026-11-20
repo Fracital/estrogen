@@ -47,6 +47,10 @@ pub struct Cli {
     #[arg(long = "check")]
     pub check: bool,
 
+    /// Watch the directories and re-run on change. Not implemented yet.
+    #[arg(long = "watch")]
+    pub watch: bool,
+
     /// Print nothing but errors.
     #[arg(long = "quiet")]
     pub quiet: bool,
@@ -145,6 +149,13 @@ mod tests {
     #[test]
     fn dir_is_required() {
         assert!(Cli::try_parse_from(["estrogen"]).is_err());
+    }
+
+    #[test]
+    fn watch_flag_parses() {
+        let cli = parse(&["estrogen", "--watch", "dist"]);
+        assert!(cli.watch);
+        assert!(!parse(&["estrogen", "dist"]).watch);
     }
 
     #[test]

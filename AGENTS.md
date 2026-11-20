@@ -64,8 +64,10 @@ Before handing work off: `cargo build`, `cargo test`, and
 ## Do not hand-edit
 
 - Generated or build output: `target/`, each npm package's `dist/` and `bin/`.
-- The obfuscation engine is stubbed on purpose. The passes return their input
-  and the pool and decoder return `Error::Engine`. The spec is Fracital's
-  `scripts/obfuscate-build.mjs`, cited per module. Do not ship a half-built
-  engine: a pass either works and is tested against that spec, or it stays a
-  stub.
+- The obfuscation engine is built and tested against Fracital's
+  `scripts/obfuscate-build.mjs`, cited per module: the ChaCha20 string and
+  template pool, the proxy and store name transform, the wasm name and base64
+  mapping, and the HTML and SVG markup pass. Keep it that way. A pass works and
+  is tested against that spec, or it does not land. Do not regress one to a stub
+  or ship a half-built pass, and check parity by decoding the output in node,
+  not by shape.

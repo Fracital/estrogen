@@ -177,7 +177,7 @@ impl Default for ProxyConfig {
     }
 }
 
-/// The `[options]` table of a estrogen config.
+/// The `[options]` table of an estrogen config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ConfigOptions {

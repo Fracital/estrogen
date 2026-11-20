@@ -62,16 +62,28 @@ it does not make it secret, and a key ships in each file.
 
 ## Repo state now
 
-A Cargo workspace skeleton, commit `d312d11`:
+The obfuscation engine is built and tested against the reference, editing the
+source by byte range with no AST reprint:
 
-- `Cargo.toml`: workspace, two members, release profile (lto fat, codegen-units
-  1, strip, panic abort).
-- `crates/estrogen-core`: the obfuscation library. A placeholder `lib.rs`.
-- `crates/estrogen-cli`: the `estrogen` binary. A placeholder `main.rs`.
-- `LICENSE` (ISC), `.gitignore`, a placeholder `README.md`.
-- `docs/assets/am i cool yet.png`, the avatar image for the README.
+- `crates/estrogen-core`: the engine. The edit-and-splice core, the file walk
+  and eligibility gate, config loading (`Options`, with the `[proxy]` table), and
+  the passes: the ChaCha20 string and template pool with the emitted decoder
+  (`chacha.rs`, `keys.rs`, `format.rs`, `pass/literals.rs`), the proxy and store
+  name transform (`proxy.rs`, `pass/names.rs`), the wasm name and base64 mapping
+  (`wasm.rs`), and the HTML and SVG markup pass (`pass/markup.rs`). Each JS file
+  takes one transform: the proxy path for vendor-glob files, else the literal
+  pool. The obfuscator re-parses its output and fails closed, and scans it for
+  surviving canaries.
+- `crates/estrogen-cli`: the `estrogen` binary. `estrogen [<dir>...]` plus
+  `--config`, `--canary`, `--names`, `--sourcemap`, `--seed`, `--jobs`,
+  `--check` and `--watch`.
+- `npm/estrogen`: the launcher and per-target packages, and the esbuild,
+  rsbuild, Vite and Rollup plugins.
 
-Nothing obfuscates yet. `target/` is build output and is gitignored.
+Still open: source map V3 emission behind `--sourcemap` (the flag parses but
+emission is not written yet, so it fails closed), the `--watch` watcher, and the
+vendoring pipeline (the roadmap below). `target/` is build output and is
+gitignored.
 
 ## What the tool has to do
 
@@ -369,7 +381,7 @@ declarative port of the SystemYA prepare scripts as the first real config.
 
 - Does estrogen cover the 2022 CSS text obfuscation (`obfuscate.ts`), or is that
   SystemYA's alone?
-- Is the bytecode shield VM ever a estrogen target, or does it stay in the main app?
+- Is the bytecode shield VM ever an estrogen target, or does it stay in the main app?
 - The exact flag set and config format: per-site flags, a config file, or both.
 - Windows arm64 and any other target beyond the five above.
 
