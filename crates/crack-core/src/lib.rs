@@ -50,18 +50,22 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod chacha;
 pub mod edit;
 pub mod error;
 pub mod format;
+mod keys;
 pub mod obfuscator;
 pub mod options;
 pub mod pass;
+mod proxy;
 pub mod report;
 pub mod walk;
+mod wasm;
 
 pub use error::{Error, Result};
 pub use format::FORMAT_VERSION;
 pub use obfuscator::Obfuscator;
-pub use options::{Canary, CanaryList, NameMap, Options};
+pub use options::{Canary, CanaryList, NameMap, Options, ProxyConfig};
 pub use report::{FileReport, FileStatus, Report};
 pub use walk::{Eligibility, FileKind, SkipReason};

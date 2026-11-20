@@ -22,9 +22,9 @@ use crate::error::{Error, Result};
 use crate::options::Options;
 use crate::pass::literals::LiteralsPass;
 use crate::pass::markup::MarkupPass;
-use crate::pass::names::NamesPass;
-use crate::pass::wasm::WasmPass;
+use crate::pass::names::collect_proxy_edits;
 use crate::pass::{FileContext, Pass};
+use crate::proxy::ProxyEngine;
 use crate::report::{FileReport, Report};
 use crate::walk::{eligibility, walk_files, Eligibility, FileKind};
 
@@ -32,38 +32,24 @@ use crate::walk::{eligibility, walk_files, Eligibility, FileKind};
 /// call [`Obfuscator::obfuscate_dir`] on each built directory.
 pub struct Obfuscator {
     options: Options,
+    proxy: ProxyEngine,
 }
 
 impl Obfuscator {
     /// Build an obfuscator from run options.
     ///
-    /// This does not touch the filesystem. It returns `Err` only if the options
-    /// themselves are unusable; today they always are usable, so it is
-    /// infallible in practice, and the `Result` leaves room for future
-    /// validation.
+    /// This does not touch the filesystem. It compiles the proxy renaming engine
+    /// from the options, drawing the per-build rename key once, so every file in
+    /// the run renames a proxy name to the same substitute. It returns `Err` if
+    /// the proxy config does not compile (a bad names regex or vendor glob).
     pub fn new(options: Options) -> Result<Self> {
-        Ok(Obfuscator { options })
+        let proxy = ProxyEngine::new(&options.proxy, &options.canaries, options.seed.as_deref())?;
+        Ok(Obfuscator { options, proxy })
     }
 
     /// The options this obfuscator runs with.
     pub fn options(&self) -> &Options {
         &self.options
-    }
-
-    /// The passes that apply to a file of the given kind, in run order.
-    ///
-    /// The order follows the `protect` script: literals, then names, then wasm
-    /// for JS; markup for the HTML shells and SVG cloaks.
-    fn passes_for(kind: FileKind) -> Vec<Box<dyn Pass + Sync>> {
-        match kind {
-            FileKind::Js => vec![
-                Box::new(LiteralsPass),
-                Box::new(NamesPass),
-                Box::new(WasmPass),
-            ],
-            FileKind::Html | FileKind::Svg => vec![Box::new(MarkupPass)],
-            FileKind::Wasm | FileKind::Other => Vec::new(),
-        }
     }
 
     /// Obfuscate every eligible file under `dir`, in place.
@@ -113,11 +99,21 @@ impl Obfuscator {
             }
         };
 
-        let mut edits = EditSet::new();
-        for pass in Self::passes_for(kind) {
-            let ctx = FileContext::new(path, kind, &source, &self.options);
-            edits.extend(pass.collect_edits(&ctx)?);
-        }
+        // One transform per file: a proxy vendor JS file is renamed, any other
+        // JS chunk gets full literal encryption, and HTML/SVG run the markup
+        // pass. This mirrors the reference's `isProxyVendor ? proxy : app` split.
+        let ctx = FileContext::new(path, kind, &source, &self.options);
+        let edits = match kind {
+            FileKind::Js => {
+                if self.proxy.is_vendor(path) {
+                    collect_proxy_edits(&ctx, &self.proxy)?
+                } else {
+                    LiteralsPass.collect_edits(&ctx)?
+                }
+            }
+            FileKind::Html | FileKind::Svg => MarkupPass.collect_edits(&ctx)?,
+            FileKind::Wasm | FileKind::Other => EditSet::new(),
+        };
 
         if edits.is_empty() {
             // Identity milestone: the passes make no edits, so the file is left
@@ -127,6 +123,11 @@ impl Obfuscator {
 
         let edit_count = edits.len();
         let rewritten = edits.apply(&source)?;
+        // Fail closed: a JS chunk that no longer parses is a pass bug, and crack
+        // never writes a broken chunk over a working one.
+        if kind == FileKind::Js {
+            crate::pass::ensure_js_reparses(path, &rewritten)?;
+        }
         if !self.options.check {
             write_preserving_bom(path, &source, &rewritten)?;
         }
@@ -177,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_run_leaves_files_byte_for_byte() {
+    fn a_run_obfuscates_a_js_chunk_in_place() {
         let dir = tmp_dir();
         let js = dir.join("app.js");
         let original = "const a = 'hello world';\n";
@@ -186,12 +187,14 @@ mod tests {
         let obf = Obfuscator::new(Options::default()).unwrap();
         let report = obf.obfuscate_dir(&dir).unwrap();
 
-        // The file is unchanged on disk.
-        assert_eq!(fs::read_to_string(&js).unwrap(), original);
+        // The literal pass rewrote the file: the plaintext is gone, the marker
+        // and the decoder are in, and the chunk is reported as obfuscated.
+        let written = fs::read_to_string(&js).unwrap();
+        assert_ne!(written, original);
+        assert!(!written.contains("'hello world'"));
+        assert!(written.contains(crate::format::MARKER));
         assert_eq!(report.total(), 1);
-        // Eligible but not obfuscated, so it is unprotected in the identity
-        // milestone.
-        assert!(report.has_unprotected());
+        assert!(!report.has_unprotected());
         fs::remove_dir_all(&dir).ok();
     }
 

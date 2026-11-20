@@ -18,7 +18,6 @@
 pub mod literals;
 pub mod markup;
 pub mod names;
-pub mod wasm;
 
 use std::path::{Path, PathBuf};
 
@@ -117,6 +116,30 @@ pub fn with_parsed_js<T>(
         });
     }
     walk(&ret.program)
+}
+
+/// Re-parse obfuscated JS output and fail closed if it does not parse.
+///
+/// This is the safety net the reference `assemble` keeps: after a pass rewrites
+/// a chunk, the result must still be valid JS. A pass that produces unparseable
+/// output is a bug, not bad input, so crack refuses to write the file rather
+/// than ship a broken chunk. The error names the file and marks it as the
+/// obfuscated output, not the source.
+pub fn ensure_js_reparses(path: &Path, output: &str) -> Result<()> {
+    let allocator = Allocator::default();
+    let source_type = source_type_for(path);
+    let ret = Parser::new(&allocator, output, source_type).parse();
+    if let Some(err) = ret
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error)
+    {
+        return Err(Error::Parse {
+            path: path.to_path_buf(),
+            message: format!("obfuscated output did not re-parse: {err}"),
+        });
+    }
+    Ok(())
 }
 
 /// A read-only visitor that counts string literals.

@@ -84,6 +84,25 @@ pub enum Error {
     /// hit it.
     #[error("engine not implemented: {0}")]
     Engine(&'static str),
+
+    /// A wasm module could not be walked, or mapping it would have changed its
+    /// structure. crack fails closed on a module it cannot handle rather than
+    /// ship a corrupt binary. The message names what went wrong and where.
+    #[error("wasm: {message}")]
+    Wasm {
+        /// What went wrong, including the byte offset where the walk stopped.
+        message: String,
+    },
+
+    /// The proxy transform could not rename a file: a store opened under a name
+    /// not on the allow-list, a regular expression that spells a proxy name
+    /// across an escape or class, or an app-shared name in an unsupported
+    /// position. crack fails closed rather than leave a proxy name in the clear.
+    #[error("{message}")]
+    Proxy {
+        /// What went wrong, naming the file where the caller has it.
+        message: String,
+    },
 }
 
 impl Error {

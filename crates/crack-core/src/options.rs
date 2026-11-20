@@ -73,6 +73,110 @@ pub fn load_name_map(path: &Path) -> Result<NameMap> {
     })
 }
 
+/// The `[proxy]` table: how the proxy vendor runtime is renamed.
+///
+/// The proxy transport code is not string-encrypted wholesale. Instead the proxy
+/// names (scramjet, stomp, epoxy and the rest) are renamed by a per-build
+/// same-length substitution in identifiers, whitespace-free strings and the
+/// embedded wasm, so the hot path pays no decode cost. This table names the
+/// tokens, which files take the proxy path, the app-shared names that must stay
+/// real, and the persistent store names that keep a fixed substitution.
+///
+/// Every field defaults to Fracital's values, so a config that omits `[proxy]`
+/// obfuscates a Fracital build as the reference script does. Another site
+/// overrides the fields it needs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Proxy token patterns, joined into one case-insensitive alternation. Each
+    /// entry is a regex fragment (for example `bare[-_]?mux`).
+    pub names: Vec<String>,
+    /// Globs that select the files which take the proxy path instead of full
+    /// literal encryption. A JS file matching any glob is a proxy vendor file.
+    pub vendor: Vec<String>,
+    /// App-shared globals that must stay real at runtime. Each maps a name to the
+    /// pieces it is rebuilt from, so the published global keeps its exact name
+    /// while every piece ships encrypted. Each pieces list must join to the name.
+    pub shared_names: BTreeMap<String, Vec<String>>,
+    /// App-shared string values that keep their text (encrypted, never renamed),
+    /// because app code and the vendor exchange them verbatim.
+    pub shared_strings: Vec<String>,
+    /// Fixed same-length substitutions for the persistent store names, keyed by
+    /// the lower-cased proxy token. These stay the same every build so a browser
+    /// keeps the storage it already holds.
+    pub store_tokens: BTreeMap<String, String>,
+    /// The persistent store names that keep their name across builds. A proxy
+    /// name opened as a store but not on this list fails the build.
+    pub store_names: Vec<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        let s = |v: &str| v.to_string();
+        ProxyConfig {
+            names: [
+                "scramjet",
+                "stomp",
+                "bare[-_]?mux",
+                "wispurr",
+                "epoxy",
+                "libcurl",
+                "ultraviolet",
+                "titaniumnetwork",
+                "uvserviceworker",
+                "uvclient",
+                "__uv",
+            ]
+            .iter()
+            .map(|v| s(v))
+            .collect(),
+            vendor: vec![s("**/vendor/**"), s("**/sw.js")],
+            shared_names: BTreeMap::from([
+                (s("$scramjet"), vec![s("$"), s("scram"), s("jet")]),
+                (
+                    s("$scramjetController"),
+                    vec![s("$"), s("scram"), s("jet"), s("Controller")],
+                ),
+            ]),
+            shared_strings: [
+                "bare-mux-path",
+                "bare-mux-worker",
+                "bare-mux-remote",
+                "bare-mux",
+            ]
+            .iter()
+            .map(|v| s(v))
+            .collect(),
+            store_tokens: BTreeMap::from([
+                (s("stomp"), s("gdosx")),
+                (s("scramjet"), s("ebshkqee")),
+            ]),
+            store_names: [
+                "stompCookies",
+                "stompStorage",
+                "stompConfig",
+                "stompServiceWorkers",
+                "stompClientOrigins",
+                "stompClientHints",
+                "stompMediaLoads",
+                "stompDeviceIds",
+                "stompPermissions",
+                "stompDeviceGrants",
+                "stompPasskeys",
+                "stomp-wisp-carrier",
+                "stomp-http-cache",
+                "stomp-rewrite-cache",
+                "stomp-adblock",
+                "stomp-document-bundles",
+                "__scramjet_controller",
+            ]
+            .iter()
+            .map(|v| s(v))
+            .collect(),
+        }
+    }
+}
+
 /// The `[options]` table of a crack config.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -89,6 +193,7 @@ struct ConfigFile {
     names: NameMap,
     canary: Vec<Canary>,
     options: ConfigOptions,
+    proxy: ProxyConfig,
 }
 
 /// Everything a run needs besides the input directories.
@@ -113,6 +218,8 @@ pub struct Options {
     pub jobs: usize,
     /// Report only, write nothing, and exit nonzero if anything is unprotected.
     pub check: bool,
+    /// How the proxy vendor runtime is renamed. Defaults to Fracital's values.
+    pub proxy: ProxyConfig,
 }
 
 impl Default for Options {
@@ -124,6 +231,7 @@ impl Default for Options {
             seed: None,
             jobs: default_jobs(),
             check: false,
+            proxy: ProxyConfig::default(),
         }
     }
 }
@@ -147,6 +255,7 @@ impl Options {
             seed: None,
             jobs: file.options.jobs.unwrap_or_else(default_jobs),
             check: file.options.check,
+            proxy: file.proxy,
         };
         opts.canaries.retain(|c| !c.value.is_empty());
         if opts.jobs == 0 {

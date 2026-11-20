@@ -282,6 +282,89 @@ others. STomp's build is where SystemYA pulls its runtime from, so changing
 STomp's obfuscation reaches SystemYA through the nightly; coordinate that with
 the STomp session rather than editing `~/src/stomp-rewrite` directly.
 
+## Roadmap: crack as the build glue
+
+The first version obfuscates an already-built dir. The next step is to make crack
+the one build step that assembles the served tree and obfuscates it in the same
+pass, so each site deletes its hand-written copy scripts. This is additive: the
+obfuscation engine stays the core, and vendoring calls into it per input.
+
+### Vendoring and copy
+
+crack can copy packages and folders into the dist output, including whole
+node_modules packages, driven by config. Each input is one declared step: where
+it comes from, where it lands, and whether it is obfuscated on the way in or
+copied as is. This replaces the manual copy step each site maintains, and it
+generalizes what SystemYA does by hand in
+`~/src/SystemYA/scripts/prepare-stomp.mjs` and `prepare-powermouse.mjs`: copy a
+package's dist into the served tree under stamped neutral names, rewrite the wasm
+references, strip source maps, and obfuscate. Read those as the prior art.
+
+The config is TOML, in the same file as the obfuscation options. Each input is a
+`[[vendor]]` block:
+
+```toml
+[[vendor]]
+from = "node_modules/ruffle"   # a package dir, a folder, or a glob
+to   = "assets"                # destination under the dist root
+mode = "verbatim"              # or "obfuscate"; transports stay verbatim
+stamp = true                   # insert a per-build stamp before the extension
+
+  [[vendor.rewrite]]           # optional reference rewrites, e.g. wasm names
+  find = "epoxy.wasm"
+  to   = "ln.{stamp}.wasm"
+```
+
+The stamp is minted once per build and exposed to rewrites as `{stamp}`. The rule
+that no served file names its package is the stamp plus a neutral name. Source
+map stripping is already crack's job, so vendored files get it too.
+
+### Public API growth
+
+Vendoring grows the library API, additively:
+
+- `Options` gains `vendor: Vec<VendorInput>`, the parsed `[[vendor]]` blocks.
+- `Obfuscator::build(dir)` runs vendor-then-obfuscate for a dist. `obfuscate_dir`
+  stays obfuscate-only, so its existing callers are untouched.
+- `Report` gains entries for vendored files, alongside the obfuscated ones.
+
+`FORMAT_VERSION`, `Error`, and the existing `obfuscate_dir` path keep their
+shape. The npm package and the plugins mirror these, so a change here reaches the
+consumers; announce the shape when it lands.
+
+### Build system integrations
+
+The esbuild and rsbuild plugins exist. Add a real Vite plugin, not a post-build
+shell step, and a Rollup plugin, and keep the core API clean so webpack, Parcel
+and a plain CLI can wrap it. A plugin runs the vendor and obfuscate step as part
+of the build, so a project adds one plugin and deletes its copy scripts.
+
+### Watcher
+
+crack watches the declared input folders and re-runs the copy, vendor and
+obfuscate work for what changed. Each builder integration hooks the builder's dev
+server so the change reloads: Vite through `configureServer` and
+`handleHotUpdate`, Rollup through `watchChange`. A standalone `crack --watch
+<config>` runs outside a bundler too. The pass is not idempotent, so the watcher
+re-runs from the pre-obfuscation source each time, never over its own output.
+
+### CLI
+
+`crack [<dir>...]` takes one or more output dirs, because the obfuscate-only path
+processes several in one go (Fracital builds aws, jsdelivr and singlefile
+together). Vendoring is config-driven and applies to the dist roots given.
+`crack --watch <config>` runs the watcher. The Node option stays plural,
+`dirs: string | string[]`. Plugins call the programmatic API with the builder's
+resolved output dirs, not the CLI, so the CLI and the plugin path stay separate.
+
+### Sequencing
+
+This lands after the obfuscation engine core (the string, name, wasm and markup
+passes). The vendor pipeline calls into that core per input, so the core API is
+frozen first, then the vendoring work fans out: the vendor and copy pipeline, the
+stamping and reference rewrite, the Vite and Rollup plugins, the watcher, and the
+declarative port of the SystemYA prepare scripts as the first real config.
+
 ## Open questions for the user
 
 - Does crack cover the 2022 CSS text obfuscation (`obfuscate.ts`), or is that

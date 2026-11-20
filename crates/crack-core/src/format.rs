@@ -7,19 +7,23 @@
 //! so the Rust encoder and the emitted JS decoder stay one contract.
 //!
 //! The spec is Fracital's `scripts/obfuscate-build.mjs`: the cipher is ChaCha20
-//! (RFC 8439), the shipped decoder is a compact vanilla ChaCha20 symmetric with
-//! the encoder, and `obfuscate-build.test.mjs` asserts that the decoder decodes
-//! the encoder's pool byte for byte. crack emits a decoder that decodes crack's
-//! own pool and has to pass that same symmetry check.
+//! (RFC 8439), a pool entry is `base64(nonce || ciphertext)`, the key ships as
+//! base64, and the shipped decoder is a compact vanilla ChaCha20 symmetric with
+//! the encoder. `obfuscate-build.test.mjs` asserts that the decoder decodes the
+//! encoder's pool byte for byte; crack emits a decoder that decodes crack's own
+//! pool and passes that same check. [`decoder_source`] reproduces the
+//! reference's `decoderSource` byte for byte, so a pool is portable between the
+//! two.
 //!
 //! The key ships in the file. This raises the cost of reading a build; it is not
 //! secrecy, and anyone with devtools can run the code. Nothing here is secret.
-//!
-//! The engine is not built yet. The types below name the pieces of the format;
-//! the functions that encrypt a pool and emit a decoder are stubs that return
-//! [`Error::Engine`], cited against the reference above.
 
-use crate::error::{Error, Result};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use std::collections::HashMap;
+
+use crate::error::Result;
+use crate::keys::FileKeys;
 
 /// Version of the pool and decoder format.
 ///
@@ -37,36 +41,220 @@ pub const FORMAT_VERSION: u32 = 1;
 /// `MARKER` constant from `obfuscate-build.mjs`.
 pub const MARKER: &str = "__FRX_OBF__";
 
+/// The decoder text from `=(function(){` through `var K=U(`, captured verbatim
+/// from the reference `decoderSource`. The per-file name is prepended and the
+/// key JSON follows.
+const DECODER_HEAD: &str = r#"=(function(){function U(s){var b=atob(s),a=new Uint8Array(b.length),i=0;for(;i<b.length;i++)a[i]=b.charCodeAt(i);return a}function R(a,b){return((a<<b)|(a>>>(32-b)))>>>0}function CC(k,n,d){var K=new Uint32Array(8),N=new Uint32Array(3),o=new Uint8Array(d.length),S=new Uint32Array(16),W=new Uint32Array(16),ct=0,i,off,r,bl=new Uint8Array(64),v,nn;function Q(a,b,c,e){W[a]=(W[a]+W[b])>>>0;W[e]=R(W[e]^W[a],16);W[c]=(W[c]+W[e])>>>0;W[b]=R(W[b]^W[c],12);W[a]=(W[a]+W[b])>>>0;W[e]=R(W[e]^W[a],8);W[c]=(W[c]+W[e])>>>0;W[b]=R(W[b]^W[c],7)}for(i=0;i<8;i++)K[i]=(k[i*4]|(k[i*4+1]<<8)|(k[i*4+2]<<16)|(k[i*4+3]<<24))>>>0;for(i=0;i<3;i++)N[i]=(n[i*4]|(n[i*4+1]<<8)|(n[i*4+2]<<16)|(n[i*4+3]<<24))>>>0;for(off=0;off<d.length;off+=64){S[0]=0x61707865;S[1]=0x3320646e;S[2]=0x79622d32;S[3]=0x6b206574;S[4]=K[0];S[5]=K[1];S[6]=K[2];S[7]=K[3];S[8]=K[4];S[9]=K[5];S[10]=K[6];S[11]=K[7];S[12]=ct>>>0;S[13]=N[0];S[14]=N[1];S[15]=N[2];for(i=0;i<16;i++)W[i]=S[i];for(r=0;r<10;r++){Q(0,4,8,12);Q(1,5,9,13);Q(2,6,10,14);Q(3,7,11,15);Q(0,5,10,15);Q(1,6,11,12);Q(2,7,8,13);Q(3,4,9,14)}for(i=0;i<16;i++){v=(W[i]+S[i])>>>0;bl[i*4]=v&255;bl[i*4+1]=(v>>>8)&255;bl[i*4+2]=(v>>>16)&255;bl[i*4+3]=(v>>>24)&255}nn=Math.min(64,d.length-off);for(i=0;i<nn;i++)o[off+i]=d[off+i]^bl[i];ct++}return o}var K=U("#;
+
+/// The decoder text after the pool array, captured verbatim: the memoized decode
+/// closure and the IIFE close.
+const DECODER_TAIL: &str = r#",C=[],TD=new TextDecoder();return function(i){if(C[i]!==void 0)return C[i];var raw=U(P[i]),n=raw.subarray(0,12),c=raw.subarray(12);return C[i]=TD.decode(CC(K,n,c))}})();"#;
+
 /// An encrypted constant pool for one file.
 ///
-/// `key` is the 32-byte ChaCha20 key that ships with the file. `entries` are the
-/// ciphertext blocks, one per unique source literal, in the order the body's
-/// `NAME(idx)` calls index them. The in-file encoding of these fields is what
-/// [`FORMAT_VERSION`] governs.
+/// `key_b64` is the base64 of the 32-byte ChaCha20 key that ships with the file.
+/// `entries` are the pool strings, each `base64(nonce || ciphertext)`, in the
+/// order the body's `NAME(idx)` calls index them. These two fields are exactly
+/// what [`decoder_source`] embeds, so the in-file shape is [`FORMAT_VERSION`].
 #[derive(Debug, Clone, Default)]
 pub struct Pool {
-    /// Per-file ChaCha20 key, shipped in the file.
-    pub key: Vec<u8>,
-    /// Ciphertext for each unique literal, indexed by the body's decode calls.
-    pub entries: Vec<Vec<u8>>,
+    /// Base64 of the per-file ChaCha20 key, shipped in the file.
+    pub key_b64: String,
+    /// `base64(nonce || ciphertext)` for each unique literal, indexed by the
+    /// body's decode calls.
+    pub entries: Vec<String>,
 }
 
 impl Pool {
-    /// Build an encrypted pool from a file's unique literals.
-    ///
-    /// Not built yet: this is where ChaCha20 encryption and the pool layout
-    /// live. It returns [`Error::Engine`] until the engine lands.
-    pub fn encrypt(_literals: &[String], _key: &[u8]) -> Result<Pool> {
-        Err(Error::Engine("pool encryption (format.rs)"))
+    /// How many entries the pool holds.
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
-    /// Emit the JS source of the decoder plus the encoded pool and key, to be
+    /// Whether the pool is empty. An empty pool means nothing was encrypted, so
+    /// no decoder is shipped.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Emit the JS source of the decoder, with the encoded pool and key, to be
     /// prepended to the file.
     ///
-    /// Not built yet: this emits the compact ChaCha20 decoder that is symmetric
-    /// with [`Pool::encrypt`]. It returns [`Error::Engine`] until the engine
-    /// lands.
-    pub fn emit_decoder(&self, _global_name: &str) -> Result<String> {
-        Err(Error::Engine("decoder emitter (format.rs)"))
+    /// The output is byte-for-byte the reference `decoderSource(name, key_b64,
+    /// entries)`: `var NAME=(function(){ ... })();`. `name` is the per-file
+    /// decode global the body calls. The key and pool are embedded as JSON, the
+    /// same compact form `JSON.stringify` produces.
+    pub fn emit_decoder(&self, name: &str) -> String {
+        let key_json = json_string(&self.key_b64);
+        let pool_json = json_string_array(&self.entries);
+        format!("var {name}{DECODER_HEAD}{key_json}),P={pool_json}{DECODER_TAIL}")
+    }
+}
+
+/// Builds a [`Pool`] as literals are collected, the port of the reference's
+/// `makeCrypto`. It draws the per-file key once, then [`push`](PoolBuilder::push)
+/// encrypts each unique plaintext into an entry and returns its index; a repeat
+/// of the same plaintext returns the first index, so the pool is deduplicated.
+pub struct PoolBuilder {
+    keys: FileKeys,
+    name: String,
+    key: [u8; 32],
+    key_b64: String,
+    entries: Vec<String>,
+    index: HashMap<String, usize>,
+}
+
+impl PoolBuilder {
+    /// Start a pool for one file from its key source. Draws the decoder name and
+    /// the per-file key.
+    pub fn new(mut keys: FileKeys) -> Result<Self> {
+        let name = keys.decoder_name();
+        let (key, key_b64) = keys.draw_key()?;
+        Ok(PoolBuilder {
+            keys,
+            name,
+            key,
+            key_b64,
+            entries: Vec::new(),
+            index: HashMap::new(),
+        })
+    }
+
+    /// The per-file decode global the body's calls name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether nothing has been encrypted yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Encrypt `plaintext` into the pool and return its index. A plaintext
+    /// already in the pool returns its existing index without re-encrypting, so
+    /// the pool holds one entry per unique string.
+    pub fn push(&mut self, plaintext: &str) -> Result<usize> {
+        if let Some(&i) = self.index.get(plaintext) {
+            return Ok(i);
+        }
+        let i = self.entries.len();
+        let entry = self.keys.seal_entry(&self.key, plaintext.as_bytes())?;
+        self.index.insert(plaintext.to_string(), i);
+        self.entries.push(entry);
+        Ok(i)
+    }
+
+    /// Finish the pool. The builder is consumed.
+    pub fn into_pool(self) -> Pool {
+        Pool {
+            key_b64: self.key_b64,
+            entries: self.entries,
+        }
+    }
+}
+
+/// Decode pool entry `i` of a pool with `key_b64`, returning the plaintext
+/// bytes. This is the Rust mirror of the shipped decoder, used to verify a pool
+/// round-trips without shelling out to a JS engine.
+pub fn decode_entry(key_b64: &str, entry: &str) -> Result<Vec<u8>> {
+    use crate::error::Error;
+    let key_bytes = STANDARD
+        .decode(key_b64)
+        .map_err(|_| Error::Engine("key is not valid base64"))?;
+    let raw = STANDARD
+        .decode(entry)
+        .map_err(|_| Error::Engine("pool entry is not valid base64"))?;
+    if key_bytes.len() != 32 || raw.len() < 12 {
+        return Err(Error::Engine("pool entry or key has the wrong length"));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&key_bytes);
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&raw[..12]);
+    Ok(crate::chacha::chacha20_xor(&key, &nonce, &raw[12..]))
+}
+
+/// `JSON.stringify` of one string: the base64 strings crack ships contain only
+/// alphabet characters, so this only needs to wrap in quotes. An assert guards
+/// the assumption.
+fn json_string(s: &str) -> String {
+    debug_assert!(
+        !s.contains(['"', '\\']),
+        "pool string carried a character that needs JSON escaping: {s:?}"
+    );
+    format!("\"{s}\"")
+}
+
+/// `JSON.stringify` of an array of such strings: `["a","b"]`, no spaces, the
+/// same compact form the reference embeds.
+fn json_string_array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(item));
+    }
+    out.push(']');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::{Canary, Options};
+
+    fn seeded(canaries: &[&str]) -> Options {
+        Options {
+            seed: Some(b"format-test-seed".to_vec()),
+            canaries: canaries
+                .iter()
+                .map(|v| Canary {
+                    value: (*v).to_string(),
+                    reason: String::new(),
+                })
+                .collect(),
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn pool_entries_round_trip_through_the_rust_decoder() {
+        let opts = seeded(&[]);
+        let keys = FileKeys::new(&opts, b"body").unwrap();
+        let mut b = PoolBuilder::new(keys).unwrap();
+        let strings = ["hello", "héllo unicode ☃", "", "Go ad-free for $1"];
+        let mut idxs = Vec::new();
+        for s in &strings {
+            idxs.push(b.push(s).unwrap());
+        }
+        // A repeat dedupes to the same index.
+        assert_eq!(b.push("hello").unwrap(), idxs[0]);
+        let pool = b.into_pool();
+        for (s, &i) in strings.iter().zip(&idxs) {
+            let decoded = decode_entry(&pool.key_b64, &pool.entries[i]).unwrap();
+            assert_eq!(decoded, s.as_bytes());
+        }
+    }
+
+    #[test]
+    fn emit_decoder_shape() {
+        let pool = Pool {
+            key_b64: "KEYB64".to_string(),
+            entries: vec!["E0".to_string(), "E1".to_string()],
+        };
+        let ds = pool.emit_decoder("__frx$abc123");
+        assert!(ds.starts_with("var __frx$abc123=(function(){"));
+        assert!(ds.contains(r#"var K=U("KEYB64"),P=["E0","E1"],C=[]"#));
+        assert!(ds.ends_with("})();"));
+    }
+
+    #[test]
+    fn empty_pool_is_empty() {
+        let opts = seeded(&[]);
+        let keys = FileKeys::new(&opts, b"x").unwrap();
+        let b = PoolBuilder::new(keys).unwrap();
+        assert!(b.is_empty());
+        assert!(b.into_pool().is_empty());
     }
 }
