@@ -12,6 +12,7 @@
  * - The Rsbuild plugin lives at `@sysce/estrogen/rsbuild`.
  * - The Vite plugin lives at `@sysce/estrogen/vite`.
  * - The Rollup plugin lives at `@sysce/estrogen/rollup`.
+ * - The Astro integration lives at `@sysce/estrogen/astro`.
  *
  * @packageDocumentation
  */

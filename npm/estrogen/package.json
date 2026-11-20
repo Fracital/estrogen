@@ -19,7 +19,8 @@
 		"esbuild",
 		"rsbuild",
 		"vite",
-		"rollup"
+		"rollup",
+		"astro"
 	],
 	"type": "module",
 	"bin": {
@@ -79,6 +80,16 @@
 				"default": "./dist/cjs/rollup.js"
 			}
 		},
+		"./astro": {
+			"import": {
+				"types": "./dist/esm/astro.d.ts",
+				"default": "./dist/esm/astro.js"
+			},
+			"require": {
+				"types": "./dist/cjs/astro.d.ts",
+				"default": "./dist/cjs/astro.js"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"files": [
@@ -102,6 +113,7 @@
 	},
 	"peerDependencies": {
 		"@rsbuild/core": "*",
+		"astro": "*",
 		"esbuild": "*",
 		"vite": "*",
 		"rollup": "*"
@@ -111,6 +123,9 @@
 			"optional": true
 		},
 		"@rsbuild/core": {
+			"optional": true
+		},
+		"astro": {
 			"optional": true
 		},
 		"vite": {
@@ -123,6 +138,7 @@
 	"devDependencies": {
 		"@rsbuild/core": "^1.1.0",
 		"@types/node": "^22.10.0",
+		"astro": "^5.1.0",
 		"esbuild": "^0.24.0",
 		"rollup": "^4.68.7",
 		"typescript": "^5.7.0",
