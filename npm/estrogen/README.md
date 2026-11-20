@@ -83,7 +83,7 @@ await build({
 
 The plugin runs in `onEnd`, after esbuild writes the bundle. It takes the output
 directory from `outdir`, or from the directory of `outfile`, resolved against
-`absWorkingDir`. It skips a build that produced errors and turns a estrogen failure
+`absWorkingDir`. It skips a build that produced errors and turns an estrogen failure
 into an esbuild error.
 
 ## Rsbuild

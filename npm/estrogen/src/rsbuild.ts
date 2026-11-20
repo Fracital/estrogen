@@ -8,7 +8,7 @@ import type { PluginOptions } from './options.js';
  *
  * It reads the dist path from the Rsbuild context (`api.context.distPath`),
  * which is the absolute output directory Rsbuild resolved for the build, and
- * runs estrogen in `onAfterBuild`, once the files are written. A estrogen failure is
+ * runs estrogen in `onAfterBuild`, once the files are written. An estrogen failure is
  * rethrown so the build fails.
  *
  * estrogen rewrites that directory in place and raises the cost of reading it. It

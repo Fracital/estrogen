@@ -1,5 +1,5 @@
 /**
- * The result of a estrogen run, resolved by {@link obfuscate}. estrogen exits 0 on
+ * The result of an estrogen run, resolved by {@link obfuscate}. estrogen exits 0 on
  * success and nonzero on failure, so a resolved report always has
  * `exitCode === 0`; a failed run rejects with a {@link EstrogenError} instead.
  */

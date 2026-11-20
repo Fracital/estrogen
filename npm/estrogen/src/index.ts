@@ -10,6 +10,8 @@
  * - {@link obfuscate} spawns the binary over one or more directories.
  * - The esbuild plugin lives at `@sysce/estrogen/esbuild`.
  * - The Rsbuild plugin lives at `@sysce/estrogen/rsbuild`.
+ * - The Vite plugin lives at `@sysce/estrogen/vite`.
+ * - The Rollup plugin lives at `@sysce/estrogen/rollup`.
  *
  * @packageDocumentation
  */

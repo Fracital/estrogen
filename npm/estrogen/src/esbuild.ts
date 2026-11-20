@@ -10,7 +10,7 @@ import type { PluginOptions } from './options.js';
  * It finds the directory from `initialOptions.outdir`, or from the directory of
  * `initialOptions.outfile` when a single file is built, resolved against the
  * build's `absWorkingDir` or the current working directory. It runs in `onEnd`,
- * once the bundle is on disk, and skips when the build produced errors. A estrogen
+ * once the bundle is on disk, and skips when the build produced errors. An estrogen
  * failure is turned into an esbuild error so the build fails.
  *
  * estrogen rewrites that directory in place and raises the cost of reading it. It
