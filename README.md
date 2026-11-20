@@ -30,7 +30,7 @@ estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
 A decoder key ships in each file, and anyone with devtools can run the code. TLS
 is the only transport protection. Do not describe the output as secret.
 
-Try it in your browser at [estrogen.fracit.al](https://estrogen.fracit.al): the
+Try it in your browser at [estro.help](https://estro.help): the
 real engine compiled to WebAssembly, running locally on what you paste. Nothing
 is uploaded, and the same limit holds, the output is not secret.
 
