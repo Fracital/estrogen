@@ -27,6 +27,13 @@ html {
 	scrollbar-gutter: stable;
 }
 
+/* Holo styles `button` with a display, which (author origin) beats the UA
+   `[hidden] { display: none }`, so the hidden attribute would not hide a
+   button. Restore it for every hidden element. */
+[hidden] {
+	display: none !important;
+}
+
 /* Holo sizes form controls with the UA's system font; keep the page font. */
 input,
 textarea,
