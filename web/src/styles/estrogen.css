@@ -458,12 +458,16 @@ button {
 	font-family: var(--mono);
 	font-size: 12px;
 }
-.output-meta #editsCount {
+.output-meta #runSummary {
 	flex: 1 1 200px;
 	min-width: 0;
 }
 .output-meta button {
 	margin: 0;
+}
+/* The download buttons sit to the right of the run summary. */
+.output-meta {
+	justify-content: flex-end;
 }
 
 /* Drop zone */
@@ -644,6 +648,7 @@ h2 + .holo-list > li:first-child {
 	gap: 10px;
 	flex-wrap: wrap;
 	align-items: center;
+	justify-content: flex-end;
 	padding: 12px 16px 14px;
 }
 .bar button {
