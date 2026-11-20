@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "ISC"
 authors = ["David Reed"]
-repository = "https://github.com/Fracital/crack"
+repository = "https://github.com/Fracital/estrogen"
 
 # Shared dependency pins. OXC moves fast and its crates must agree on one
 # version, so they are pinned exact (`=`) and checked against crates.io before a
@@ -26,7 +26,7 @@ toml = "0.8"
 walkdir = "2"
 rayon = "1"
 # Pool encoding and the per-file key material. ChaCha20 is implemented in-crate
-# (crack-core/src/chacha.rs) so the Rust encryptor and the emitted JS decoder
+# (estrogen-core/src/chacha.rs) so the Rust encryptor and the emitted JS decoder
 # run the same block function; the symmetry test proves it. base64 fixes the
 # exact standard alphabet the pool uses, getrandom is the production key source,
 # and sha2 derives the deterministic per-file seed for --seed.

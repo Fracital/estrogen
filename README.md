@@ -1,11 +1,11 @@
-# @sysce/crack
+# @sysce/estrogen
 
 <div align="center">
-  <a href="https://www.npmjs.com/package/@sysce/crack"><img src="https://img.shields.io/npm/v/@sysce/crack?maxAge=3600&label=npm" alt="npm" /></a>
-  <a href="https://github.com/Fracital/crack/actions/workflows/ci.yml"><img src="https://github.com/Fracital/crack/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/@sysce/estrogen"><img src="https://img.shields.io/npm/v/@sysce/estrogen?maxAge=3600&label=npm" alt="npm" /></a>
+  <a href="https://github.com/Fracital/estrogen/actions/workflows/ci.yml"><img src="https://github.com/Fracital/estrogen/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-blue.svg" alt="license: ISC" /></a>
-  <a href="https://github.com/Fracital/crack/issues"><img src="https://img.shields.io/github/issues/Fracital/crack?style=flat&color=orange" alt="GitHub issues" /></a>
-  <a href="https://github.com/Fracital/crack/stargazers"><img src="https://img.shields.io/github/stars/Fracital/crack?style=flat&color=orange" alt="GitHub stars" /></a>
+  <a href="https://github.com/Fracital/estrogen/issues"><img src="https://img.shields.io/github/issues/Fracital/estrogen?style=flat&color=orange" alt="GitHub issues" /></a>
+  <a href="https://github.com/Fracital/estrogen/stargazers"><img src="https://img.shields.io/github/stars/Fracital/estrogen?style=flat&color=orange" alt="GitHub stars" /></a>
 </div>
 
 A post-build web obfuscator. It takes a directory a bundler already produced and
@@ -14,11 +14,11 @@ encrypted per-file pool, proxy and store names into per-build substitutes, and
 embedded wasm names to match. It leaves no sensitive plaintext from the canary
 list, and it does not change what the code does.
 
-crack is written in Rust on [OXC](https://oxc.rs) and published to npm as
-[`@sysce/crack`](https://www.npmjs.com/package/@sysce/crack). The binary is
-`crack`.
+estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
+[`@sysce/estrogen`](https://www.npmjs.com/package/@sysce/estrogen). The binary is
+`estrogen`.
 
-**crack raises the cost of reading a build. It does not make the build secret.**
+**estrogen raises the cost of reading a build. It does not make the build secret.**
 A decoder key ships in each file, and anyone with devtools can run the code. TLS
 is the only transport protection. Do not describe the output as secret.
 
@@ -29,10 +29,10 @@ steps), not current behavior.
 ## Install
 
 ```sh
-npm i -D @sysce/crack
+npm i -D @sysce/estrogen
 ```
 
-The package pulls the matching per-target binary (`@sysce/crack-<os>-<cpu>`) as
+The package pulls the matching per-target binary (`@sysce/estrogen-<os>-<cpu>`) as
 an optional dependency. Supported targets: linux x64 and arm64, darwin x64 and
 arm64, win32 x64.
 
@@ -41,24 +41,24 @@ arm64, win32 x64.
 Run it over a built directory from the command line:
 
 ```sh
-npx crack dist
+npx estrogen dist
 ```
 
 Or run it after an esbuild build, over the output directory:
 
 ```js
-import crack from '@sysce/crack/esbuild';
+import estrogen from '@sysce/estrogen/esbuild';
 import { build } from 'esbuild';
 
 await build({
 	entryPoints: ['src/index.ts'],
 	bundle: true,
 	outdir: 'dist',
-	plugins: [crack()],
+	plugins: [estrogen()],
 });
 ```
 
-crack runs exactly once per build. It is not idempotent: a second run would
+estrogen runs exactly once per build. It is not idempotent: a second run would
 encrypt the decoder the first run added.
 
 ## Documentation
@@ -67,10 +67,10 @@ encrypt the decoder the first run added.
   fail-closed rule.
 - [Node API](docs/NODE-API.md): `obfuscate()`, the esbuild and rsbuild plugins,
   the options object, the `Report` shape.
-- [Rust API](docs/RUST-API.md): the `crack-core` public surface.
+- [Rust API](docs/RUST-API.md): the `estrogen-core` public surface.
 - [Integration](docs/INTEGRATION.md): esbuild, rsbuild, Vite, and a plain CLI
   step in `package.json`.
-- [Wiki](https://github.com/Fracital/crack/wiki): install, configuration,
+- [Wiki](https://github.com/Fracital/estrogen/wiki): install, configuration,
   source maps, security and limits, contributing.
 
 ## Powering

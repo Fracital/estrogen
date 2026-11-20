@@ -35,23 +35,23 @@ jobs:
           # goes private.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-            pkg: crack-linux-x64
+            pkg: estrogen-linux-x64
             ext: ''
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            pkg: crack-linux-arm64
+            pkg: estrogen-linux-arm64
             ext: ''
           - target: x86_64-apple-darwin
             os: macos-13
-            pkg: crack-darwin-x64
+            pkg: estrogen-darwin-x64
             ext: ''
           - target: aarch64-apple-darwin
             os: macos-14
-            pkg: crack-darwin-arm64
+            pkg: estrogen-darwin-arm64
             ext: ''
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            pkg: crack-win32-x64
+            pkg: estrogen-win32-x64
             ext: '.exe'
     steps:
       - uses: actions/checkout@v4.2.2
@@ -73,12 +73,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p staged
-          cp "target/${{ matrix.target }}/release/crack${{ matrix.ext }}" "staged/crack${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/estrogen${{ matrix.ext }}" "staged/estrogen${{ matrix.ext }}"
 
       - uses: actions/upload-artifact@v4.4.3
         with:
           name: ${{ matrix.pkg }}
-          path: staged/crack${{ matrix.ext }}
+          path: staged/estrogen${{ matrix.ext }}
           if-no-files-found: error
 
   # Place each binary into its per-target package, set the version from the tag,
@@ -109,7 +109,7 @@ jobs:
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       # Pull every target binary. Each artifact is named after its npm package,
-      # so this lands at artifacts/<pkg>/crack[.exe].
+      # so this lands at artifacts/<pkg>/estrogen[.exe].
       - uses: actions/download-artifact@v4.1.8
         with:
           path: artifacts
@@ -120,13 +120,13 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           set -euo pipefail
-          # pkg dir -> binary name (crack.exe only on windows).
+          # pkg dir -> binary name (estrogen.exe only on windows).
           declare -A BIN=(
-            [crack-linux-x64]=crack
-            [crack-linux-arm64]=crack
-            [crack-darwin-x64]=crack
-            [crack-darwin-arm64]=crack
-            [crack-win32-x64]=crack.exe
+            [estrogen-linux-x64]=estrogen
+            [estrogen-linux-arm64]=estrogen
+            [estrogen-darwin-x64]=estrogen
+            [estrogen-darwin-arm64]=estrogen
+            [estrogen-win32-x64]=estrogen.exe
           )
           for pkg in "${!BIN[@]}"; do
             bin="${BIN[$pkg]}"
@@ -137,10 +137,10 @@ jobs:
           done
           # Launcher version, plus pin its optionalDependencies to this version
           # so a fresh install pulls the matching per-target packages.
-          ( cd npm/crack && npm version "$VERSION" --no-git-tag-version --allow-same-version )
+          ( cd npm/estrogen && npm version "$VERSION" --no-git-tag-version --allow-same-version )
           node -e '
             const fs = require("fs");
-            const p = "npm/crack/package.json";
+            const p = "npm/estrogen/package.json";
             const j = JSON.parse(fs.readFileSync(p, "utf8"));
             const v = process.env.VERSION;
             for (const k of Object.keys(j.optionalDependencies || {})) {
@@ -156,9 +156,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           set -euo pipefail
-          for pkg in crack-linux-x64 crack-linux-arm64 crack-darwin-x64 crack-darwin-arm64 crack-win32-x64; do
+          for pkg in estrogen-linux-x64 estrogen-linux-arm64 estrogen-darwin-x64 estrogen-darwin-arm64 estrogen-win32-x64; do
             ( cd "npm/${pkg}" && npm publish --provenance --access public )
           done
 
       - name: Publish launcher
-        run: cd npm/crack && npm publish --provenance --access public
+        run: cd npm/estrogen && npm publish --provenance --access public

@@ -1,12 +1,12 @@
-# AGENTS.md: crack
+# AGENTS.md: estrogen
 
 Guidance for anyone, human or agent, working in this repo. Read it before making
-changes. crack is a post-build web obfuscator in Rust on OXC, published to npm as
-`@sysce/crack`. docs/HANDOFF.md is the build brief.
+changes. estrogen is a post-build web obfuscator in Rust on OXC, published to npm as
+`@sysce/estrogen`. docs/HANDOFF.md is the build brief.
 
-## What crack does, and does not
+## What estrogen does, and does not
 
-crack rewrites an already-built output directory so a reader pays more to make
+estrogen rewrites an already-built output directory so a reader pays more to make
 sense of it. It is not secrecy. A key ships in each file, and anyone with
 devtools can run the code. Say that plainly wherever the tool is introduced.
 Never call the output secret.
@@ -59,7 +59,7 @@ reads like an engineer explaining their own tool. No em or en dashes anywhere.
 
 Before handing work off: `cargo build`, `cargo test`, and
 `cargo clippy --all-targets -- -D warnings` green; the npm package typechecks
-(`npm --prefix npm/crack run typecheck`); and `npm run format:check` passes.
+(`npm --prefix npm/estrogen run typecheck`); and `npm run format:check` passes.
 
 ## Do not hand-edit
 

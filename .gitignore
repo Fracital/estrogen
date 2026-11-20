@@ -1,4 +1,4 @@
-# Rust build output. Cargo.lock is committed on purpose (crack ships binaries),
+# Rust build output. Cargo.lock is committed on purpose (estrogen ships binaries),
 # so it is not ignored here.
 /target
 **/*.rs.bk
@@ -8,8 +8,8 @@
 node_modules/
 *.node
 *.tgz
-/npm/*/crack
-/npm/*/crack.exe
+/npm/*/estrogen
+/npm/*/estrogen.exe
 
 # OS cruft
 .DS_Store

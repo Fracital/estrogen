@@ -1,6 +1,6 @@
 # CI and release workflows
 
-Two workflows build and ship crack.
+Two workflows build and ship estrogen.
 
 ## ci.yml
 
@@ -36,19 +36,19 @@ leading `v` removed.
    its native runner and uploads each binary as an artifact named after its npm
    package.
 2. A publish job downloads every binary, drops it into the matching
-   `npm/crack-<os>-<cpu>/bin/` (`crack.exe` for windows), sets every package
+   `npm/estrogen-<os>-<cpu>/bin/` (`estrogen.exe` for windows), sets every package
    version to the tag, pins the launcher's optionalDependencies to that version,
    then publishes. Per-target packages publish first, the launcher last.
 
 Triple to npm package:
 
-| Rust triple               | npm package               | binary        |
-| ------------------------- | ------------------------- | ------------- |
-| x86_64-unknown-linux-gnu  | @sysce/crack-linux-x64    | bin/crack     |
-| aarch64-unknown-linux-gnu | @sysce/crack-linux-arm64  | bin/crack     |
-| x86_64-apple-darwin       | @sysce/crack-darwin-x64   | bin/crack     |
-| aarch64-apple-darwin      | @sysce/crack-darwin-arm64 | bin/crack     |
-| x86_64-pc-windows-msvc    | @sysce/crack-win32-x64    | bin/crack.exe |
+| Rust triple               | npm package                  | binary           |
+| ------------------------- | ---------------------------- | ---------------- |
+| x86_64-unknown-linux-gnu  | @sysce/estrogen-linux-x64    | bin/estrogen     |
+| aarch64-unknown-linux-gnu | @sysce/estrogen-linux-arm64  | bin/estrogen     |
+| x86_64-apple-darwin       | @sysce/estrogen-darwin-x64   | bin/estrogen     |
+| aarch64-apple-darwin      | @sysce/estrogen-darwin-arm64 | bin/estrogen     |
+| x86_64-pc-windows-msvc    | @sysce/estrogen-win32-x64    | bin/estrogen.exe |
 
 ## Trusted publishing
 
@@ -58,13 +58,13 @@ token lives in CI. The publish job declares `id-token: write`, upgrades npm to
 token for publish rights and records provenance.
 
 Set this up once on npmjs.com: for the launcher and each per-target package, add
-a trusted publisher pointing at `Fracital/crack` and the `release.yml` workflow.
+a trusted publisher pointing at `Fracital/estrogen` and the `release.yml` workflow.
 
 ## First publish is manual
 
 Trusted publishing needs the package record to exist first. So the first version
-of the launcher (`@sysce/crack`) and of every per-target package
-(`@sysce/crack-<os>-<cpu>`) is published by hand as the `e9x` npm login:
+of the launcher (`@sysce/estrogen`) and of every per-target package
+(`@sysce/estrogen-<os>-<cpu>`) is published by hand as the `e9x` npm login:
 
 ```
 cd npm/<package> && npm publish --access public

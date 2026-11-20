@@ -1,7 +1,7 @@
 {
-	"name": "crack-tooling",
+	"name": "estrogen-tooling",
 	"private": true,
-	"description": "Repo tooling for crack: formatting. Not published.",
+	"description": "Repo tooling for estrogen: formatting. Not published.",
 	"scripts": {
 		"format": "prettier --write .",
 		"format:check": "prettier --check ."

@@ -1,0 +1,102 @@
+{
+	"name": "@sysce/estrogen",
+	"version": "0.1.0",
+	"description": "Post-build web obfuscator. Rewrites a built dist in place; raises the cost of reading it, not secrecy, since a key ships in each file.",
+	"license": "ISC",
+	"author": "David Reed",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Fracital/estrogen.git"
+	},
+	"homepage": "https://github.com/Fracital/estrogen#readme",
+	"bugs": {
+		"url": "https://github.com/Fracital/estrogen/issues"
+	},
+	"keywords": [
+		"obfuscator",
+		"obfuscation",
+		"post-build",
+		"esbuild",
+		"rsbuild"
+	],
+	"type": "module",
+	"bin": {
+		"estrogen": "bin/estrogen.js"
+	},
+	"main": "./dist/cjs/index.js",
+	"module": "./dist/esm/index.js",
+	"types": "./dist/esm/index.d.ts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./dist/esm/index.d.ts",
+				"default": "./dist/esm/index.js"
+			},
+			"require": {
+				"types": "./dist/cjs/index.d.ts",
+				"default": "./dist/cjs/index.js"
+			}
+		},
+		"./esbuild": {
+			"import": {
+				"types": "./dist/esm/esbuild.d.ts",
+				"default": "./dist/esm/esbuild.js"
+			},
+			"require": {
+				"types": "./dist/cjs/esbuild.d.ts",
+				"default": "./dist/cjs/esbuild.js"
+			}
+		},
+		"./rsbuild": {
+			"import": {
+				"types": "./dist/esm/rsbuild.d.ts",
+				"default": "./dist/esm/rsbuild.js"
+			},
+			"require": {
+				"types": "./dist/cjs/rsbuild.d.ts",
+				"default": "./dist/cjs/rsbuild.js"
+			}
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"bin",
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build:esm": "tsc -p tsconfig.esm.json",
+		"build:cjs": "tsc -p tsconfig.cjs.json",
+		"build": "npm run build:esm && npm run build:cjs && node scripts/fixup.mjs",
+		"typecheck": "tsc -p tsconfig.json",
+		"prepublishOnly": "npm run build"
+	},
+	"optionalDependencies": {
+		"@sysce/estrogen-linux-x64": "0.1.0",
+		"@sysce/estrogen-linux-arm64": "0.1.0",
+		"@sysce/estrogen-darwin-x64": "0.1.0",
+		"@sysce/estrogen-darwin-arm64": "0.1.0",
+		"@sysce/estrogen-win32-x64": "0.1.0"
+	},
+	"peerDependencies": {
+		"esbuild": "*",
+		"@rsbuild/core": "*"
+	},
+	"peerDependenciesMeta": {
+		"esbuild": {
+			"optional": true
+		},
+		"@rsbuild/core": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@rsbuild/core": "^1.1.0",
+		"@types/node": "^22.10.0",
+		"esbuild": "^0.24.0",
+		"typescript": "^5.7.0"
+	},
+	"engines": {
+		"node": ">=18"
+	}
+}

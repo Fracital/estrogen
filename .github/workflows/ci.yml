@@ -1,4 +1,4 @@
-# Build, test, and lint crack on every push and pull request.
+# Build, test, and lint estrogen on every push and pull request.
 # Runs the Rust checks on each shipped target using a native runner, so
 # cargo test runs real binaries instead of emulated ones. A separate node
 # job typechecks npm/ when it has a tsconfig.
@@ -79,9 +79,9 @@ jobs:
         run: npm run format:check
 
       - name: Install the npm package
-        working-directory: npm/crack
+        working-directory: npm/estrogen
         run: npm ci || npm install
 
       - name: Typecheck the npm package
-        working-directory: npm/crack
+        working-directory: npm/estrogen
         run: npm run typecheck

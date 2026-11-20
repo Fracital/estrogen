@@ -5,14 +5,14 @@ JavaScript surface, not current behavior. The import paths, function signatures,
 options object, and `Report` shape below are the contract the integrations build
 against.
 
-The package is `@sysce/crack`. It ships the native binary as a per-target
+The package is `@sysce/estrogen`. It ships the native binary as a per-target
 optional dependency and a thin launcher that runs the right one. The Node API
 calls that binary over a built directory.
 
 ## obfuscate
 
 ```js
-import { obfuscate } from '@sysce/crack';
+import { obfuscate } from '@sysce/estrogen';
 
 const report = await obfuscate({ dirs: ['dist'] });
 ```
@@ -25,35 +25,35 @@ failing file, and the error names the file and the reason.
 ## esbuild plugin
 
 ```js
-import crack from '@sysce/crack/esbuild';
+import estrogen from '@sysce/estrogen/esbuild';
 import { build } from 'esbuild';
 
 await build({
 	entryPoints: ['src/index.ts'],
 	bundle: true,
 	outdir: 'dist',
-	plugins: [crack()],
+	plugins: [estrogen()],
 });
 ```
 
-The default export of `@sysce/crack/esbuild` is `crack(options?):
+The default export of `@sysce/estrogen/esbuild` is `estrogen(options?):
 esbuild.Plugin`. The plugin runs after the build finishes, over the build's
 output directory (`outdir`, or the directory of `outfile`). Pass `options` to
-override what crack would otherwise infer; see [Options](#options). If a file
+override what estrogen would otherwise infer; see [Options](#options). If a file
 fails, the build fails.
 
 ## rsbuild plugin
 
 ```js
-import { pluginCrack } from '@sysce/crack/rsbuild';
+import { pluginEstrogen } from '@sysce/estrogen/rsbuild';
 
 export default {
-	plugins: [pluginCrack()],
+	plugins: [pluginEstrogen()],
 };
 ```
 
-`pluginCrack(options?): RsbuildPlugin` is a named export of
-`@sysce/crack/rsbuild`. The plugin runs after the build finishes, over the
+`pluginEstrogen(options?): RsbuildPlugin` is a named export of
+`@sysce/estrogen/rsbuild`. The plugin runs after the build finishes, over the
 resolved dist path. Pass `options` to override the inferred settings. A failing
 file fails the build.
 
@@ -107,20 +107,20 @@ the exact numbers depend on the engine, which is not built yet.
 
 ```ts
 interface Report {
-	formatVersion: number; // the pool and decoder format version crack emitted
+	formatVersion: number; // the pool and decoder format version estrogen emitted
 	dirs: string[]; // the directories processed
-	filesProcessed: number; // files crack rewrote
+	filesProcessed: number; // files estrogen rewrote
 	filesSkipped: number; // eligible-looking files left untouched (maps, already processed, vendored)
 	durationMs: number; // wall-clock time for the pass
 	check: boolean; // true if this was a --check run and nothing was written
 }
 ```
 
-A rejection is an `Error` whose message names the file and the reason. crack
+A rejection is an `Error` whose message names the file and the reason. estrogen
 does not resolve with a partial `Report` when a file fails; it rejects.
 
 ## TypeScript
 
 The package ships type declarations for all three entry points
-(`@sysce/crack`, `@sysce/crack/esbuild`, `@sysce/crack/rsbuild`). The `Options`
-and `Report` types are exported from `@sysce/crack`.
+(`@sysce/estrogen`, `@sysce/estrogen/esbuild`, `@sysce/estrogen/rsbuild`). The `Options`
+and `Report` types are exported from `@sysce/estrogen`.

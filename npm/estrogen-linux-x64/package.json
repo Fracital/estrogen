@@ -1,0 +1,21 @@
+{
+	"name": "@sysce/estrogen-linux-x64",
+	"version": "0.1.0",
+	"description": "The estrogen binary for linux-x64. estrogen raises the cost of reading a build; it is not secrecy, and a key ships in each file.",
+	"license": "ISC",
+	"author": "David Reed",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Fracital/estrogen.git"
+	},
+	"os": [
+		"linux"
+	],
+	"cpu": [
+		"x64"
+	],
+	"files": [
+		"bin"
+	],
+	"preferUnplugged": true
+}

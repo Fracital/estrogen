@@ -1,21 +1,21 @@
 # Rust API
 
 The obfuscation engine is not implemented yet. This page documents the intended
-public surface of `crack-core`, not current behavior. The types and the format
+public surface of `estrogen-core`, not current behavior. The types and the format
 version below are the contract; the method bodies do not exist yet, and the
 field set may grow as the passes land.
 
 The workspace has two crates:
 
-- `crack-core`: the library. The passes (literals, names, wasm, markup), the
+- `estrogen-core`: the library. The passes (literals, names, wasm, markup), the
   shared edit-and-splice core, and the pool and decoder format behind a format
   version.
-- `crack-cli`: the `crack` binary. Argument parsing and the file walk, calling
-  `crack-core`.
+- `estrogen-cli`: the `estrogen` binary. Argument parsing and the file walk, calling
+  `estrogen-core`.
 
-Only `crack-core` is a library. `crack-cli` is not published to crates.io; use
-the CLI or the npm package to run crack. The Rust surface below is for embedding
-`crack-core` directly.
+Only `estrogen-core` is a library. `estrogen-cli` is not published to crates.io; use
+the CLI or the npm package to run estrogen. The Rust surface below is for embedding
+`estrogen-core` directly.
 
 ## FORMAT_VERSION
 
@@ -23,8 +23,8 @@ the CLI or the npm package to run crack. The Rust surface below is for embedding
 pub const FORMAT_VERSION: u32;
 ```
 
-The version of the pool and decoder format crack emits. It appears in every
-[`Report`](#report) as `format_version`. A consumer that decodes crack output
+The version of the pool and decoder format estrogen emits. It appears in every
+[`Report`](#report) as `format_version`. A consumer that decodes estrogen output
 checks it against the decoder it expects. Bump it when the pool layout or the
 emitted decoder changes in a way that an older decoder cannot read.
 
@@ -43,7 +43,7 @@ impl Default for Options { /* ... */ }
 How one pass is configured: which names to rename, the canary list, the source
 map directory, the seed, and the parallelism. The fields mirror the
 [CLI flags](CLI.md) and the
-[TOML config](https://github.com/Fracital/crack/wiki/Configuration). The exact
+[TOML config](https://github.com/Fracital/estrogen/wiki/Configuration). The exact
 field names are not frozen yet; build an `Options` through its constructor and
 setters rather than a struct literal.
 
@@ -80,7 +80,7 @@ pub struct Report {
 ```
 
 What a successful `run` returns. `format_version` equals
-[`FORMAT_VERSION`](#format_version). `files_skipped` counts files crack left
+[`FORMAT_VERSION`](#format_version). `files_skipped` counts files estrogen left
 untouched (a `.map`, an already-processed file, a vendored transport asset).
 `check` is true when the run was a check and wrote nothing.
 
@@ -102,7 +102,7 @@ arm.
 
 ## Dependencies
 
-`crack-core` parses with OXC (`oxc_parser`, `oxc_ast`, `oxc_span`,
+`estrogen-core` parses with OXC (`oxc_parser`, `oxc_ast`, `oxc_span`,
 `oxc_allocator`, and `oxc_ast_visit` for the walk). It locates edits in the AST
 and splices byte ranges into the original source string; it does not reprint the
 AST through a code generator. Encryption uses a ChaCha20 crate, and the emitted
