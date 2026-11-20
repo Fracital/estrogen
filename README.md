@@ -67,13 +67,39 @@ encrypt the decoder the first run added.
 
 ## Powering
 
-| Site                                                                                                             | Link                                                     | Repo                                                                    |
-| ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
-| <img src="docs/assets/brands/abstract.svg" alt="abstract v2" height="20" align="middle"> abstract v2             | [abstracteducation.loan](https://abstracteducation.loan) |                                                                         |
-| <img src="docs/assets/brands/fracital.svg" alt="Fracital" height="20" align="middle"> Fracital                   | [fracit.al](https://fracit.al)                           | [`Fracital/Fracital`](https://github.com/Fracital/Fracital)             |
-| <img src="docs/assets/brands/systemya.png" alt="SystemYA" height="20" align="middle"> SystemYA                   | [systemya.fracit.al](https://systemya.fracit.al)         | [`Fracital/SystemYA`](https://github.com/Fracital/SystemYA)             |
-| <img src="docs/assets/brands/stomp.png" alt="STomp" height="20" align="middle"> STomp (powerMouse)               | [stomp.fracit.al](https://stomp.fracit.al)               | [`Fracital/powerMouse`](https://github.com/Fracital/powerMouse)         |
-| <img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" height="20" align="middle"> Holy Unblocker | [holyunb.locker](https://holyunb.locker)                 | [`holy-unblocker/website2`](https://github.com/holy-unblocker/website2) |
+<table>
+<tr><th></th><th>Site</th><th>Link</th><th>Repo</th></tr>
+<tr>
+<td align="center" valign="middle"><img src="docs/assets/brands/abstract.svg" alt="abstract v2" width="28"></td>
+<td valign="middle">abstract v2</td>
+<td valign="middle"><a href="https://abstracteducation.loan">abstracteducation.loan</a></td>
+<td valign="middle"></td>
+</tr>
+<tr>
+<td align="center" valign="middle"><img src="docs/assets/brands/fracital.svg" alt="Fracital" width="28"></td>
+<td valign="middle">Fracital</td>
+<td valign="middle"><a href="https://fracit.al">fracit.al</a></td>
+<td valign="middle"><a href="https://github.com/Fracital/Fracital"><code>Fracital/Fracital</code></a></td>
+</tr>
+<tr>
+<td align="center" valign="middle"><img src="docs/assets/brands/systemya.png" alt="SystemYA" width="28"></td>
+<td valign="middle">SystemYA</td>
+<td valign="middle"><a href="https://systemya.fracit.al">systemya.fracit.al</a></td>
+<td valign="middle"><a href="https://github.com/Fracital/SystemYA"><code>Fracital/SystemYA</code></a></td>
+</tr>
+<tr>
+<td align="center" valign="middle"><img src="docs/assets/brands/stomp.png" alt="STomp" width="28"></td>
+<td valign="middle">STomp (powerMouse)</td>
+<td valign="middle"><a href="https://stomp.fracit.al">stomp.fracit.al</a></td>
+<td valign="middle"><a href="https://github.com/Fracital/powerMouse"><code>Fracital/powerMouse</code></a></td>
+</tr>
+<tr>
+<td align="center" valign="middle"><img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" width="28"></td>
+<td valign="middle">Holy Unblocker</td>
+<td valign="middle"><a href="https://holyunb.locker">holyunb.locker</a></td>
+<td valign="middle"><a href="https://github.com/holy-unblocker/website2"><code>holy-unblocker/website2</code></a></td>
+</tr>
+</table>
 
 ## Credits
 
