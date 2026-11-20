@@ -47,14 +47,6 @@ impl Obfuscator {
     /// the proxy config does not compile (a bad names regex or vendor glob).
     pub fn new(options: Options) -> Result<Self> {
         let proxy = ProxyEngine::new(&options.proxy, &options.canaries, options.seed.as_deref())?;
-        // TODO(sourcemap): emit a V3 map from the edit list when a dir is set.
-        // Until then estrogen fails closed rather than silently ship no map for a
-        // build that asked for one.
-        if options.sourcemap_dir.is_some() {
-            return Err(Error::Engine(
-                "source map emission is not implemented yet; omit --sourcemap",
-            ));
-        }
         Ok(Obfuscator { options, proxy })
     }
 
@@ -70,7 +62,7 @@ impl Obfuscator {
     pub fn obfuscate_dir(&self, dir: &Path) -> Result<Report> {
         let files = walk_files(dir);
         let mut report = Report::new(vec![dir.to_path_buf()]);
-        for fr in self.process_files(&files, &HashSet::new())? {
+        for fr in self.process_files(&files, &HashSet::new(), dir)? {
             report.push(fr);
         }
         Ok(report)
@@ -83,6 +75,7 @@ impl Obfuscator {
         &self,
         files: &[PathBuf],
         exclude: &HashSet<PathBuf>,
+        root: &Path,
     ) -> Result<Vec<FileReport>> {
         let pool = ThreadPoolBuilder::new()
             .num_threads(self.options.jobs.max(1))
@@ -96,7 +89,7 @@ impl Obfuscator {
             files
                 .par_iter()
                 .filter(|p| !exclude.contains(*p))
-                .map(|p| self.obfuscate_file(p))
+                .map(|p| self.obfuscate_file_in(p, root))
                 .collect()
         });
         results.into_iter().collect()
@@ -126,7 +119,7 @@ impl Obfuscator {
 
         // Obfuscate everything else under dist (the app chunks and shells),
         // leaving the vendored files exactly as they were brought in.
-        for fr in self.process_files(&walk_files(dist), &vendored)? {
+        for fr in self.process_files(&walk_files(dist), &vendored, dist)? {
             report.push(fr);
         }
         Ok(report)
@@ -212,7 +205,19 @@ impl Obfuscator {
     /// parsed and run through its passes; the edits are spliced into the source
     /// and, unless `--check` is set or there were no edits, written back. A file
     /// that cannot be parsed or handled returns an [`Error`] and is not written.
+    ///
+    /// The source map, when `--sourcemap` is set, is written under that dir at
+    /// the file's path relative to its own directory. [`obfuscate_dir`](Self::obfuscate_dir)
+    /// roots the relative path at the processed directory instead.
     pub fn obfuscate_file(&self, path: &Path) -> Result<FileReport> {
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        self.obfuscate_file_in(path, root)
+    }
+
+    /// Obfuscate one file, rooting the emitted source map's relative path at
+    /// `root`. The public [`obfuscate_file`](Self::obfuscate_file) roots it at the
+    /// file's own directory; the directory walk roots it at the walked dir.
+    fn obfuscate_file_in(&self, path: &Path, root: &Path) -> Result<FileReport> {
         // Decide on the path alone first, so a `.map` or an unhandled type is
         // never even read.
         if let Eligibility::Skip(reason) = eligibility(path, None) {
@@ -278,8 +283,38 @@ impl Obfuscator {
         }
         if !self.options.check {
             write_preserving_bom(path, &source, &rewritten)?;
+            self.write_sourcemap(path, root, &source, &edits)?;
         }
         Ok(FileReport::obfuscated(path, kind, edit_count))
+    }
+
+    /// Write the V3 source map for a processed file, when `--sourcemap <dir>` is
+    /// set. The map lands at `<dir>/<path relative to root>.map`, outside the
+    /// served tree. The served chunk gets no map and no `sourceMappingURL`; this
+    /// is the private debug map only. With no `sourcemap_dir` this is a no-op.
+    fn write_sourcemap(
+        &self,
+        path: &Path,
+        root: &Path,
+        source: &str,
+        edits: &EditSet,
+    ) -> Result<()> {
+        let dir = match &self.options.sourcemap_dir {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        let rel = path
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| PathBuf::from(path.file_name().unwrap_or(path.as_os_str())));
+        let source_name = rel.to_string_lossy().replace('\\', "/");
+        let json = crate::sourcemap::build_v3(&source_name, source, &edits.sorted());
+        let map_path = dir.join(format!("{}.map", rel.to_string_lossy()));
+        if let Some(parent) = map_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
+        fs::write(&map_path, json).map_err(|e| Error::io(&map_path, e))?;
+        Ok(())
     }
 
     /// Obfuscate several directories and merge their reports.
@@ -477,12 +512,58 @@ mod tests {
     }
 
     #[test]
-    fn sourcemap_dir_is_a_clear_not_implemented_error() {
-        let opts = Options {
-            sourcemap_dir: Some(PathBuf::from("/tmp/maps")),
+    fn sourcemap_off_appends_no_url_to_the_served_chunk() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        fs::write(&js, "const a = 'hello';\n").unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"s".to_vec()),
             ..Options::default()
-        };
-        assert!(matches!(Obfuscator::new(opts), Err(Error::Engine(_))));
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(
+            !out.contains("sourceMappingURL"),
+            "the served chunk must carry no sourceMappingURL"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sourcemap_on_writes_a_valid_v3_map_outside_the_tree() {
+        let dir = tmp_dir();
+        let maps = tmp_dir();
+        let js = dir.join("app.js");
+        let src = "const a = 'hello';\nconst b = `t${a}`;\n";
+        fs::write(&js, src).unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"s".to_vec()),
+            sourcemap_dir: Some(maps.clone()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        // The served chunk still carries no map reference: the map sits apart.
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(!out.contains("sourceMappingURL"));
+
+        // The map is written under the maps dir, not next to the build.
+        let map_path = maps.join("app.js.map");
+        assert!(
+            map_path.exists(),
+            "the map must be written under the sourcemap dir"
+        );
+        assert!(!dir.join("app.js.map").exists());
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+        assert_eq!(v["version"], 3);
+        assert_eq!(v["sources"][0], "app.js");
+        assert_eq!(v["sourcesContent"][0], src);
+        assert!(!v["mappings"].as_str().unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&maps).ok();
     }
 
     // Vendor pipeline tests.

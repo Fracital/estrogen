@@ -91,6 +91,15 @@ impl EditSet {
         self.edits.extend(other.edits);
     }
 
+    /// The edits in the order [`apply`](Self::apply) splices them: by start
+    /// offset, then by end, stably. A source map is built by walking these in the
+    /// same order as the output is assembled.
+    pub fn sorted(&self) -> Vec<&Edit> {
+        let mut ordered: Vec<&Edit> = self.edits.iter().collect();
+        ordered.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+        ordered
+    }
+
     /// Splice the edits into `source` and return the rewritten string.
     ///
     /// The edits are sorted by start offset first, so a pass may push them in

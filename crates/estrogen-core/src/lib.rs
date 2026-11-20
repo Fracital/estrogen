@@ -60,6 +60,7 @@ pub mod options;
 pub mod pass;
 mod proxy;
 pub mod report;
+mod sourcemap;
 mod vendor;
 pub mod walk;
 mod wasm;
