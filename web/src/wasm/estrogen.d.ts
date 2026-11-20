@@ -6,13 +6,16 @@
  * `source` is the code to obfuscate. `seed`, when a non-empty string, makes the
  * output deterministic: the same source and seed give byte-identical output, so
  * the demo's seed field repeats a build. An empty or absent seed draws fresh
- * per-file keys from the browser's crypto.
+ * per-file keys from the browser's crypto. `vm`, when `Some(false)`, turns the
+ * bytecode VM off so every chunk takes the edit-and-splice path; the default
+ * (absent or `Some(true)`) compiles a covered chunk to bytecode.
  *
- * Returns a JSON string `{"code":...,"edits":...}` for the caller to parse. A
- * parse error, a pass failure, or a canary surviving in the output rejects with
- * the engine's error string; the demo shows it and keeps the previous output.
+ * Returns a JSON string `{"code":...,"edits":...,"map":...}` for the caller to
+ * parse; `map` is present only on an edit-and-splice result. A parse error, a
+ * pass failure, or a canary surviving in the output rejects with the engine's
+ * error string; the demo shows it and keeps the previous output.
  */
-export function obfuscate(source: string, seed?: string | null): string;
+export function obfuscate(source: string, seed?: string | null, vm?: boolean | null): string;
 /**
  * estrogen's version, so the demo can print the engine it is running.
  */
@@ -22,7 +25,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
-  readonly obfuscate: (a: number, b: number, c: number, d: number, e: number) => void;
+  readonly obfuscate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
   readonly version: (a: number) => void;
   readonly __wbindgen_export_0: (a: number) => void;
   readonly __wbindgen_add_to_stack_pointer: (a: number) => number;

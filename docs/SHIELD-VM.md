@@ -36,7 +36,7 @@ This pass takes (a), with one deliberate change to the outer layer. The reasons:
   Rewriting it in Rust would mean reimplementing and re-proving a 977-line
   interpreter for no gain. Porting only the compiler keeps the proven half.
 - The program shape is small and stable: `{ version, layout, consts, functions,
-  mainIndex }`, where a function is `{ code, name, isAsync, isArrow, numParams }`
+mainIndex }`, where a function is `{ code, name, isAsync, isArrow, numParams }`
   and `layout` is the per-build opcode byte assignment. Rust emits that JSON
   directly.
 - The opcode semantics live in the runtime's handler table. estrogen's compiler

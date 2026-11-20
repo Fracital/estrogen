@@ -129,16 +129,20 @@ function getDataViewMemory0() {
  * `source` is the code to obfuscate. `seed`, when a non-empty string, makes the
  * output deterministic: the same source and seed give byte-identical output, so
  * the demo's seed field repeats a build. An empty or absent seed draws fresh
- * per-file keys from the browser's crypto.
+ * per-file keys from the browser's crypto. `vm`, when `Some(false)`, turns the
+ * bytecode VM off so every chunk takes the edit-and-splice path; the default
+ * (absent or `Some(true)`) compiles a covered chunk to bytecode.
  *
- * Returns a JSON string `{"code":...,"edits":...}` for the caller to parse. A
- * parse error, a pass failure, or a canary surviving in the output rejects with
- * the engine's error string; the demo shows it and keeps the previous output.
+ * Returns a JSON string `{"code":...,"edits":...,"map":...}` for the caller to
+ * parse; `map` is present only on an edit-and-splice result. A parse error, a
+ * pass failure, or a canary surviving in the output rejects with the engine's
+ * error string; the demo shows it and keeps the previous output.
  * @param {string} source
  * @param {string | null} [seed]
+ * @param {boolean | null} [vm]
  * @returns {string}
  */
-export function obfuscate(source, seed) {
+export function obfuscate(source, seed, vm) {
     let deferred4_0;
     let deferred4_1;
     try {
@@ -147,7 +151,7 @@ export function obfuscate(source, seed) {
         const len0 = WASM_VECTOR_LEN;
         var ptr1 = isLikeNone(seed) ? 0 : passStringToWasm0(seed, wasm.__wbindgen_export_1, wasm.__wbindgen_export_2);
         var len1 = WASM_VECTOR_LEN;
-        wasm.obfuscate(retptr, ptr0, len0, ptr1, len1);
+        wasm.obfuscate(retptr, ptr0, len0, ptr1, len1, isLikeNone(vm) ? 0xFFFFFF : vm ? 1 : 0);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
