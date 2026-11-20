@@ -133,6 +133,6 @@ write it outside the served tree.
 This is not the whole guard. Every consumer host also returns 403 for `*.map`
 and for any `sourceMappingURL` target, so a map that reaches a published
 directory by accident is still never served. That edge rule is a required
-integration step and a config-parity item, not an afterthought. It lives in the
-edge config, not in estrogen. See
+integration step and a config-parity item. It lives in the edge config, not in
+estrogen. See
 [Source maps](https://github.com/Fracital/estrogen/wiki/Source-maps).

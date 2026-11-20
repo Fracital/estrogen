@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="docs/assets/estrogen.png" alt="estrogen" width="88" />
+</div>
+
 # @sysce/estrogen
 
 <div align="center">
@@ -17,10 +21,10 @@ list, and it does not change what the code does.
 It also assembles the build it protects. `estrogen build` vendors packages and
 folders, from `node_modules` or a glob, into the served tree under per-build
 stamped names, obfuscating them on the way in or copying them verbatim, from a
-`[[vendor]]` config. `estrogen --watch` re-runs on each change, and `--sourcemap
-<dir>` writes a private V3 source map outside the served tree. estrogen runs as a
-command line tool, as esbuild, rsbuild, Vite and Rollup plugins, and as an Astro
-integration.
+`[[vendor]]` config. `estrogen --watch` re-runs on each change, and
+`--sourcemap <dir>` writes a private V3 source map outside the served tree.
+estrogen runs as a command line tool, as esbuild, rsbuild, Vite and Rollup
+plugins, and as an Astro integration.
 
 estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
 [`@sysce/estrogen`](https://www.npmjs.com/package/@sysce/estrogen). The binary is

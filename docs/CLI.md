@@ -104,7 +104,7 @@ failure; do not branch on a specific number.
 estrogen fails closed. If any file in a directory cannot be fully processed, the
 run fails: estrogen writes no partial output for that file, names the file and the
 reason on stderr, and exits nonzero. A build that cannot be fully protected
-fails the build. It never ships half done.
+fails instead of shipping part of the output.
 
 This matches the Node scripts estrogen replaces, which throw on anything they
 cannot handle: a parse error, a store name not in the allow-list, a proxy name
