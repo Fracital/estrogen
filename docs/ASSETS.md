@@ -132,8 +132,8 @@ After, with estrogen's Astro integration (or any of its bundler plugins), and no
 
 ```ts
 // astro.config.ts
-import { defineConfig } from 'astro/config';
 import estrogen from '@sysce/estrogen/astro';
+import { defineConfig } from 'astro/config';
 
 export default defineConfig({
 	integrations: [estrogen({ canary: 'canary-list.json' })],

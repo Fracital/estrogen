@@ -572,28 +572,46 @@ h2 + .holo-list > li:first-child {
 	font-size: 11.5px;
 	color: var(--blue);
 }
-.holo-list li input[type='text'] {
+#seed {
 	display: block;
 	width: 100%;
 	box-sizing: border-box;
-	margin: 6px 0;
-	padding: 6px 0 5px;
-	background: transparent;
-	color: inherit;
-	border: 0;
-	border-bottom: 1px solid var(--underline);
-	border-radius: 0;
+	margin: 8px 0 2px;
+	padding: 9px 11px;
+	background: rgba(255, 255, 255, 0.03);
+	color: #e6e6e6;
+	border: 1px solid var(--divider);
+	border-radius: 2px;
 	outline: none;
-	font-size: 15px;
+	font-size: 13px;
 	font-family: var(--mono);
 	cursor: text;
 }
-.holo-list li input[type='text']:focus {
-	padding-bottom: 4px;
-	border-bottom: 2px solid var(--blue);
+#seed:focus {
+	border-color: rgba(51, 181, 229, 0.6);
 }
-.holo-list li input[type='text']::placeholder {
+#seed::placeholder {
 	color: rgba(255, 255, 255, 0.35);
+}
+
+/* Footer: the wordmark and the live "updated N ago" build time. */
+.site-footer {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: baseline;
+	justify-content: space-between;
+	margin: 28px 0 24px;
+	padding-top: 14px;
+	border-top: 1px solid var(--divider);
+	color: var(--secondary);
+	font-size: 12px;
+}
+.site-footer .updated {
+	font-family: var(--mono);
+}
+.site-footer .ago {
+	color: rgba(255, 255, 255, 0.4);
 }
 
 /* A toggle row is one label, so a click anywhere on it hits the checkbox. */

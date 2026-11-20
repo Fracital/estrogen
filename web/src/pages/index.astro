@@ -5,6 +5,16 @@ import logo from '../assets/estrogen.png';
 
 const NPM = 'https://www.npmjs.com/package/@sysce/estrogen';
 const REPO = 'https://github.com/Fracital/estrogen';
+
+// The build time, stamped at build. The footer shows it as an absolute date
+// plus a live "(N ago)" that app.ts updates from the datetime attribute.
+const BUILD = new Date();
+const BUILD_ISO = BUILD.toISOString();
+const BUILD_LABEL = BUILD.toLocaleDateString('en-US', {
+	year: 'numeric',
+	month: 'short',
+	day: 'numeric',
+});
 ---
 
 <Base>
@@ -263,6 +273,14 @@ const REPO = 'https://github.com/Fracital/estrogen';
 				>
 			</li>
 		</ul>
+
+		<footer class="site-footer">
+			<span>@sysce/estrogen</span>
+			<span class="updated"
+				>updated <time id="buildTime" datetime={BUILD_ISO}>{BUILD_LABEL}</time>
+				<span class="ago" id="buildAgo"></span></span
+			>
+		</footer>
 	</main>
 
 	<script>
