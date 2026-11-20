@@ -1,0 +1,27 @@
+---
+import '../styles/semantic-vendor.css';
+import '../styles/estrogen.css';
+
+interface Props {
+	title?: string;
+	description?: string;
+}
+
+const {
+	title = 'estrogen obfuscator',
+	description = 'estrogen rewrites built JavaScript so a reader pays more to make sense of it. Runs the real engine in your browser as WebAssembly.',
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+	</head>
+	<body>
+		<slot />
+	</body>
+</html>

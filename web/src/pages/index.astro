@@ -1,0 +1,225 @@
+---
+import Base from '../layouts/Base.astro';
+
+const REPO = 'https://github.com/Fracital/estrogen';
+const UI_REPO =
+	'https://github.com/javascript-obfuscator/javascript-obfuscator-ui';
+---
+
+<Base>
+	<div class="ui container grid middle aligned stackable">
+		<div class="row">
+			<div class="column twelve wide">
+				<div class="ui basic segment">
+					<div class="title">
+						<h1>estrogen obfuscator</h1>
+					</div>
+					<p>
+						<a href={REPO} target="_new">estrogen</a> rewrites built JavaScript
+						so a reader pays more to make sense of it. It is not secrecy: a
+						decoder key ships in each file, right next to the data, and anyone
+						with devtools can run the code back. This page runs the real engine,
+						compiled to WebAssembly, entirely in your browser. Nothing is
+						uploaded. Install it from npm as <code>@sysce/estrogen</code>.
+					</p>
+				</div>
+			</div>
+			<div class="column four wide">
+				<div class="ui basic segment">
+					<svg
+						id="Logo"
+						viewBox="0 0 300 120"
+						role="img"
+						aria-label="estrogen"
+						xmlns="http://www.w3.org/2000/svg"
+					>
+						<rect width="300" height="120" rx="12" fill="#fdf2f8"></rect>
+						<circle cx="60" cy="60" r="30" fill="none" stroke="#d14b8f"
+							stroke-width="7"></circle>
+						<line x1="60" y1="90" x2="60" y2="112" stroke="#d14b8f"
+							stroke-width="7"></line>
+						<line x1="48" y1="101" x2="72" y2="101" stroke="#d14b8f"
+							stroke-width="7"></line>
+						<text x="108" y="72" font-family="monospace" font-size="34"
+							font-weight="700" fill="#b23372">estrogen</text>
+					</svg>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="ui container grid">
+		<div class="row">
+			<div class="column">
+				<div id="root">
+					<div class="ui stackable grid">
+						<div class="eleven wide column">
+							<div class="ui top attached stackable three item tabular menu"
+								id="tabMenu">
+								<a class="item active" data-tab="code" href="#code"
+									>Copy &amp; Paste JavaScript Code</a>
+								<a class="item" data-tab="upload" href="#upload"
+									>Upload JavaScript File</a>
+								<a class="item" data-tab="output" href="#output">Output</a>
+							</div>
+
+							<div class="ui bottom attached tab segment active" data-pane="code">
+								<textarea id="editor"></textarea>
+								<div class="ui basic segment">
+									<button class="ui primary button" id="obfuscateBtn"
+										>Obfuscate</button>
+								</div>
+							</div>
+
+							<div class="ui bottom attached tab segment" data-pane="upload">
+								<div class="DropZone" id="dropZone">
+									<div>
+										Try dropping a .js file here, or click to choose one to
+										upload.
+									</div>
+								</div>
+								<input type="file" id="fileInput" accept=".js,text/javascript"
+									hidden />
+							</div>
+
+							<div class="ui bottom attached tab segment" data-pane="output">
+								<div class="ui stackable grid">
+									<div class="sixteen wide column">
+										<div class="ui form">
+											<textarea id="output" rows="12" readonly></textarea>
+										</div>
+									</div>
+									<div class="thirteen wide column">
+										<button class="ui button" id="downloadBtn" disabled>
+											<i class="download icon"></i> Download obfuscated code
+										</button>
+										<div class="editsCount" id="editsCount"></div>
+									</div>
+									<div class="three wide column middle aligned">
+										<div class="ui checkbox">
+											<input type="checkbox" id="evaluateChk" />
+											<label for="evaluateChk">Evaluate</label>
+										</div>
+									</div>
+									<div class="sixteen wide column">
+										<div class="evaluatedCode" id="evaluatedCode" hidden></div>
+									</div>
+								</div>
+							</div>
+						</div>
+
+						<div class="five wide column">
+							<div class="ui segment OptionsForm ui form">
+								<div class="field">
+									<label for="seed">Seed (optional)</label>
+									<input type="text" id="seed" placeholder="leave empty for
+										random keys" />
+									<div class="infoPanel">
+										<p>
+											Empty means fresh random keys each run, so the output
+											changes every time. A value makes the output
+											deterministic: the same source and seed give the same
+											bytes, so a build repeats.
+										</p>
+									</div>
+								</div>
+
+								<button class="ui button" id="sampleBtn" type="button"
+									>Load sample</button>
+
+								<div class="ui divider"></div>
+
+								<div class="infoPanel">
+									<h4>What this does</h4>
+									<p>
+										estrogen's app-chunk pass moves string and template literals
+										into a per-file ChaCha20 pool and prepends the decoder.
+										Identifiers and structure are left as-is in this browser
+										demo.
+									</p>
+								</div>
+
+								<div class="infoPanel">
+									<h4>The limit</h4>
+									<p>
+										The decoder key ships in the output, right next to the data,
+										and devtools can run it back. This raises the cost of reading
+										a build. It is not secrecy.
+									</p>
+								</div>
+
+								<div class="ui divider"></div>
+								<div class="engineVersion" id="engineVersion">loading engine...</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="column">
+				<h2 class="header" id="FAQ">FAQ</h2>
+
+				<h4>Why would I obfuscate my JavaScript?</h4>
+				<p>
+					To raise the cost of reading a shipped build. estrogen removes the
+					plain string and template literals from the source and puts them in an
+					encrypted pool, so a reader can no longer grep for a message, a URL or
+					a key name and land on the line that uses it. That slows down
+					copy/paste reuse and casual inspection. It does not stop a determined
+					reader.
+				</p>
+
+				<h4>Is this foolproof?</h4>
+				<p>
+					No. estrogen never claims secrecy. The browser has to run the code, so
+					the decoder and its key ship in the same file as the data. Someone
+					with the time and patience can run the decoder themselves and recover
+					the strings. The point is cost, not a lock.
+				</p>
+
+				<h4>Why is the output larger than my source?</h4>
+				<p>
+					Because the pass prepends a decoder and stores the literals as an
+					encrypted, base64 pool, which is bigger than the plain text it
+					replaced. There is a lot of repetition in the decoder, so the output
+					compresses well with gzip or brotli on your server.
+				</p>
+
+				<h4>Does it work on any JavaScript?</h4>
+				<p>
+					It works on standard JavaScript that parses. The browser demo runs one
+					source string at a time through the app-chunk pass. If the input has
+					no poolable string or template literal, the pass reports zero edits and
+					the output matches the input.
+				</p>
+
+				<h4>Do you store my source?</h4>
+				<p>
+					No. There is no server. The engine is WebAssembly running in this page,
+					so your code never leaves your browser.
+				</p>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="column">
+				<div class="ui divider"></div>
+				<div>
+					<span>
+						The interface is derived from
+						<a href={UI_REPO}>javascript-obfuscator-ui</a> (BSD-2-Clause) by
+						Timofey Kachalov and Tiago Serafim. The engine is
+						<a href="https://github.com/Fracital/estrogen">estrogen</a>. See
+						<a href="/THIRD-PARTY.md">third-party licenses</a>.
+					</span>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		import '../scripts/app.ts';
+	</script>
+</Base>

@@ -5,3 +5,7 @@ Cargo.lock
 package-lock.json
 docs/assets
 npm/*/bin
+/web/
+
+# wasm-pack build output
+crates/*/pkg/
