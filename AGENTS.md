@@ -6,10 +6,10 @@ changes. estrogen is a post-build web obfuscator in Rust on OXC, published to np
 
 ## What estrogen does, and does not
 
-estrogen rewrites an already-built output directory so a reader pays more to make
-sense of it. It is not secrecy. A key ships in each file, and anyone with
-devtools can run the code. Say that plainly wherever the tool is introduced.
-Never call the output secret.
+estrogen rewrites an already-built output directory so the result is more work to
+read: an obfuscator, not encryption, since a key ships in each file. Write about
+it in the product voice. It does not need a disclaimer every time it is named,
+and it should not be sold as security it does not provide.
 
 ## Git commits
 

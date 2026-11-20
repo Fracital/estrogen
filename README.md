@@ -30,13 +30,12 @@ estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
 [`@sysce/estrogen`](https://www.npmjs.com/package/@sysce/estrogen). The binary is
 `estrogen`.
 
-**estrogen raises the cost of reading a build. It does not make the build secret.**
-A decoder key ships in each file, and anyone with devtools can run the code. TLS
-is the only transport protection. Do not describe the output as secret.
+estrogen transforms a shipped build into something more fun to read, for
+crawlers, scrapers and the casual copy/paste. The engine is an obfuscator, not
+encryption: a decoder key ships in each file, so lean on TLS for transport.
 
-Try it in your browser at [estro.help](https://estro.help): the
-real engine compiled to WebAssembly, running locally on what you paste. Nothing
-is uploaded, and the same limit holds, the output is not secret.
+Try it in your browser at [estro.help](https://estro.help): the real engine
+compiled to WebAssembly, running locally on what you paste. Nothing is uploaded.
 
 ## Install
 
