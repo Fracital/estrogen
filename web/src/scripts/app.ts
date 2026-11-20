@@ -111,9 +111,34 @@ const copyBtn = byId<HTMLButtonElement>('copyBtn');
 const encoder = new TextEncoder();
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
+// The sidebar is an explorer: one row per output file, and under each file the
+// engine mapped, a second row for its `<path>.map`. `entries` is that flat,
+// rendered list; `active` indexes it.
+interface Entry {
+	kind: 'file' | 'map';
+	file: OutputFile;
+	// The row's own path: the file's path, or `<path>.map` for a map row.
+	path: string;
+}
+
 let outputs: OutputFile[] = [];
+let entries: Entry[] = [];
 let active = -1;
 let zipName = 'estrogen.zip';
+
+function buildEntries(): void {
+	entries = [];
+	for (const file of outputs) {
+		entries.push({ kind: 'file', file, path: file.path });
+		if (file.map !== undefined) {
+			entries.push({ kind: 'map', file, path: `${file.path}.map` });
+		}
+	}
+}
+
+function anyMap(): boolean {
+	return outputs.some((f) => f.map !== undefined);
+}
 
 function asText(bytes: Uint8Array): string | null {
 	if (bytes.includes(0)) return null;
@@ -145,10 +170,11 @@ const MIME: Record<string, string> = {
 function setOutputs(files: OutputFile[], name: string): void {
 	outputs = files.slice().sort((a, b) => a.path.localeCompare(b.path));
 	zipName = name;
+	buildEntries();
 	renderFiles();
-	// Open the first file the engine rewrote, else the first file.
-	const first = outputs.findIndex((f) => f.edits > 0);
-	showFile(outputs.length === 0 ? -1 : Math.max(first, 0));
+	// Open the first file the engine rewrote, else the first entry.
+	const first = entries.findIndex((e) => e.kind === 'file' && e.file.edits > 0);
+	showEntry(entries.length === 0 ? -1 : Math.max(first, 0));
 }
 
 function renderFiles(): void {
@@ -160,38 +186,59 @@ function renderFiles(): void {
 		fileList.append(empty);
 		return;
 	}
-	outputs.forEach((file, index) => {
+	entries.forEach((entry, index) => {
 		const item = document.createElement('button');
 		item.type = 'button';
-		item.className = 'file';
+		item.className = entry.kind === 'map' ? 'file map-row' : 'file';
 		item.dataset.index = String(index);
-		item.title = file.path;
-		const slash = file.path.lastIndexOf('/');
+		item.title = entry.path;
+		const slash = entry.path.lastIndexOf('/');
 		if (slash >= 0) {
 			const dir = document.createElement('span');
 			dir.className = 'dir';
-			dir.textContent = file.path.slice(0, slash + 1);
+			dir.textContent = entry.path.slice(0, slash + 1);
 			item.append(dir);
 		}
 		const name = document.createElement('span');
 		name.className = 'name';
-		name.textContent = file.path.slice(slash + 1);
+		name.textContent = entry.path.slice(slash + 1);
 		item.append(name);
-		if (file.skipped || file.edits > 0) {
+		if (entry.kind === 'file' && (entry.file.skipped || entry.file.edits > 0)) {
 			const badge = document.createElement('span');
-			badge.className = file.skipped ? 'badge skip' : 'badge';
-			badge.textContent = file.skipped ? 'skipped' : String(file.edits);
-			badge.title = file.skipped
+			badge.className = entry.file.skipped ? 'badge skip' : 'badge';
+			badge.textContent = entry.file.skipped
+				? 'skipped'
+				: String(entry.file.edits);
+			badge.title = entry.file.skipped
 				? 'Failed to parse, copied through unchanged'
-				: `${file.edits} edits`;
+				: `${entry.file.edits} edits`;
 			item.append(badge);
 		}
-		item.addEventListener('click', () => showFile(index));
+		item.addEventListener('click', () => showEntry(index));
 		fileList.append(item);
 	});
 }
 
-function showFile(index: number): void {
+// The source map is shipped minified; show it pretty-printed in the viewer.
+function prettyMap(map: string): string {
+	try {
+		return JSON.stringify(JSON.parse(map), null, 2);
+	} catch {
+		return map;
+	}
+}
+
+// The Download .map button is shown whenever the output holds any map, so it is
+// pressable even when the focused row is a file with no map, or nothing is
+// focused. Its label follows the focused file's extension.
+function updateMapButton(): void {
+	downloadMapBtn.hidden = !anyMap();
+	const entry = entries[active];
+	const ext = entry ? extension(entry.file.path) : '';
+	downloadMapBtn.textContent = ext ? `Download .${ext}.map` : 'Download .map';
+}
+
+function showEntry(index: number): void {
 	active = index;
 	for (const item of fileList.querySelectorAll<HTMLElement>('.file')) {
 		const on = Number(item.dataset.index) === index;
@@ -199,8 +246,8 @@ function showFile(index: number): void {
 		if (on) item.setAttribute('aria-current', 'true');
 		else item.removeAttribute('aria-current');
 	}
-	const file = outputs[index];
-	if (!file) {
+	const entry = entries[index];
+	if (!entry) {
 		viewPath.textContent = '';
 		outputArea.value = '';
 		outputArea.hidden = false;
@@ -208,39 +255,45 @@ function showFile(index: number): void {
 		copyBtn.disabled = true;
 		downloadBtn.disabled = true;
 		downloadBtn.textContent = 'Download .js';
-		downloadMapBtn.hidden = true;
 		downloadAllBtn.disabled = true;
+		updateMapButton();
 		return;
 	}
-	viewPath.textContent = file.path;
-	const isText = file.text !== null;
-	outputArea.value = file.text ?? '';
-	outputArea.scrollTop = 0;
-	outputArea.hidden = !isText;
-	unsupported.hidden = isText;
-	copyBtn.disabled = !isText;
-	const ext = extension(file.path);
-	downloadBtn.textContent = ext ? `Download .${ext}` : 'Download file';
+	viewPath.textContent = entry.path;
+	if (entry.kind === 'map') {
+		outputArea.value = prettyMap(entry.file.map ?? '');
+		outputArea.scrollTop = 0;
+		outputArea.hidden = false;
+		unsupported.hidden = true;
+		copyBtn.disabled = false;
+		downloadBtn.textContent = 'Download .map';
+	} else {
+		const file = entry.file;
+		const isText = file.text !== null;
+		outputArea.value = file.text ?? '';
+		outputArea.scrollTop = 0;
+		outputArea.hidden = !isText;
+		unsupported.hidden = isText;
+		copyBtn.disabled = !isText;
+		const ext = extension(file.path);
+		downloadBtn.textContent = ext ? `Download .${ext}` : 'Download file';
+	}
 	downloadBtn.disabled = false;
-	// The map button shows only for a file the engine mapped.
-	downloadMapBtn.hidden = file.map === undefined;
-	downloadMapBtn.textContent = ext
-		? `Download .${ext}.map`
-		: 'Download .map';
 	downloadAllBtn.disabled = false;
+	updateMapButton();
 }
 
 // Arrow keys move through the file list, Home and End jump to its ends.
 fileList.addEventListener('keydown', (event) => {
-	if (outputs.length === 0) return;
+	if (entries.length === 0) return;
 	let next = active;
-	if (event.key === 'ArrowDown') next = Math.min(active + 1, outputs.length - 1);
+	if (event.key === 'ArrowDown') next = Math.min(active + 1, entries.length - 1);
 	else if (event.key === 'ArrowUp') next = Math.max(active - 1, 0);
 	else if (event.key === 'Home') next = 0;
-	else if (event.key === 'End') next = outputs.length - 1;
+	else if (event.key === 'End') next = entries.length - 1;
 	else return;
 	event.preventDefault();
-	showFile(next);
+	showEntry(next);
 	fileList
 		.querySelector<HTMLElement>(`.file[data-index="${next}"]`)
 		?.focus();
@@ -435,14 +488,21 @@ function download(data: BlobPart, name: string, type: string): void {
 	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function basename(path: string): string {
+	return path.slice(path.lastIndexOf('/') + 1);
+}
+
 downloadBtn.addEventListener('click', () => {
-	const file = outputs[active];
-	if (!file) return;
-	const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+	const entry = entries[active];
+	if (!entry) return;
+	if (entry.kind === 'map') {
+		download(entry.file.map ?? '', basename(entry.path), 'application/json');
+		return;
+	}
 	download(
-		file.bytes as BlobPart,
-		name,
-		MIME[extension(file.path)] ?? 'application/octet-stream',
+		entry.file.bytes as BlobPart,
+		basename(entry.file.path),
+		MIME[extension(entry.file.path)] ?? 'application/octet-stream',
 	);
 });
 
@@ -457,16 +517,25 @@ function mapOf(result: { map?: unknown }): string | undefined {
 }
 
 downloadMapBtn.addEventListener('click', () => {
-	const file = outputs[active];
+	// The focused entry's map, or the first mapped file when the focus has none
+	// or nothing is focused, so the button always does something useful.
+	const entry = entries[active];
+	const file =
+		entry && entry.file.map !== undefined
+			? entry.file
+			: outputs.find((f) => f.map !== undefined);
 	if (!file?.map) return;
-	const name = file.path.slice(file.path.lastIndexOf('/') + 1);
-	download(file.map, `${name}.map`, 'application/json');
+	download(file.map, `${basename(file.path)}.map`, 'application/json');
 });
 
 function downloadZip(): void {
 	if (outputs.length === 0) return;
 	const zip: Zippable = {};
-	for (const file of outputs) zip[file.path] = file.bytes;
+	for (const file of outputs) {
+		zip[file.path] = file.bytes;
+		// The whole codebase, including a `<path>.map` next to each mapped file.
+		if (file.map !== undefined) zip[`${file.path}.map`] = encoder.encode(file.map);
+	}
 	download(zipSync(zip, { level: 6 }) as BlobPart, zipName, 'application/zip');
 }
 

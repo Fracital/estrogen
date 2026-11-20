@@ -316,6 +316,14 @@ button {
 	border-left-color: var(--blue);
 	background: rgba(51, 181, 229, 0.16);
 }
+/* A map row sits under its file, indented and muted. */
+.files .file.map-row {
+	padding-left: 26px;
+	color: rgba(255, 255, 255, 0.45);
+}
+.files .file.map-row .name {
+	font-style: italic;
+}
 .files .file .dir {
 	flex: 0 1 auto;
 	min-width: 0;
