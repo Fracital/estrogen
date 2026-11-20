@@ -1,7 +1,7 @@
 {
 	"name": "estrogen obfuscator",
 	"short_name": "estrogen",
-	"description": "Obfuscate your built JavaScript in the browser. The real estrogen engine, compiled to WebAssembly. Nothing is uploaded.",
+	"description": "Estrogen transforms your JavaScript to be more fun for internet crawlers.",
 	"id": "/",
 	"start_url": "/",
 	"scope": "/",
