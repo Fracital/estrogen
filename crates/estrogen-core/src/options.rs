@@ -188,6 +188,7 @@ struct ConfigOptions {
     jobs: Option<usize>,
     check: bool,
     vm: Option<bool>,
+    minify: Option<bool>,
     optimize_svg: Option<bool>,
     minify_html: Option<bool>,
     minify_css: Option<bool>,
@@ -328,6 +329,14 @@ pub struct Options {
     /// changes which transform an app chunk takes, never whether it is
     /// protected. The CLI exposes `--no-vm`.
     pub vm: bool,
+    /// Collapse the edit-and-splice JS output to a single line. On by default.
+    /// The VM path already ships one line; this reprints the literal and proxy
+    /// pass output ([`crate::minify`]) so it does too, with newlines only inside
+    /// backtick template literals. It fails closed: a chunk that would not
+    /// re-parse or that surfaces a canary after the reprint keeps the
+    /// edit-preserving output and its private source map. The CLI exposes
+    /// `--no-minify`.
+    pub minify: bool,
     /// Optimize `.svg` asset files: shrink each plain image SVG with the SVGO
     /// default job set (drop metadata and comments, collapse whitespace, round
     /// path numbers, remove default attributes) and write the smaller result.
@@ -361,6 +370,7 @@ impl Default for Options {
             vendor: Vec::new(),
             manifest: Some(PathBuf::from(DEFAULT_VENDOR_MANIFEST)),
             vm: true,
+            minify: true,
             optimize_svg: true,
             minify_html: true,
             minify_css: true,
@@ -391,6 +401,7 @@ impl Options {
             vendor: file.vendor,
             manifest: resolve_manifest(file.options.manifest),
             vm: file.options.vm.unwrap_or(true),
+            minify: file.options.minify.unwrap_or(true),
             optimize_svg: file.options.optimize_svg.unwrap_or(true),
             minify_html: file.options.minify_html.unwrap_or(true),
             minify_css: file.options.minify_css.unwrap_or(true),
@@ -574,6 +585,19 @@ sourcemap = "/tmp/private-maps"
         );
         let ob = Options::from_config(&b).unwrap();
         assert!(!ob.optimize_svg && !ob.minify_html && !ob.minify_css);
+        fs::remove_file(&b).ok();
+    }
+
+    #[test]
+    fn minify_defaults_on_and_is_configurable() {
+        // Default on, and a config that omits it stays on.
+        assert!(Options::default().minify);
+        let a = tmp_file("mina.toml", "");
+        assert!(Options::from_config(&a).unwrap().minify);
+        fs::remove_file(&a).ok();
+        // A config can turn it off.
+        let b = tmp_file("minb.toml", "[options]\nminify = false\n");
+        assert!(!Options::from_config(&b).unwrap().minify);
         fs::remove_file(&b).ok();
     }
 

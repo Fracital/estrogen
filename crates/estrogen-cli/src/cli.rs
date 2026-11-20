@@ -80,6 +80,14 @@ pub struct Common {
     #[arg(long = "no-vm")]
     pub no_vm: bool,
 
+    /// Do not collapse the edit-and-splice JS output to a single line; keep the
+    /// edit-preserving output and its private source map. Minification is on by
+    /// default; it reprints the literal and proxy pass output as one line, with
+    /// newlines only inside backtick template literals. The VM path is one line
+    /// either way.
+    #[arg(long = "no-minify")]
+    pub no_minify: bool,
+
     /// Do not optimize `.svg` asset files. SVG optimization is on by default; it
     /// shrinks each plain image SVG with the SVGO default job set and replaces a
     /// site's separate `svgmin` step.
@@ -161,6 +169,9 @@ impl Cli {
         }
         if common.no_vm {
             options.vm = false;
+        }
+        if common.no_minify {
+            options.minify = false;
         }
         if common.no_optimize_svg {
             options.optimize_svg = false;
@@ -315,6 +326,15 @@ mod tests {
         .build_options()
         .unwrap();
         assert!(!off.optimize_svg && !off.minify_html && !off.minify_css);
+    }
+
+    #[test]
+    fn minify_is_on_by_default_and_the_flag_turns_it_off() {
+        assert!(parse(&["estrogen", "dist"]).build_options().unwrap().minify);
+        let off = parse(&["estrogen", "--no-minify", "dist"])
+            .build_options()
+            .unwrap();
+        assert!(!off.minify);
     }
 
     #[test]

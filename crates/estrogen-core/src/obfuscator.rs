@@ -384,13 +384,28 @@ impl Obfuscator {
                 });
             }
         }
+        // Final step: collapse the edited chunk to one line. The VM path already
+        // ships one line; this handles the literal and proxy edit-and-splice
+        // output. It fails closed, so `minified` is the reprinted single line
+        // only when it still re-parses and carries no canary, else the
+        // edit-preserving `rewritten` is kept. A minified chunk, like a VM chunk,
+        // carries no edit-based source map: the reprint does not line up with the
+        // source, so no private map is written for it.
+        let minified = if self.options.minify && kind == FileKind::Js && !vm_replaced {
+            self.minify_js_chunk(path, &rewritten)
+        } else {
+            None
+        };
+        let output = minified.as_deref().unwrap_or(&rewritten);
+
         if !self.options.check {
-            write_preserving_bom(path, &source, &rewritten)?;
+            write_preserving_bom(path, &source, output)?;
             // The private map traces edits against the source text. A VM chunk is
-            // a whole-file replacement, and an optimized SVG was reshaped before
-            // the cloak pass edited it, so in both cases the edits do not line up
-            // with the original source and no map is written.
-            if !vm_replaced && optimized.is_none() {
+            // a whole-file replacement, an optimized SVG was reshaped before the
+            // cloak pass edited it, and a minified chunk was reprinted, so in all
+            // three the output does not line up with the original source and no
+            // map is written.
+            if !vm_replaced && optimized.is_none() && minified.is_none() {
                 self.write_sourcemap(path, root, &source, &edits)?;
             }
         }
@@ -494,6 +509,33 @@ impl Obfuscator {
             return Ok(None);
         }
         crate::vm::try_compile_chunk(source, &self.options)
+    }
+
+    /// Reprint an edited JS chunk as a single line, or `None` to keep the
+    /// edit-preserving output.
+    ///
+    /// This is the final step on the literal and proxy edit-and-splice path (the
+    /// VM path is already one line). It fails closed: the reprinted line must
+    /// re-parse, and no canary may surface in it, or the edited `rewritten` is
+    /// kept instead. The `rewritten` the caller passes already re-parsed and
+    /// passed the canary scan, so a fallback is always safe. See [`crate::minify`].
+    fn minify_js_chunk(&self, path: &Path, rewritten: &str) -> Option<String> {
+        let line = crate::minify::minify_js(path, rewritten)?;
+        // Fail closed: the reprint must still be valid JS. A reprint that did not
+        // round-trip is a bug, not a reason to ship a broken chunk.
+        if crate::pass::ensure_js_reparses(path, &line).is_err() {
+            return None;
+        }
+        // Fail closed: re-run the canary scan on the minified text. The reprint
+        // cannot add a literal, but it can reshape one (a `\n` string becomes a
+        // backtick template), so scan the final bytes rather than trust the
+        // earlier scan of the edited form.
+        for canary in &self.options.canaries {
+            if !canary.value.is_empty() && line.contains(&canary.value) {
+                return None;
+            }
+        }
+        Some(line)
     }
 
     /// Write the V3 source map for a processed file, when `--sourcemap <dir>` is
@@ -846,9 +888,14 @@ mod tests {
         let js = dir.join("app.js");
         let src = "const a = 'hello';\nconst b = `t${a}`;\n";
         fs::write(&js, src).unwrap();
+        // The private map traces the edits against the source. A minified chunk is
+        // reprinted and so carries no edit-based map (see
+        // `a_minified_literal_chunk_writes_no_map`), so the map is a feature of the
+        // edit-preserving mode; turn minify off to exercise it.
         let obf = Obfuscator::new(Options {
             seed: Some(b"s".to_vec()),
             sourcemap_dir: Some(maps.clone()),
+            minify: false,
             ..Options::default()
         })
         .unwrap();
@@ -873,6 +920,146 @@ mod tests {
         assert!(!v["mappings"].as_str().unwrap().is_empty());
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&maps).ok();
+    }
+
+    // Final JS minification tests.
+
+    #[test]
+    fn a_minified_literal_chunk_is_a_single_line() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // A multi-line chunk the VM subset does not cover (a top-level function),
+        // so it takes the literal edit-and-splice path. Its string holds a `\n`.
+        let src = "export function greet(name) {\n    const hi = 'hello\\nthere';\n    return hi + name;\n}\n";
+        fs::write(&js, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"min-seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&js).unwrap();
+        // One line: the user's string with the `\n` was encrypted into the pool
+        // (base64, no newline), so nothing in the output carries a newline at all.
+        assert_eq!(out.lines().count(), 1, "expected one line: {out:?}");
+        assert!(!out.contains('\n'), "a stray newline survived: {out:?}");
+        // Still a marked, obfuscated, re-parsing chunk with no plaintext.
+        assert!(out.starts_with(&format!("/* {} */", crate::format::MARKER)));
+        assert!(!out.contains("'hello"), "plaintext string survived: {out}");
+        crate::pass::ensure_js_reparses(&js, &out).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn minify_off_keeps_the_multi_line_edit_output() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        let src = "export function greet(name) {\n    const hi = 'hello there';\n    return hi + name;\n}\n";
+        fs::write(&js, src).unwrap();
+
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"min-seed".to_vec()),
+            minify: false,
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+
+        let out = fs::read_to_string(&js).unwrap();
+        // The edit-and-splice output keeps the source's own line breaks: the
+        // function body still spans several lines.
+        assert!(
+            out.lines().count() > 1,
+            "edit output should be multi-line: {out:?}"
+        );
+        assert!(out.contains(crate::format::MARKER));
+        assert!(!out.contains("'hello there'"), "string must be encrypted");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn minify_on_and_off_protect_the_same_chunk() {
+        // The minified line and the edit-preserving output are two printings of
+        // the same obfuscated chunk under one seed. Both drop the plaintext, both
+        // carry the marker, and the only difference is the line count. Behavioral
+        // equivalence (both decode to the same string in a JS engine) is covered
+        // by the node round-trip in the hand-off, which a unit test cannot run.
+        let run = |minify: bool| {
+            let dir = tmp_dir();
+            let js = dir.join("app.js");
+            fs::write(
+                &js,
+                "export function f() {\n    return 'protected secret';\n}\n",
+            )
+            .unwrap();
+            let obf = Obfuscator::new(Options {
+                seed: Some(b"eq-seed".to_vec()),
+                minify,
+                ..Options::default()
+            })
+            .unwrap();
+            obf.obfuscate_dir(&dir).unwrap();
+            let out = fs::read_to_string(&js).unwrap();
+            fs::remove_dir_all(&dir).ok();
+            out
+        };
+        let on = run(true);
+        let off = run(false);
+        for out in [&on, &off] {
+            assert!(!out.contains("'protected secret'"));
+            assert!(out.contains(crate::format::MARKER));
+            crate::pass::ensure_js_reparses(Path::new("app.js"), out).unwrap();
+        }
+        assert_eq!(on.lines().count(), 1);
+        assert!(off.lines().count() > 1);
+    }
+
+    #[test]
+    fn a_minified_literal_chunk_writes_no_map() {
+        let dir = tmp_dir();
+        let maps = tmp_dir();
+        let js = dir.join("app.js");
+        fs::write(&js, "export function f() {\n    return 'x';\n}\n").unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"map-seed".to_vec()),
+            sourcemap_dir: Some(maps.clone()),
+            // minify on by default
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+        // No private map for a reprinted chunk: the single line does not line up
+        // with the source, the same as the VM and optimized-SVG paths.
+        assert!(
+            !maps.join("app.js.map").exists(),
+            "a minified chunk must not write an edit-based map"
+        );
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&maps).ok();
+    }
+
+    #[test]
+    fn a_canary_still_fails_closed_with_minify_on() {
+        let dir = tmp_dir();
+        let js = dir.join("app.js");
+        // The identifier canary survives the literal pass and the reprint, so the
+        // post-minify scan must still catch it and fail the build.
+        fs::write(&js, "export const Fracital = 'x';\n").unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"seed".to_vec()),
+            vm: false,
+            canaries: vec![crate::options::Canary {
+                value: "Fracital".to_string(),
+                reason: String::new(),
+            }],
+            ..Options::default()
+        })
+        .unwrap();
+        let err = obf.obfuscate_dir(&dir).unwrap_err();
+        assert!(matches!(err, Error::Canary { .. }));
+        fs::remove_dir_all(&dir).ok();
     }
 
     // SVG asset optimization tests.

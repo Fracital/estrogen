@@ -60,6 +60,7 @@ pub mod edit;
 pub mod error;
 pub mod format;
 mod keys;
+pub mod minify;
 pub mod obfuscator;
 pub mod options;
 pub mod pass;
