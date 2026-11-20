@@ -113,8 +113,11 @@ mod tests {
 
     #[test]
     fn pools_a_string_literal_and_reparses() {
-        let out =
-            obfuscate_js("const greeting = 'hello world';", &literal_opts(b"demo-seed")).unwrap();
+        let out = obfuscate_js(
+            "const greeting = 'hello world';",
+            &literal_opts(b"demo-seed"),
+        )
+        .unwrap();
         assert!(out.edits > 0);
         // The plaintext string is gone and the marker decoder is present.
         assert!(!out.code.contains("hello world"));

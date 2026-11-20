@@ -43,11 +43,7 @@ struct Output {
 /// pass failure, or a canary surviving in the output rejects with the engine's
 /// error string; the demo shows it and keeps the previous output.
 #[wasm_bindgen]
-pub fn obfuscate(
-    source: &str,
-    seed: Option<String>,
-    vm: Option<bool>,
-) -> Result<String, JsValue> {
+pub fn obfuscate(source: &str, seed: Option<String>, vm: Option<bool>) -> Result<String, JsValue> {
     let mut options = Options::default();
     if let Some(seed) = seed {
         if !seed.is_empty() {
