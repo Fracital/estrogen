@@ -1,10 +1,12 @@
 # crack
 
-[![npm](https://img.shields.io/npm/v/@sysce/crack?maxAge=3600&label=npm)](https://www.npmjs.com/package/@sysce/crack)
-[![CI](https://github.com/Fracital/crack/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Fracital/crack/actions/workflows/ci.yml)
-[![license: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
-[![GitHub issues](https://img.shields.io/github/issues/Fracital/crack?style=flat&color=orange)](https://github.com/Fracital/crack/issues)
-[![GitHub stars](https://img.shields.io/github/stars/Fracital/crack?style=flat&color=orange)](https://github.com/Fracital/crack/stargazers)
+<div align="center">
+  <a href="https://www.npmjs.com/package/@sysce/crack"><img src="https://img.shields.io/npm/v/@sysce/crack?maxAge=3600&label=npm" alt="npm" /></a>
+  <a href="https://github.com/Fracital/crack/actions/workflows/ci.yml"><img src="https://github.com/Fracital/crack/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-ISC-blue.svg" alt="license: ISC" /></a>
+  <a href="https://github.com/Fracital/crack/issues"><img src="https://img.shields.io/github/issues/Fracital/crack?style=flat&color=orange" alt="GitHub issues" /></a>
+  <a href="https://github.com/Fracital/crack/stargazers"><img src="https://img.shields.io/github/stars/Fracital/crack?style=flat&color=orange" alt="GitHub stars" /></a>
+</div>
 
 A post-build web obfuscator. It takes a directory a bundler already produced and
 rewrites the JS, HTML and SVG in place: string and template literals into an
