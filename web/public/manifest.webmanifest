@@ -1,7 +1,7 @@
 {
 	"name": "estrogen obfuscator",
 	"short_name": "estrogen",
-	"description": "ECMAScript code obfuscator, built in Rust on OXC.",
+	"description": "Estrogen transforms your JavaScript to be more fun for internet crawlers. Running @sysce/estrogen in WASM.",
 	"id": "/",
 	"start_url": "/",
 	"scope": "/",
