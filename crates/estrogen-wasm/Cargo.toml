@@ -1,0 +1,33 @@
+[package]
+name = "estrogen-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "WebAssembly binding for estrogen: obfuscate one JavaScript source string in the browser."
+
+[lib]
+# cdylib is the wasm output; rlib lets the tests and docs build on the host.
+crate-type = ["cdylib", "rlib"]
+
+# Modern rustc emits bulk-memory and sign-extension ops by default. wasm-pack's
+# bundled wasm-opt is older than those, so it must be told to accept them or it
+# fails validation. The flags enable the same features rustc already used.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O2", "--enable-bulk-memory", "--enable-sign-ext"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+[dependencies]
+estrogen-core = { path = "../estrogen-core" }
+wasm-bindgen = "=0.2.100"
+serde = { workspace = true }
+serde_json = { workspace = true }
+# getrandom reaches estrogen-core's key draw through serde-independent paths. On
+# wasm it has no OS entropy source, so the js feature routes it at the browser's
+# crypto.getRandomValues. Feature unification turns this on for the whole wasm
+# build, so a demo without a seed still gets fresh keys.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

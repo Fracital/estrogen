@@ -37,19 +37,23 @@
 //! every byte a pass does not touch stays exactly as the bundler emitted it. See
 //! [`edit`] for the detail and [`pass`] for the passes.
 //!
-//! # State of the engine
+//! # What the engine does
 //!
-//! The obfuscation engine is not built yet. The passes in [`pass`] are identity
-//! stubs: they parse (so a parse failure still fails closed) and return no
-//! edits. The edit-and-splice core, config loading, the file walk and
-//! eligibility gate, and reporting are real and tested. The parts that encrypt
-//! the pool and emit the decoder ([`format`]) return [`Error::Engine`] until the
-//! engine lands. The spec for all of it is Fracital's
-//! `scripts/obfuscate-build.mjs`, cited in each module.
+//! The engine is built and tested against Fracital's
+//! `scripts/obfuscate-build.mjs`, cited per module. The passes in [`pass`]
+//! encrypt string and template literals into the ChaCha20 pool and emit its
+//! decoder ([`format`]), rename the proxy and store names in vendor files, map
+//! the embedded wasm names, and rewrite the HTML and SVG markup. The obfuscator
+//! also vendors files into a build ([`Obfuscator::build`]) and emits private V3
+//! source maps. The edit-and-splice core, config loading, the file walk and
+//! eligibility gate, and reporting sit underneath. [`Error::Engine`] now marks
+//! an internal invariant, such as canary-free sampling that did not converge,
+//! not unbuilt work.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod api;
 mod chacha;
 pub mod edit;
 pub mod error;
@@ -65,6 +69,7 @@ mod vendor;
 pub mod walk;
 mod wasm;
 
+pub use api::{obfuscate_js, Obfuscated};
 pub use error::{Error, Result};
 pub use format::FORMAT_VERSION;
 pub use obfuscator::Obfuscator;
