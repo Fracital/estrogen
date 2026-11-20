@@ -1,0 +1,95 @@
+# Build, test, and lint crack on every push and pull request.
+# Runs the Rust checks on each shipped target using a native runner, so
+# cargo test runs real binaries instead of emulated ones. A separate node
+# job typechecks npm/ when it has a tsconfig.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Cancel an in-flight run when a new commit lands on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners for every target. Linux arm64 uses the hosted
+          # ubuntu arm runner, which is free for public repos; if this repo
+          # goes private, swap it for cross or qemu.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      # rust-toolchain.toml pins the channel to stable, so @stable matches it.
+      # The action has no semver tags; stable is the documented pin. It also
+      # installs the matrix target for the build.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Clippy
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: Format
+        run: cargo fmt --check
+
+  node:
+    name: npm typecheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: "22"
+
+      # npm/ is built by another track. Typecheck it only once it has a
+      # tsconfig, so this job stays green before that lands.
+      - name: Check for tsconfig
+        id: tsconfig
+        shell: bash
+        run: |
+          if [ -f npm/tsconfig.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "npm/tsconfig.json not found, skipping typecheck"
+          fi
+
+      - name: Install
+        if: steps.tsconfig.outputs.present == 'true'
+        working-directory: npm
+        run: npm ci || npm install
+
+      - name: Typecheck
+        if: steps.tsconfig.outputs.present == 'true'
+        working-directory: npm
+        run: npx tsc --noEmit

@@ -1,6 +1,15 @@
+# Rust build output. Cargo.lock is committed on purpose (crack ships binaries),
+# so it is not ignored here.
 /target
+**/*.rs.bk
+
+# npm launcher and per-target packages (npm/ is another agent's area; these
+# patterns keep its build and install output out of git).
 node_modules/
 *.node
+*.tgz
 /npm/*/crack
 /npm/*/crack.exe
+
+# OS cruft
 .DS_Store

@@ -1,0 +1,21 @@
+{
+  "name": "@sysce/crack-win32-x64",
+  "version": "0.1.0",
+  "description": "The crack binary for win32-x64. crack raises the cost of reading a build; it is not secrecy, and a key ships in each file.",
+  "license": "ISC",
+  "author": "David Reed",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fracital/crack.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true
+}

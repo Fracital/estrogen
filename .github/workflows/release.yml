@@ -1,0 +1,164 @@
+# Build the release binaries and publish the npm packages on a version tag.
+#
+# Trigger: a pushed tag like v1.2.3. The version published is the tag with the
+# leading v removed.
+#
+# Publishing uses npm trusted publishing (OIDC from this repo's Actions), so
+# there is no npm token in CI. The id-token: write permission below is what
+# lets npm exchange the OIDC token for publish rights.
+#
+# First publish of each package is manual. Trusted publishing needs the package
+# record to already exist on npmjs.com, so a human publishes the first version
+# of the launcher and every per-target package by hand as the e9x npm login
+# (npm publish --access public). After that, this workflow handles every later
+# publish.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # Build one release binary per target on a native runner and hand it to the
+  # publish job as an artifact.
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # target is the Rust triple, pkg is the npm package dir it ships in,
+          # ext is the binary suffix. Linux arm64 builds on the hosted ubuntu
+          # arm runner (free for public repos); switch to cross if this repo
+          # goes private.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            pkg: crack-linux-x64
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            pkg: crack-linux-arm64
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-13
+            pkg: crack-darwin-x64
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-14
+            pkg: crack-darwin-arm64
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            pkg: crack-win32-x64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Upload the binary under the npm package name it belongs to, so the
+      # publish job can drop each one into the right bin/ without a lookup.
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p staged
+          cp "target/${{ matrix.target }}/release/crack${{ matrix.ext }}" "staged/crack${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v4.4.3
+        with:
+          name: ${{ matrix.pkg }}
+          path: staged/crack${{ matrix.ext }}
+          if-no-files-found: error
+
+  # Place each binary into its per-target package, set the version from the tag,
+  # then publish. Per-target packages go first, the launcher last, so the
+  # launcher's optionalDependencies resolve to versions that already exist.
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write # OIDC for trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm 11.5.1 or newer. Node 22 ships npm 10, so
+      # upgrade the global npm. No token is set; publish authenticates by OIDC.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Read version from tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Pull every target binary. Each artifact is named after its npm package,
+      # so this lands at artifacts/<pkg>/crack[.exe].
+      - uses: actions/download-artifact@v4.1.8
+        with:
+          path: artifacts
+
+      - name: Place binaries and set versions
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          # pkg dir -> binary name (crack.exe only on windows).
+          declare -A BIN=(
+            [crack-linux-x64]=crack
+            [crack-linux-arm64]=crack
+            [crack-darwin-x64]=crack
+            [crack-darwin-arm64]=crack
+            [crack-win32-x64]=crack.exe
+          )
+          for pkg in "${!BIN[@]}"; do
+            bin="${BIN[$pkg]}"
+            mkdir -p "npm/${pkg}/bin"
+            cp "artifacts/${pkg}/${bin}" "npm/${pkg}/bin/${bin}"
+            chmod +x "npm/${pkg}/bin/${bin}" || true
+            ( cd "npm/${pkg}" && npm version "$VERSION" --no-git-tag-version --allow-same-version )
+          done
+          # Launcher version, plus pin its optionalDependencies to this version
+          # so a fresh install pulls the matching per-target packages.
+          ( cd npm/crack && npm version "$VERSION" --no-git-tag-version --allow-same-version )
+          node -e '
+            const fs = require("fs");
+            const p = "npm/crack/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            const v = process.env.VERSION;
+            for (const k of Object.keys(j.optionalDependencies || {})) {
+              j.optionalDependencies[k] = v;
+            }
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+
+      # Publish the per-target packages first, then the launcher. --provenance
+      # records the build; it is produced from the same OIDC token.
+      - name: Publish per-target packages
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          for pkg in crack-linux-x64 crack-linux-arm64 crack-darwin-x64 crack-darwin-arm64 crack-win32-x64; do
+            ( cd "npm/${pkg}" && npm publish --provenance --access public )
+          done
+
+      - name: Publish launcher
+        run: cd npm/crack && npm publish --provenance --access public

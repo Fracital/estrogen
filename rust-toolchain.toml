@@ -1,0 +1,12 @@
+# Pin the toolchain so every machine and CI build on one compiler. 1.100 is the
+# version installed under ~/.cargo and ~/.rustup for this project.
+[toolchain]
+channel = "1.100"
+components = ["rustfmt", "clippy"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
