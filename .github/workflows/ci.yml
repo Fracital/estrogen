@@ -21,11 +21,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners for every target. Linux arm64 uses the hosted
-          # ubuntu arm runner, which is free for public repos; if this repo
-          # goes private, swap it for cross or qemu.
+          # Linux x64 runs on the self-hosted divide pool (labels divide, ci),
+          # to keep every-push Linux CI off hosted minutes. The other targets
+          # stay on hosted runners: the divide box is x86_64 Linux only. Linux
+          # arm64 uses the hosted ubuntu arm runner, free for public repos; if
+          # this repo goes private, swap it for cross or qemu.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
+            os: [divide, ci]
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
@@ -63,7 +65,7 @@ jobs:
 
   node:
     name: format and npm typecheck
-    runs-on: ubuntu-24.04
+    runs-on: [divide, ci]
     steps:
       - uses: actions/checkout@v4.2.2
 
