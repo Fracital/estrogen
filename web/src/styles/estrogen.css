@@ -231,10 +231,12 @@ button {
 	min-height: 0;
 	border: 1px solid var(--divider);
 	border-radius: 1px;
+	/* The file list's width, dragged by .files-resize and kept in localStorage. */
+	--files-w: 210px;
 }
 .files {
 	flex: none;
-	width: 210px;
+	width: var(--files-w);
 	overflow-y: auto;
 	border-right: 1px solid var(--divider);
 	background: #010101;
@@ -245,6 +247,40 @@ button {
 	padding: 10px 12px;
 	color: rgba(255, 255, 255, 0.35);
 	font-size: 12px;
+}
+/* The drag handle between the file list and the viewer. A thin column whose
+   blue line shows on hover, focus and while dragging. */
+.files-resize {
+	flex: none;
+	width: 6px;
+	margin: 0 -3px;
+	position: relative;
+	z-index: 1;
+	cursor: col-resize;
+	background: transparent;
+}
+.files-resize::before {
+	content: '';
+	position: absolute;
+	inset: 0 2px;
+	background: var(--divider);
+}
+.files-resize:hover::before,
+.files-resize:focus-visible::before,
+.viewer.resizing .files-resize::before {
+	background: var(--blue);
+}
+.files-resize:focus-visible {
+	outline: none;
+}
+/* While dragging, don't let the text panes swallow the pointer or select text. */
+.viewer.resizing {
+	cursor: col-resize;
+	user-select: none;
+}
+.viewer.resizing #output,
+.viewer.resizing .files {
+	pointer-events: none;
 }
 .files .file {
 	display: flex;
@@ -602,5 +638,8 @@ h2 + .holo-list > li:first-child {
 		max-height: 112px;
 		border-right: 0;
 		border-bottom: 1px solid var(--divider);
+	}
+	.files-resize {
+		display: none;
 	}
 }

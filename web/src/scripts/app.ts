@@ -66,6 +66,10 @@ function selectTab(name: string): void {
 	if (name === 'code') {
 		// CodeMirror needs a refresh once its pane is visible, or it renders blank.
 		setTimeout(() => editor.refresh(), 1);
+	} else if (name === 'output') {
+		// The saved width was applied while this pane was hidden (viewer width 0),
+		// so re-clamp it now that the viewer has a real width.
+		reclampFilesWidth();
 	}
 }
 
@@ -229,6 +233,101 @@ fileList.addEventListener('keydown', (event) => {
 	fileList
 		.querySelector<HTMLElement>(`.file[data-index="${next}"]`)
 		?.focus();
+});
+
+// Resizable file list -----------------------------------------------------
+//
+// The handle between the list and the viewer drags the list's width, kept in
+// the --files-w variable on .viewer and remembered across visits. The width
+// is clamped so neither side disappears.
+
+const viewer = byId('app').querySelector<HTMLElement>('.viewer');
+const filesResize = byId('filesResize');
+const FILES_MIN = 120;
+const WIDTH_KEY = 'estrogen:files-width';
+
+function clampFilesWidth(px: number): number {
+	const width = viewer ? viewer.clientWidth : 0;
+	// While the Output pane is hidden the viewer measures 0, so only enforce the
+	// minimum; the viewer-relative maximum is applied once it is visible.
+	if (width <= 0) return Math.round(Math.max(px, FILES_MIN));
+	const max = Math.max(FILES_MIN, width - 160);
+	return Math.round(Math.min(Math.max(px, FILES_MIN), max));
+}
+
+// Re-apply the current width against the now-visible viewer, so a saved width
+// wider than this window gets clamped down.
+function reclampFilesWidth(): void {
+	if (!viewer) return;
+	requestAnimationFrame(() => {
+		const current = viewer.querySelector<HTMLElement>('.files')?.offsetWidth;
+		if (current) setFilesWidth(current, false);
+	});
+}
+
+function setFilesWidth(px: number, save: boolean): void {
+	if (!viewer) return;
+	const width = clampFilesWidth(px);
+	viewer.style.setProperty('--files-w', `${width}px`);
+	filesResize.setAttribute('aria-valuenow', String(width));
+	if (save) {
+		try {
+			localStorage.setItem(WIDTH_KEY, String(width));
+		} catch {
+			// Private mode or blocked storage: the width just does not persist.
+		}
+	}
+}
+
+try {
+	const saved = Number(localStorage.getItem(WIDTH_KEY));
+	if (Number.isFinite(saved) && saved > 0) setFilesWidth(saved, false);
+} catch {
+	// No stored width; the CSS default stands.
+}
+
+filesResize.addEventListener('pointerdown', (event) => {
+	if (!viewer || event.button !== 0) return;
+	event.preventDefault();
+	const startX = event.clientX;
+	const startWidth =
+		viewer.querySelector<HTMLElement>('.files')?.getBoundingClientRect()
+			.width ?? FILES_MIN;
+	filesResize.setPointerCapture(event.pointerId);
+	viewer.classList.add('resizing');
+	const move = (e: PointerEvent) =>
+		setFilesWidth(startWidth + (e.clientX - startX), false);
+	const up = (e: PointerEvent) => {
+		setFilesWidth(startWidth + (e.clientX - startX), true);
+		viewer.classList.remove('resizing');
+		filesResize.releasePointerCapture(event.pointerId);
+		filesResize.removeEventListener('pointermove', move);
+		filesResize.removeEventListener('pointerup', up);
+		filesResize.removeEventListener('pointercancel', up);
+	};
+	filesResize.addEventListener('pointermove', move);
+	filesResize.addEventListener('pointerup', up);
+	filesResize.addEventListener('pointercancel', up);
+});
+
+// Keyboard: the handle is a focusable separator; arrows nudge the width.
+filesResize.addEventListener('keydown', (event) => {
+	if (!viewer) return;
+	const current =
+		viewer.querySelector<HTMLElement>('.files')?.getBoundingClientRect()
+			.width ?? FILES_MIN;
+	const step = event.shiftKey ? 48 : 16;
+	if (event.key === 'ArrowLeft') setFilesWidth(current - step, true);
+	else if (event.key === 'ArrowRight') setFilesWidth(current + step, true);
+	else return;
+	event.preventDefault();
+});
+
+// A window resize can leave the saved width wider than the viewer now allows.
+window.addEventListener('resize', () => {
+	if (!viewer) return;
+	const current = viewer.querySelector<HTMLElement>('.files')?.offsetWidth;
+	if (current) setFilesWidth(current, false);
 });
 
 // Obfuscate (paste tab) ---------------------------------------------------
