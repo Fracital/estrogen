@@ -62,13 +62,8 @@ const REPO = 'https://github.com/Fracital/estrogen';
 
 	<main class="wrap">
 		<p class="lede">
-			estrogen rewrites your JavaScript to be more fun for internet crawlers.
-			Drop in a file or a whole folder and it pools
-			the strings and shortens the local names, <strong
-				>right in your browser</strong
-			>. Nothing you load leaves your machine, and what comes back is ready to
-			ship. This page runs the real estrogen engine compiled to WebAssembly, the
-			same pass the command line runs over a built file.
+			Estrogen transforms your JavaScript to be more fun for internet
+			crawlers. Running <code>@sysce/estrogen</code> in WASM.
 		</p>
 
 		<section class="panel" id="app">
@@ -158,6 +153,9 @@ const REPO = 'https://github.com/Fracital/estrogen';
 				<div class="output-meta">
 					<span id="editsCount"></span>
 					<button id="downloadBtn" disabled type="button">Download .js</button>
+					<button id="downloadMapBtn" hidden type="button"
+						>Download .js.map</button
+					>
 					<button id="downloadAllBtn" disabled type="button">Download .zip</button>
 				</div>
 			</div>

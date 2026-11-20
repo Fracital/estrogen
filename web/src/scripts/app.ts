@@ -90,12 +90,16 @@ interface OutputFile {
 	text: string | null;
 	edits: number;
 	skipped: boolean;
+	// The V3 source map JSON for this file, when the engine produced one. A
+	// skipped (passed-through) file has none.
+	map?: string;
 }
 
 const obfuscateBtn = byId<HTMLButtonElement>('obfuscateBtn');
 const outputArea = byId<HTMLTextAreaElement>('output');
 const editsCount = byId('editsCount');
 const downloadBtn = byId<HTMLButtonElement>('downloadBtn');
+const downloadMapBtn = byId<HTMLButtonElement>('downloadMapBtn');
 const downloadAllBtn = byId<HTMLButtonElement>('downloadAllBtn');
 const seedInput = byId<HTMLInputElement>('seed');
 const fileList = byId('fileList');
@@ -203,6 +207,7 @@ function showFile(index: number): void {
 		copyBtn.disabled = true;
 		downloadBtn.disabled = true;
 		downloadBtn.textContent = 'Download .js';
+		downloadMapBtn.hidden = true;
 		downloadAllBtn.disabled = true;
 		return;
 	}
@@ -216,6 +221,11 @@ function showFile(index: number): void {
 	const ext = extension(file.path);
 	downloadBtn.textContent = ext ? `Download .${ext}` : 'Download file';
 	downloadBtn.disabled = false;
+	// The map button shows only for a file the engine mapped.
+	downloadMapBtn.hidden = file.map === undefined;
+	downloadMapBtn.textContent = ext
+		? `Download .${ext}.map`
+		: 'Download .map';
 	downloadAllBtn.disabled = false;
 }
 
@@ -357,6 +367,7 @@ function runObfuscate(): void {
 					text: code,
 					edits: n,
 					skipped: false,
+					map: mapOf(result),
 				},
 			],
 			'estrogen.zip',
@@ -430,6 +441,23 @@ downloadBtn.addEventListener('click', () => {
 		name,
 		MIME[extension(file.path)] ?? 'application/octet-stream',
 	);
+});
+
+// The engine returns the source map on the obfuscate result. Accept it as a
+// JSON string or an already-parsed object, so the exact WASM shape does not
+// matter to the download: a V3 map is downloaded as <file>.map.
+function mapOf(result: { map?: unknown }): string | undefined {
+	const map = result.map;
+	if (typeof map === 'string') return map.length > 0 ? map : undefined;
+	if (map && typeof map === 'object') return JSON.stringify(map);
+	return undefined;
+}
+
+downloadMapBtn.addEventListener('click', () => {
+	const file = outputs[active];
+	if (!file?.map) return;
+	const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+	download(file.map, `${name}.map`, 'application/json');
 });
 
 function downloadZip(): void {
@@ -548,6 +576,7 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 					text: code,
 					edits: count,
 					skipped: false,
+					map: mapOf(result),
 				};
 				edits += count;
 				if (count > 0) obfuscated += 1;
