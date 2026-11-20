@@ -17,7 +17,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 jobs:
   # Build one release binary per target on a native runner and hand it to the
@@ -36,23 +36,23 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             pkg: crack-linux-x64
-            ext: ""
+            ext: ''
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             pkg: crack-linux-arm64
-            ext: ""
+            ext: ''
           - target: x86_64-apple-darwin
             os: macos-13
             pkg: crack-darwin-x64
-            ext: ""
+            ext: ''
           - target: aarch64-apple-darwin
             os: macos-14
             pkg: crack-darwin-arm64
-            ext: ""
+            ext: ''
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             pkg: crack-win32-x64
-            ext: ".exe"
+            ext: '.exe'
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -96,8 +96,8 @@ jobs:
 
       - uses: actions/setup-node@v4.1.0
         with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing needs npm 11.5.1 or newer. Node 22 ships npm 10, so
       # upgrade the global npm. No token is set; publish authenticates by OIDC.

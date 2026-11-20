@@ -4,27 +4,27 @@
  * `exitCode === 0`; a failed run rejects with a {@link CrackError} instead.
  */
 export interface Report {
-  /** True when crack exited 0. */
-  ok: boolean;
-  /** The process exit code. 0 on success. */
-  exitCode: number;
-  /** The directories crack was asked to rewrite. */
-  dirs: string[];
-  /** The binary that ran. */
-  binaryPath: string;
-  /** The argument vector passed to the binary. */
-  args: string[];
-  /** Captured standard output. */
-  stdout: string;
-  /** Captured standard error. */
-  stderr: string;
-  /** Wall-clock run time in milliseconds. */
-  durationMs: number;
-  /**
-   * Structured detail, when the binary prints a JSON object on stdout. The
-   * shape is the binary's own and may grow; read it defensively.
-   */
-  details?: unknown;
+	/** True when crack exited 0. */
+	ok: boolean;
+	/** The process exit code. 0 on success. */
+	exitCode: number;
+	/** The directories crack was asked to rewrite. */
+	dirs: string[];
+	/** The binary that ran. */
+	binaryPath: string;
+	/** The argument vector passed to the binary. */
+	args: string[];
+	/** Captured standard output. */
+	stdout: string;
+	/** Captured standard error. */
+	stderr: string;
+	/** Wall-clock run time in milliseconds. */
+	durationMs: number;
+	/**
+	 * Structured detail, when the binary prints a JSON object on stdout. The
+	 * shape is the binary's own and may grow; read it defensively.
+	 */
+	details?: unknown;
 }
 
 /**
@@ -33,14 +33,14 @@ export interface Report {
  * that ran.
  */
 export class CrackError extends Error {
-  /** The report captured up to the failure. */
-  readonly report: Report;
+	/** The report captured up to the failure. */
+	readonly report: Report;
 
-  constructor(message: string, report: Report) {
-    super(message);
-    this.name = 'CrackError';
-    this.report = report;
-  }
+	constructor(message: string, report: Report) {
+		super(message);
+		this.name = 'CrackError';
+		this.report = report;
+	}
 }
 
 /**
@@ -49,16 +49,16 @@ export class CrackError extends Error {
  * undefined. A line that is not JSON is ignored, not an error.
  */
 export function parseDetails(stdout: string): unknown {
-  const lines = stdout.split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (line === '') continue;
-    if (line[0] !== '{') return undefined;
-    try {
-      return JSON.parse(line);
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
+	const lines = stdout.split('\n');
+	for (let i = lines.length - 1; i >= 0; i -= 1) {
+		const line = lines[i].trim();
+		if (line === '') continue;
+		if (line[0] !== '{') return undefined;
+		try {
+			return JSON.parse(line);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
 }

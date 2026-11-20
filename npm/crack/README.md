@@ -33,19 +33,19 @@ crack [options] <dir>...
 
 `crack` rewrites each directory in place. Options:
 
-| flag | meaning |
-| --- | --- |
-| `-c`, `--config <file>` | config file |
-| `--canary <file>` | canary list the output must not leak |
-| `--names <file>` | proxy and store names to rename |
-| `--sourcemap <dir>` | write maps here, outside the served tree, for private debugging |
-| `--seed <hex>` | fixed seed for reproducible output (tests only) |
-| `-j`, `--jobs <n>` | worker count |
-| `--check` | report and run the canary check without writing |
-| `--quiet` | suppress progress output |
-| `-v`, `--verbose` | per-file detail |
-| `--version` | print the version |
-| `-h`, `--help` | print help |
+| flag                    | meaning                                                         |
+| ----------------------- | --------------------------------------------------------------- |
+| `-c`, `--config <file>` | config file                                                     |
+| `--canary <file>`       | canary list the output must not leak                            |
+| `--names <file>`        | proxy and store names to rename                                 |
+| `--sourcemap <dir>`     | write maps here, outside the served tree, for private debugging |
+| `--seed <hex>`          | fixed seed for reproducible output (tests only)                 |
+| `-j`, `--jobs <n>`      | worker count                                                    |
+| `--check`               | report and run the canary check without writing                 |
+| `--quiet`               | suppress progress output                                        |
+| `-v`, `--verbose`       | per-file detail                                                 |
+| `--version`             | print the version                                               |
+| `-h`, `--help`          | print help                                                      |
 
 Exit code 0 means success. Any nonzero code means the build was not fully
 rewritten; crack writes no partial output for a file it cannot handle and names
@@ -57,8 +57,8 @@ the file and the reason.
 import { obfuscate } from '@sysce/crack';
 
 const report = await obfuscate({
-  dirs: 'dist',
-  canary: 'canary-list.json',
+	dirs: 'dist',
+	canary: 'canary-list.json',
 });
 console.log(report.ok, report.durationMs);
 ```
@@ -70,14 +70,14 @@ resolves with a `Report` when crack exits 0 and rejects with a `CrackError`
 ## esbuild
 
 ```ts
-import { build } from 'esbuild';
 import crack from '@sysce/crack/esbuild';
+import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/app.ts'],
-  bundle: true,
-  outdir: 'dist',
-  plugins: [crack({ canary: 'canary-list.json' })],
+	entryPoints: ['src/app.ts'],
+	bundle: true,
+	outdir: 'dist',
+	plugins: [crack({ canary: 'canary-list.json' })],
 });
 ```
 
@@ -93,7 +93,7 @@ import { defineConfig } from '@rsbuild/core';
 import { pluginCrack } from '@sysce/crack/rsbuild';
 
 export default defineConfig({
-  plugins: [pluginCrack({ canary: 'canary-list.json' })],
+	plugins: [pluginCrack({ canary: 'canary-list.json' })],
 });
 ```
 

@@ -19,10 +19,10 @@ export { normalizeDirs, buildArgs } from './options.js';
 export { CrackError } from './report.js';
 export type { Report } from './report.js';
 export {
-  PLATFORM_PACKAGES,
-  MissingBinaryError,
-  platformPackageName,
-  targetKey,
-  binSubpath,
-  resolveBinaryPath,
+	PLATFORM_PACKAGES,
+	MissingBinaryError,
+	platformPackageName,
+	targetKey,
+	binSubpath,
+	resolveBinaryPath,
 } from './resolve-binary.js';

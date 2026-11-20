@@ -26,50 +26,50 @@ a directory is the intended use; do not call `crack` once per file from a shell.
 
 `-c`, `--config <file>`
 : Path to a TOML config file. The config sets the names to rename, the canary
-  list, and the obfuscation options. A flag given on the command line overrides
-  the same setting in the file. See the
-  [Configuration](https://github.com/Fracital/crack/wiki/Configuration) wiki
-  page for the file shape.
+list, and the obfuscation options. A flag given on the command line overrides
+the same setting in the file. See the
+[Configuration](https://github.com/Fracital/crack/wiki/Configuration) wiki
+page for the file shape.
 
 `--canary <file>`
 : Path to the canary list (a JSON file of literals that must not survive in the
-  output verbatim). After the rewrite, crack checks every processed file against
-  this list and fails if any listed literal is still present. Overrides the
-  canary path from `--config`.
+output verbatim). After the rewrite, crack checks every processed file against
+this list and fails if any listed literal is still present. Overrides the
+canary path from `--config`.
 
 `--names <file>`
 : Path to the name map (the proxy and store names to rename, and the allow-list
-  the store-name guard checks against). Overrides the names path from
-  `--config`.
+the store-name guard checks against). Overrides the names path from
+`--config`.
 
 `--sourcemap <dir>`
 : Write source maps into `<dir>`, outside the build directory. Off by default:
-  with no `--sourcemap`, crack writes no map and strips any
-  `sourceMappingURL` comment from every chunk it processes. The directory you
-  pass stays private and must not be the served tree. See
-  [Source maps](https://github.com/Fracital/crack/wiki/Source-maps).
+with no `--sourcemap`, crack writes no map and strips any
+`sourceMappingURL` comment from every chunk it processes. The directory you
+pass stays private and must not be the served tree. See
+[Source maps](https://github.com/Fracital/crack/wiki/Source-maps).
 
 `--seed <hex>`
 : Seed the per-file and per-build randomness from a fixed hex value, so two runs
-  on the same input produce the same bytes. **For tests and the parity harness
-  only.** Production builds use real randomness; a shipped build must never pass
-  `--seed`.
+on the same input produce the same bytes. **For tests and the parity harness
+only.** Production builds use real randomness; a shipped build must never pass
+`--seed`.
 
 `-j`, `--jobs <n>`
 : Process up to `n` files in parallel. Files are independent. The default is the
-  number of available CPUs.
+number of available CPUs.
 
 `--check`
 : Check only. Report what would change and run the canary check without writing
-  any file. Exit nonzero if any file would fail. Use it in CI to confirm a
-  directory is clean without mutating it.
+any file. Exit nonzero if any file would fail. Use it in CI to confirm a
+directory is clean without mutating it.
 
 `--quiet`
 : Suppress progress output. Errors still print to stderr.
 
 `-v`, `--verbose`
 : Print per-file detail: which files were processed, which were skipped, and
-  why.
+why.
 
 `--version`
 : Print the version and exit.
@@ -81,12 +81,12 @@ a directory is the intended use; do not call `crack` once per file from a shell.
 
 `0`
 : Every directory was processed and every processed file passed the canary
-  check.
+check.
 
 nonzero
 : Something failed. crack prints the file and the reason to stderr. A directory
-  argument that does not exist, a parse error, a store name outside the
-  allow-list, a canary literal that survived, or an I/O error all exit nonzero.
+argument that does not exist, a parse error, a store name outside the
+allow-list, a canary literal that survived, or an I/O error all exit nonzero.
 
 The exact nonzero values are not settled yet. Treat any nonzero exit as failure;
 do not branch on a specific number.

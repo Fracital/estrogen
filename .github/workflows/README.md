@@ -7,13 +7,13 @@ Two workflows build and ship crack.
 Runs on every push and pull request. One matrix job builds, tests, and lints the
 Rust workspace on each shipped target, each on a native runner:
 
-| Target | Runner |
-| --- | --- |
-| x86_64-unknown-linux-gnu | ubuntu-24.04 |
+| Target                    | Runner           |
+| ------------------------- | ---------------- |
+| x86_64-unknown-linux-gnu  | ubuntu-24.04     |
 | aarch64-unknown-linux-gnu | ubuntu-24.04-arm |
-| x86_64-apple-darwin | macos-13 |
-| aarch64-apple-darwin | macos-14 |
-| x86_64-pc-windows-msvc | windows-latest |
+| x86_64-apple-darwin       | macos-13         |
+| aarch64-apple-darwin      | macos-14         |
+| x86_64-pc-windows-msvc    | windows-latest   |
 
 Native runners mean `cargo test` runs the real binary for each target, not an
 emulated one. The linux arm64 job uses the hosted ubuntu arm runner, which is
@@ -42,13 +42,13 @@ leading `v` removed.
 
 Triple to npm package:
 
-| Rust triple | npm package | binary |
-| --- | --- | --- |
-| x86_64-unknown-linux-gnu | @sysce/crack-linux-x64 | bin/crack |
-| aarch64-unknown-linux-gnu | @sysce/crack-linux-arm64 | bin/crack |
-| x86_64-apple-darwin | @sysce/crack-darwin-x64 | bin/crack |
-| aarch64-apple-darwin | @sysce/crack-darwin-arm64 | bin/crack |
-| x86_64-pc-windows-msvc | @sysce/crack-win32-x64 | bin/crack.exe |
+| Rust triple               | npm package               | binary        |
+| ------------------------- | ------------------------- | ------------- |
+| x86_64-unknown-linux-gnu  | @sysce/crack-linux-x64    | bin/crack     |
+| aarch64-unknown-linux-gnu | @sysce/crack-linux-arm64  | bin/crack     |
+| x86_64-apple-darwin       | @sysce/crack-darwin-x64   | bin/crack     |
+| aarch64-apple-darwin      | @sysce/crack-darwin-arm64 | bin/crack     |
+| x86_64-pc-windows-msvc    | @sysce/crack-win32-x64    | bin/crack.exe |
 
 ## Trusted publishing
 

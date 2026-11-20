@@ -4,5 +4,5 @@
 import { createRequire } from 'node:module';
 
 export function getRequire() {
-  return createRequire(import.meta.url);
+	return createRequire(import.meta.url);
 }

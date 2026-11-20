@@ -41,15 +41,15 @@ npx crack dist
 Or run it after an esbuild build, over the output directory:
 
 ```js
-import { build } from 'esbuild'
-import crack from '@sysce/crack/esbuild'
+import crack from '@sysce/crack/esbuild';
+import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/index.ts'],
-  bundle: true,
-  outdir: 'dist',
-  plugins: [crack()],
-})
+	entryPoints: ['src/index.ts'],
+	bundle: true,
+	outdir: 'dist',
+	plugins: [crack()],
+});
 ```
 
 crack runs exactly once per build. It is not idempotent: a second run would
@@ -69,13 +69,13 @@ encrypt the decoder the first run added.
 
 ## Powering
 
-| Site | Link | Repo |
-|------|------|------|
-| <img src="docs/assets/brands/abstract.svg" alt="abstract v2" width="24" align="middle"> abstract v2 | abstracteducation.loan (private) | `Fracital/abstract-v2` (private) |
-| <img src="docs/assets/brands/fracital.svg" alt="Fracital" width="24" align="middle"> Fracital | [fracit.al](https://fracit.al) | [`Fracital/Fracital`](https://github.com/Fracital/Fracital) |
-| <img src="docs/assets/brands/systemya.png" alt="SystemYA" width="24" align="middle"> SystemYA | [systemya.fracit.al](https://systemya.fracit.al) | [`Fracital/SystemYA`](https://github.com/Fracital/SystemYA) |
-| <img src="docs/assets/brands/stomp.png" alt="STomp" width="24" align="middle"> STomp (powerMouse) | [stomp.fracit.al](https://stomp.fracit.al) | [`Fracital/powerMouse`](https://github.com/Fracital/powerMouse) |
-| <img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" width="24" align="middle"> Holy Unblocker | [holyunb.locker](https://holyunb.locker) | [`holy-unblocker/website2`](https://github.com/holy-unblocker/website2) |
+| Site                                                                                                            | Link                                             | Repo                                                                    |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------- |
+| <img src="docs/assets/brands/abstract.svg" alt="abstract v2" width="24" align="middle"> abstract v2             | abstracteducation.loan (private)                 | `Fracital/abstract-v2` (private)                                        |
+| <img src="docs/assets/brands/fracital.svg" alt="Fracital" width="24" align="middle"> Fracital                   | [fracit.al](https://fracit.al)                   | [`Fracital/Fracital`](https://github.com/Fracital/Fracital)             |
+| <img src="docs/assets/brands/systemya.png" alt="SystemYA" width="24" align="middle"> SystemYA                   | [systemya.fracit.al](https://systemya.fracit.al) | [`Fracital/SystemYA`](https://github.com/Fracital/SystemYA)             |
+| <img src="docs/assets/brands/stomp.png" alt="STomp" width="24" align="middle"> STomp (powerMouse)               | [stomp.fracit.al](https://stomp.fracit.al)       | [`Fracital/powerMouse`](https://github.com/Fracital/powerMouse)         |
+| <img src="docs/assets/brands/holy-unblocker.svg" alt="Holy Unblocker" width="24" align="middle"> Holy Unblocker | [holyunb.locker](https://holyunb.locker)         | [`holy-unblocker/website2`](https://github.com/holy-unblocker/website2) |
 
 ## Author
 

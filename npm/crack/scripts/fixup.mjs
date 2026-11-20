@@ -16,10 +16,24 @@ const src = join(pkgRoot, 'src');
 mkdirSync(join(dist, 'esm'), { recursive: true });
 mkdirSync(join(dist, 'cjs'), { recursive: true });
 
-writeFileSync(join(dist, 'esm', 'package.json'), `${JSON.stringify({ type: 'module' }, null, 2)}\n`);
-writeFileSync(join(dist, 'cjs', 'package.json'), `${JSON.stringify({ type: 'commonjs' }, null, 2)}\n`);
+writeFileSync(
+	join(dist, 'esm', 'package.json'),
+	`${JSON.stringify({ type: 'module' }, null, 2)}\n`,
+);
+writeFileSync(
+	join(dist, 'cjs', 'package.json'),
+	`${JSON.stringify({ type: 'commonjs' }, null, 2)}\n`,
+);
 
-copyFileSync(join(src, 'node-require.esm.js'), join(dist, 'esm', 'node-require.js'));
-copyFileSync(join(src, 'node-require.cjs.js'), join(dist, 'cjs', 'node-require.js'));
+copyFileSync(
+	join(src, 'node-require.esm.js'),
+	join(dist, 'esm', 'node-require.js'),
+);
+copyFileSync(
+	join(src, 'node-require.cjs.js'),
+	join(dist, 'cjs', 'node-require.js'),
+);
 
-process.stdout.write('fixup: wrote dist type markers and node-require runtimes\n');
+process.stdout.write(
+	'fixup: wrote dist type markers and node-require runtimes\n',
+);

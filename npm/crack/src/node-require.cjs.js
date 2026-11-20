@@ -3,5 +3,5 @@
 // returning it resolves the optional binary packages correctly.
 'use strict';
 exports.getRequire = function getRequire() {
-  return require;
+	return require;
 };

@@ -105,7 +105,10 @@ fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
         return Err("seed is empty".to_string());
     }
     if !s.len().is_multiple_of(2) {
-        return Err(format!("seed has an odd number of hex digits ({})", s.len()));
+        return Err(format!(
+            "seed has an odd number of hex digits ({})",
+            s.len()
+        ));
     }
     (0..s.len())
         .step_by(2)
@@ -147,8 +150,22 @@ mod tests {
     #[test]
     fn short_and_long_flags_parse() {
         let cli = parse(&[
-            "crack", "-c", "crack.toml", "--canary", "canary.json", "--names", "names.json",
-            "--sourcemap", "maps", "--seed", "00ff", "-j", "4", "--check", "-v", "dist",
+            "crack",
+            "-c",
+            "crack.toml",
+            "--canary",
+            "canary.json",
+            "--names",
+            "names.json",
+            "--sourcemap",
+            "maps",
+            "--seed",
+            "00ff",
+            "-j",
+            "4",
+            "--check",
+            "-v",
+            "dist",
         ]);
         assert_eq!(cli.config, Some(PathBuf::from("crack.toml")));
         assert_eq!(cli.canary, Some(PathBuf::from("canary.json")));

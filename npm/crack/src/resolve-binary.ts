@@ -7,11 +7,11 @@ import { arch as processArch, platform as processPlatform } from 'node:process';
  * `process.arch`.
  */
 export const PLATFORM_PACKAGES: Record<string, string> = {
-  'linux-x64': '@sysce/crack-linux-x64',
-  'linux-arm64': '@sysce/crack-linux-arm64',
-  'darwin-x64': '@sysce/crack-darwin-x64',
-  'darwin-arm64': '@sysce/crack-darwin-arm64',
-  'win32-x64': '@sysce/crack-win32-x64',
+	'linux-x64': '@sysce/crack-linux-x64',
+	'linux-arm64': '@sysce/crack-linux-arm64',
+	'darwin-x64': '@sysce/crack-darwin-x64',
+	'darwin-arm64': '@sysce/crack-darwin-arm64',
+	'win32-x64': '@sysce/crack-win32-x64',
 };
 
 /**
@@ -19,11 +19,11 @@ export const PLATFORM_PACKAGES: Record<string, string> = {
  * not a supported target. Defaults to the running process.
  */
 export function targetKey(
-  platform: string = processPlatform,
-  arch: string = processArch,
+	platform: string = processPlatform,
+	arch: string = processArch,
 ): string | null {
-  const key = `${platform}-${arch}`;
-  return key in PLATFORM_PACKAGES ? key : null;
+	const key = `${platform}-${arch}`;
+	return key in PLATFORM_PACKAGES ? key : null;
 }
 
 /**
@@ -31,11 +31,11 @@ export function targetKey(
  * when unsupported. Defaults to the running process.
  */
 export function platformPackageName(
-  platform: string = processPlatform,
-  arch: string = processArch,
+	platform: string = processPlatform,
+	arch: string = processArch,
 ): string | null {
-  const key = targetKey(platform, arch);
-  return key === null ? null : PLATFORM_PACKAGES[key];
+	const key = targetKey(platform, arch);
+	return key === null ? null : PLATFORM_PACKAGES[key];
 }
 
 /**
@@ -43,7 +43,7 @@ export function platformPackageName(
  * other target `bin/crack`.
  */
 export function binSubpath(platform: string = processPlatform): string {
-  return platform === 'win32' ? join('bin', 'crack.exe') : join('bin', 'crack');
+	return platform === 'win32' ? join('bin', 'crack.exe') : join('bin', 'crack');
 }
 
 /**
@@ -51,10 +51,10 @@ export function binSubpath(platform: string = processPlatform): string {
  * The message names the target and the package npm would have installed.
  */
 export class MissingBinaryError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'MissingBinaryError';
-  }
+	constructor(message: string) {
+		super(message);
+		this.name = 'MissingBinaryError';
+	}
 }
 
 /**
@@ -72,27 +72,27 @@ export class MissingBinaryError extends Error {
  * the platform is unsupported or the package is not installed.
  */
 export function resolveBinaryPath(req: NodeRequire, override?: string): string {
-  if (override !== undefined && override !== '') return override;
+	if (override !== undefined && override !== '') return override;
 
-  const key = targetKey();
-  const pkg = platformPackageName();
-  if (key === null || pkg === null) {
-    const supported = Object.keys(PLATFORM_PACKAGES).join(', ');
-    throw new MissingBinaryError(
-      `crack has no binary for ${processPlatform}-${processArch}. ` +
-        `Supported targets: ${supported}.`,
-    );
-  }
+	const key = targetKey();
+	const pkg = platformPackageName();
+	if (key === null || pkg === null) {
+		const supported = Object.keys(PLATFORM_PACKAGES).join(', ');
+		throw new MissingBinaryError(
+			`crack has no binary for ${processPlatform}-${processArch}. ` +
+				`Supported targets: ${supported}.`,
+		);
+	}
 
-  try {
-    const pkgJson = req.resolve(`${pkg}/package.json`);
-    const pkgDir = pkgJson.slice(0, pkgJson.length - '/package.json'.length);
-    return join(pkgDir, binSubpath());
-  } catch {
-    throw new MissingBinaryError(
-      `crack could not find its binary package ${pkg} for ${key}. ` +
-        `Install it, for example with "npm install ${pkg}", ` +
-        `or reinstall @sysce/crack so the optional dependency is picked up.`,
-    );
-  }
+	try {
+		const pkgJson = req.resolve(`${pkg}/package.json`);
+		const pkgDir = pkgJson.slice(0, pkgJson.length - '/package.json'.length);
+		return join(pkgDir, binSubpath());
+	} catch {
+		throw new MissingBinaryError(
+			`crack could not find its binary package ${pkg} for ${key}. ` +
+				`Install it, for example with "npm install ${pkg}", ` +
+				`or reinstall @sysce/crack so the optional dependency is picked up.`,
+		);
+	}
 }

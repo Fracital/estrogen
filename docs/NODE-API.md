@@ -12,9 +12,9 @@ calls that binary over a built directory.
 ## obfuscate
 
 ```js
-import { obfuscate } from '@sysce/crack'
+import { obfuscate } from '@sysce/crack';
 
-const report = await obfuscate({ dirs: ['dist'] })
+const report = await obfuscate({ dirs: ['dist'] });
 ```
 
 `obfuscate(options): Promise<Report>` runs the whole pass over one or more
@@ -25,15 +25,15 @@ failing file, and the error names the file and the reason.
 ## esbuild plugin
 
 ```js
-import { build } from 'esbuild'
-import crack from '@sysce/crack/esbuild'
+import crack from '@sysce/crack/esbuild';
+import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/index.ts'],
-  bundle: true,
-  outdir: 'dist',
-  plugins: [crack()],
-})
+	entryPoints: ['src/index.ts'],
+	bundle: true,
+	outdir: 'dist',
+	plugins: [crack()],
+});
 ```
 
 The default export of `@sysce/crack/esbuild` is `crack(options?):
@@ -45,11 +45,11 @@ fails, the build fails.
 ## rsbuild plugin
 
 ```js
-import { pluginCrack } from '@sysce/crack/rsbuild'
+import { pluginCrack } from '@sysce/crack/rsbuild';
 
 export default {
-  plugins: [pluginCrack()],
-}
+	plugins: [pluginCrack()],
+};
 ```
 
 `pluginCrack(options?): RsbuildPlugin` is a named export of
@@ -65,11 +65,11 @@ build; `obfuscate()` needs at least `dirs`.
 
 `dirs: string[]`
 : The built directories to process. For the plugins this defaults to the build's
-  output directory.
+output directory.
 
 `config?: string`
 : Path to a TOML config file. Fields set directly on the options object override
-  the file.
+the file.
 
 `canary?: string`
 : Path to the canary list (JSON). Overrides the canary path from `config`.
@@ -79,20 +79,20 @@ build; `obfuscate()` needs at least `dirs`.
 
 `sourcemap?: string`
 : Write source maps into this directory, outside the build. Omitted means no map
-  and `sourceMappingURL` comments stripped. Keep this directory private and out
-  of the served tree.
+and `sourceMappingURL` comments stripped. Keep this directory private and out
+of the served tree.
 
 `seed?: string`
 : Fixed hex seed for deterministic output. **Tests only.** Never set it on a
-  shipped build.
+shipped build.
 
 `jobs?: number`
 : Maximum files processed in parallel. Defaults to the CPU count.
 
 `check?: boolean`
 : Check only. Run the passes and the canary check without writing any file. The
-  returned `Report` says what would change. A file that would fail rejects the
-  promise.
+returned `Report` says what would change. A file that would fail rejects the
+promise.
 
 `quiet?: boolean`
 : Suppress progress output.
@@ -107,12 +107,12 @@ the exact numbers depend on the engine, which is not built yet.
 
 ```ts
 interface Report {
-  formatVersion: number   // the pool and decoder format version crack emitted
-  dirs: string[]          // the directories processed
-  filesProcessed: number  // files crack rewrote
-  filesSkipped: number    // eligible-looking files left untouched (maps, already processed, vendored)
-  durationMs: number      // wall-clock time for the pass
-  check: boolean          // true if this was a --check run and nothing was written
+	formatVersion: number; // the pool and decoder format version crack emitted
+	dirs: string[]; // the directories processed
+	filesProcessed: number; // files crack rewrote
+	filesSkipped: number; // eligible-looking files left untouched (maps, already processed, vendored)
+	durationMs: number; // wall-clock time for the pass
+	check: boolean; // true if this was a --check run and nothing was written
 }
 ```
 

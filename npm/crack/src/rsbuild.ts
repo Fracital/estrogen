@@ -1,5 +1,4 @@
 import type { RsbuildPlugin } from '@rsbuild/core';
-
 import { obfuscate } from './obfuscate.js';
 import type { PluginOptions } from './options.js';
 
@@ -29,21 +28,21 @@ import type { PluginOptions } from './options.js';
  *   Rsbuild context.
  */
 export function pluginCrack(options: PluginOptions = {}): RsbuildPlugin {
-  return {
-    name: '@sysce/crack',
-    setup(api) {
-      api.onAfterBuild(async () => {
-        const distPath = api.context.distPath;
-        if (!distPath) {
-          throw new Error(
-            'crack could not find the Rsbuild dist path. ' +
-              'Set output.distPath.root so crack knows what to rewrite.',
-          );
-        }
-        await obfuscate({ ...options, dirs: distPath });
-      });
-    },
-  };
+	return {
+		name: '@sysce/crack',
+		setup(api) {
+			api.onAfterBuild(async () => {
+				const distPath = api.context.distPath;
+				if (!distPath) {
+					throw new Error(
+						'crack could not find the Rsbuild dist path. ' +
+							'Set output.distPath.root so crack knows what to rewrite.',
+					);
+				}
+				await obfuscate({ ...options, dirs: distPath });
+			});
+		},
+	};
 }
 
 export default pluginCrack;

@@ -17,34 +17,34 @@ the same directory.
 ## esbuild
 
 ```js
-import { build } from 'esbuild'
-import crack from '@sysce/crack/esbuild'
+import crack from '@sysce/crack/esbuild';
+import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/index.ts'],
-  bundle: true,
-  outdir: 'dist',
-  plugins: [crack()],
-})
+	entryPoints: ['src/index.ts'],
+	bundle: true,
+	outdir: 'dist',
+	plugins: [crack()],
+});
 ```
 
 The plugin runs after the build, over `outdir`. Pass options to override the
 inferred settings, for example a config file:
 
 ```js
-plugins: [crack({ config: 'crack.toml' })]
+plugins: [crack({ config: 'crack.toml' })];
 ```
 
 ## rsbuild
 
 ```js
 // rsbuild.config.ts
-import { defineConfig } from '@rsbuild/core'
-import { pluginCrack } from '@sysce/crack/rsbuild'
+import { defineConfig } from '@rsbuild/core';
+import { pluginCrack } from '@sysce/crack/rsbuild';
 
 export default defineConfig({
-  plugins: [pluginCrack()],
-})
+	plugins: [pluginCrack()],
+});
 ```
 
 The plugin runs after the build, over the resolved dist path. Pass options to
@@ -57,11 +57,11 @@ with the Node API, in a small script:
 
 ```js
 // scripts/protect.mjs
-import { build } from 'vite'
-import { obfuscate } from '@sysce/crack'
+import { obfuscate } from '@sysce/crack';
+import { build } from 'vite';
 
-await build()                       // writes dist/
-await obfuscate({ dirs: ['dist'] }) // rewrites dist/ in place
+await build(); // writes dist/
+await obfuscate({ dirs: ['dist'] }); // rewrites dist/ in place
 ```
 
 ```sh
@@ -79,10 +79,10 @@ works with any bundler.
 
 ```json
 {
-  "scripts": {
-    "build": "vite build && crack dist",
-    "check:protect": "crack --check dist"
-  }
+	"scripts": {
+		"build": "vite build && crack dist",
+		"check:protect": "crack --check dist"
+	}
 }
 ```
 
@@ -94,9 +94,9 @@ Point crack at a config file for the per-site names and canary list:
 
 ```json
 {
-  "scripts": {
-    "build": "vite build && crack -c crack.toml dist"
-  }
+	"scripts": {
+		"build": "vite build && crack -c crack.toml dist"
+	}
 }
 ```
 

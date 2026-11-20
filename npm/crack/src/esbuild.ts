@@ -1,7 +1,5 @@
 import { dirname, resolve as resolvePath } from 'node:path';
-
 import type { Plugin, PluginBuild } from 'esbuild';
-
 import { obfuscate } from './obfuscate.js';
 import type { PluginOptions } from './options.js';
 
@@ -35,35 +33,36 @@ import type { PluginOptions } from './options.js';
  *   taken from the esbuild config.
  */
 export function crack(options: PluginOptions = {}): Plugin {
-  return {
-    name: '@sysce/crack',
-    setup(build: PluginBuild) {
-      build.onEnd(async (result) => {
-        if (result.errors.length > 0) return;
+	return {
+		name: '@sysce/crack',
+		setup(build: PluginBuild) {
+			build.onEnd(async (result) => {
+				if (result.errors.length > 0) return;
 
-        const outDir = resolveOutputDir(build);
-        if (outDir === null) {
-          return {
-            errors: [
-              {
-                text:
-                  'crack could not find the esbuild output directory. ' +
-                  'Set outdir or outfile so crack knows what to rewrite.',
-              },
-            ],
-          };
-        }
+				const outDir = resolveOutputDir(build);
+				if (outDir === null) {
+					return {
+						errors: [
+							{
+								text:
+									'crack could not find the esbuild output directory. ' +
+									'Set outdir or outfile so crack knows what to rewrite.',
+							},
+						],
+					};
+				}
 
-        try {
-          await obfuscate({ ...options, dirs: outDir });
-          return null;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return { errors: [{ text: `crack failed: ${message}` }] };
-        }
-      });
-    },
-  };
+				try {
+					await obfuscate({ ...options, dirs: outDir });
+					return null;
+				} catch (error) {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					return { errors: [{ text: `crack failed: ${message}` }] };
+				}
+			});
+		},
+	};
 }
 
 /**
@@ -72,11 +71,11 @@ export function crack(options: PluginOptions = {}): Plugin {
  * `absWorkingDir`. Returns null when neither is set.
  */
 function resolveOutputDir(build: PluginBuild): string | null {
-  const { outdir, outfile, absWorkingDir } = build.initialOptions;
-  const base = absWorkingDir ?? process.cwd();
-  if (outdir !== undefined) return resolvePath(base, outdir);
-  if (outfile !== undefined) return resolvePath(base, dirname(outfile));
-  return null;
+	const { outdir, outfile, absWorkingDir } = build.initialOptions;
+	const base = absWorkingDir ?? process.cwd();
+	if (outdir !== undefined) return resolvePath(base, outdir);
+	if (outfile !== undefined) return resolvePath(base, dirname(outfile));
+	return null;
 }
 
 export default crack;

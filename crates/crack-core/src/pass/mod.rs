@@ -51,7 +51,12 @@ pub struct FileContext<'a> {
 
 impl<'a> FileContext<'a> {
     /// Build a context for one file.
-    pub fn new(path: impl Into<PathBuf>, kind: FileKind, source: &'a str, options: &'a Options) -> Self {
+    pub fn new(
+        path: impl Into<PathBuf>,
+        kind: FileKind,
+        source: &'a str,
+        options: &'a Options,
+    ) -> Self {
         FileContext {
             path: path.into(),
             kind,
