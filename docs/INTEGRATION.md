@@ -1,18 +1,14 @@
 # Integration
 
-The obfuscation engine is not implemented yet. These steps document the stable
-integration surface, not current behavior. Each example is copy-pasteable and
-will work once the engine ships; until then estrogen is a no-op you can wire in
-early.
-
 estrogen runs after a bundler, over the directory the bundler wrote. It never runs
 the bundler itself. Wire it as the last step of the build, before you publish or
 deploy the output. Keep your canary check in the pipeline; estrogen runs the canary
 check itself and fails closed, but a separate check in CI is a second guard.
 
 estrogen runs exactly once per build. It is not idempotent: a second run encrypts
-the decoder the first run added. Do not put it in a watch loop that reprocesses
-the same directory.
+the decoder the first run added. For watch builds, `estrogen --watch` re-runs on
+change and skips the chunks it already marked, so it does not re-wrap its own
+output; do not instead loop a plain `estrogen` over the same directory.
 
 ## esbuild
 
@@ -50,27 +46,53 @@ export default defineConfig({
 The plugin runs after the build, over the resolved dist path. Pass options to
 override, the same as the esbuild plugin.
 
-## Vite, via a generic post-build step
+## Vite
 
-Vite has no estrogen plugin. Run estrogen over the output directory after `vite build`
-with the Node API, in a small script:
+```ts
+// vite.config.ts
+import { pluginEstrogen } from '@sysce/estrogen/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+	plugins: [pluginEstrogen()],
+});
+```
+
+The plugin runs after `vite build` writes the output, over `build.outDir`, and
+stays out of `vite serve`. Pass options to override, the same as the other
+plugins.
+
+## Rollup
 
 ```js
-// scripts/protect.mjs
-import { obfuscate } from '@sysce/estrogen';
-import { build } from 'vite';
+// rollup.config.js
+import { pluginEstrogen } from '@sysce/estrogen/rollup';
 
-await build(); // writes dist/
-await obfuscate({ dirs: ['dist'] }); // rewrites dist/ in place
+export default {
+	input: 'src/index.js',
+	output: { dir: 'dist', format: 'es' },
+	plugins: [pluginEstrogen()],
+};
 ```
 
-```sh
-node scripts/protect.mjs
+The plugin runs in `writeBundle`, over the output directory.
+
+## Astro
+
+```js
+// astro.config.mjs
+import estrogen from '@sysce/estrogen/astro';
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+	integrations: [estrogen()],
+});
 ```
 
-Or keep `vite build` as its own step and run the CLI after it; see the next
-section. Either way estrogen runs once, after the full build, over the finished
-`dist`.
+The integration runs on Astro's `astro:build:done` hook, over the final static
+output directory. For an SSR build it rewrites the client output directory. Pass
+options to override, the same as the other plugins; it fills `dirs` from the
+build output. A failing file fails the build.
 
 ## Plain CLI step in package.json
 

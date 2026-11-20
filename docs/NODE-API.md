@@ -1,10 +1,5 @@
 # Node API
 
-The obfuscation engine is not implemented yet. This page documents the stable
-JavaScript surface, not current behavior. The import paths, function signatures,
-options object, and `Report` shape below are the contract the integrations build
-against.
-
 The package is `@sysce/estrogen`. It ships the native binary as a per-target
 optional dependency and a thin launcher that runs the right one. The Node API
 calls that binary over a built directory.
@@ -57,11 +52,61 @@ export default {
 resolved dist path. Pass `options` to override the inferred settings. A failing
 file fails the build.
 
+## Vite plugin
+
+```js
+import { pluginEstrogen } from '@sysce/estrogen/vite';
+
+export default {
+	plugins: [pluginEstrogen()],
+};
+```
+
+`pluginEstrogen(options?): Plugin` is a named export (and the default export) of
+`@sysce/estrogen/vite`. It sets `apply: 'build'` and `enforce: 'post'`, so it runs
+after `vite build` writes the output, over `build.outDir`, and stays out of
+`vite serve`. A failing file fails the build.
+
+## Rollup plugin
+
+```js
+import { pluginEstrogen } from '@sysce/estrogen/rollup';
+
+export default {
+	input: 'src/index.js',
+	output: { dir: 'dist', format: 'es' },
+	plugins: [pluginEstrogen()],
+};
+```
+
+`pluginEstrogen(options?): Plugin` is a named export (and the default export) of
+`@sysce/estrogen/rollup`. It runs in `writeBundle`, over `output.dir` or the
+directory of `output.file`. A failing file fails the build.
+
+## Astro integration
+
+```js
+import estrogen from '@sysce/estrogen/astro';
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+	integrations: [estrogen()],
+});
+```
+
+The default export of `@sysce/estrogen/astro` is `estrogen(options?):
+AstroIntegration`. It runs on the `astro:build:done` hook, over the final static
+output directory; for an SSR build it rewrites the client output directory. Pass
+`options` to override the inferred settings; it takes the same fields as the
+other plugins except `dirs`, which it fills from the build output. A failing file
+fails the build.
+
 ## Options
 
-The same options object is accepted by `obfuscate()` and, as overrides, by both
-plugins. Every field is optional for the plugins, which infer `dirs` from the
-build; `obfuscate()` needs at least `dirs`.
+The same options object is accepted by `obfuscate()` and, as overrides, by the
+esbuild, rsbuild, Vite and Rollup plugins and the Astro integration. Every field
+is optional for the plugins, which infer `dirs` from the build; `obfuscate()`
+needs at least `dirs`.
 
 `dirs: string[]`
 : The built directories to process. For the plugins this defaults to the build's
@@ -102,25 +147,31 @@ promise.
 
 ## Report
 
-`obfuscate()` resolves with a `Report`. The shape is part of the stable surface;
-the exact numbers depend on the engine, which is not built yet.
+`obfuscate()` runs the `estrogen` binary over the directories and resolves with a
+`Report` of that run:
 
 ```ts
 interface Report {
-	formatVersion: number; // the pool and decoder format version estrogen emitted
-	dirs: string[]; // the directories processed
-	filesProcessed: number; // files estrogen rewrote
-	filesSkipped: number; // eligible-looking files left untouched (maps, already processed, vendored)
-	durationMs: number; // wall-clock time for the pass
-	check: boolean; // true if this was a --check run and nothing was written
+	ok: boolean; // true when estrogen exited 0
+	exitCode: number; // the process exit code
+	dirs: string[]; // the directories passed
+	binaryPath: string; // the per-target binary that ran
+	args: string[]; // the arguments it was given
+	stdout: string; // captured stdout
+	stderr: string; // captured stderr
+	durationMs: number; // wall-clock time for the run
+	details?: unknown; // parsed per-file detail when estrogen emits it
 }
 ```
 
-A rejection is an `Error` whose message names the file and the reason. estrogen
-does not resolve with a partial `Report` when a file fails; it rejects.
+When estrogen exits nonzero (a parse error, a surviving canary, a store name
+outside the allow-list), `obfuscate()` rejects with an error that carries the
+`Report`, and `stderr` names the file and the reason. estrogen writes no partial
+output for a failing file.
 
 ## TypeScript
 
-The package ships type declarations for all three entry points
-(`@sysce/estrogen`, `@sysce/estrogen/esbuild`, `@sysce/estrogen/rsbuild`). The `Options`
-and `Report` types are exported from `@sysce/estrogen`.
+The package ships type declarations for every entry point (`@sysce/estrogen` and
+its `/esbuild`, `/rsbuild`, `/vite` and `/rollup` plugins and its `/astro`
+integration). The `Options` and `Report` types are exported from
+`@sysce/estrogen`.

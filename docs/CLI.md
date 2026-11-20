@@ -1,18 +1,20 @@
 # CLI reference
 
-The obfuscation engine is not implemented yet. This page documents the stable
-command surface, not current behavior. The flags and exit codes below are the
-contract the rest of the tooling builds against.
-
 ## Synopsis
 
 ```
 estrogen [options] <dir>...
+estrogen build [options] <dir>...
 ```
 
 estrogen takes one or more already-built directories and rewrites the JS, HTML and
 SVG in each, in place. It does not run a bundler; it only rewrites output a
 bundler produced. Give it the directory your build wrote, such as `dist`.
+
+`estrogen build` first vendors the `[[vendor]]` inputs from the config into each
+directory, copying packages and folders in under per-build stamped names and
+obfuscating them or copying them verbatim, then obfuscates the rest. A plain
+`estrogen` run vendors nothing.
 
 ```sh
 estrogen dist
@@ -64,6 +66,12 @@ number of available CPUs.
 any file. Exit nonzero if any file would fail. Use it in CI to confirm a
 directory is clean without mutating it.
 
+`--watch`
+: Watch the given directories and re-run on each change, debounced. Works with
+`estrogen` and `estrogen build`. estrogen re-obfuscates only the fresh chunks a
+bundler wrote and skips the ones it already marked, so its own output is never
+re-wrapped. A failed pass is reported and the watch keeps running.
+
 `--quiet`
 : Suppress progress output. Errors still print to stderr.
 
@@ -88,8 +96,8 @@ nonzero
 argument that does not exist, a parse error, a store name outside the
 allow-list, a canary literal that survived, or an I/O error all exit nonzero.
 
-The exact nonzero values are not settled yet. Treat any nonzero exit as failure;
-do not branch on a specific number.
+estrogen does not promise a specific nonzero value. Treat any nonzero exit as
+failure; do not branch on a specific number.
 
 ## Fail closed
 

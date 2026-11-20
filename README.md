@@ -14,6 +14,14 @@ encrypted per-file pool, proxy and store names into per-build substitutes, and
 embedded wasm names to match. It leaves no sensitive plaintext from the canary
 list, and it does not change what the code does.
 
+It also assembles the build it protects. `estrogen build` vendors packages and
+folders, from `node_modules` or a glob, into the served tree under per-build
+stamped names, obfuscating them on the way in or copying them verbatim, from a
+`[[vendor]]` config. `estrogen --watch` re-runs on each change, and `--sourcemap
+<dir>` writes a private V3 source map outside the served tree. estrogen runs as a
+command line tool, as esbuild, rsbuild, Vite and Rollup plugins, and as an Astro
+integration.
+
 estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
 [`@sysce/estrogen`](https://www.npmjs.com/package/@sysce/estrogen). The binary is
 `estrogen`.
@@ -22,9 +30,9 @@ estrogen is written in Rust on [OXC](https://oxc.rs) and published to npm as
 A decoder key ships in each file, and anyone with devtools can run the code. TLS
 is the only transport protection. Do not describe the output as secret.
 
-The obfuscation engine is not implemented yet. This repository documents the
-stable public surface (the CLI, the Node API, the Rust API, and the integration
-steps), not current behavior.
+Try it in your browser at [estrogen.fracit.al](https://estrogen.fracit.al): the
+real engine compiled to WebAssembly, running locally on what you paste. Nothing
+is uploaded, and the same limit holds, the output is not secret.
 
 ## Install
 
@@ -58,18 +66,33 @@ await build({
 });
 ```
 
+Or add it to an Astro build, where it runs on `astro:build:done` over the output
+directory:
+
+```js
+import estrogen from '@sysce/estrogen/astro';
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+	integrations: [estrogen()],
+});
+```
+
 estrogen runs exactly once per build. It is not idempotent: a second run would
 encrypt the decoder the first run added.
+
+To bring packages into the build as well, run `estrogen build dist` with a
+`[[vendor]]` config. See the [CLI reference](docs/CLI.md).
 
 ## Documentation
 
 - [CLI reference](docs/CLI.md): every flag, examples, exit codes, the
   fail-closed rule.
-- [Node API](docs/NODE-API.md): `obfuscate()`, the esbuild and rsbuild plugins,
-  the options object, the `Report` shape.
+- [Node API](docs/NODE-API.md): `obfuscate()`, the esbuild, rsbuild, Vite and
+  Rollup plugins, the Astro integration, the options object, the `Report` shape.
 - [Rust API](docs/RUST-API.md): the `estrogen-core` public surface.
-- [Integration](docs/INTEGRATION.md): esbuild, rsbuild, Vite, and a plain CLI
-  step in `package.json`.
+- [Integration](docs/INTEGRATION.md): esbuild, rsbuild, Vite, Rollup, Astro, and
+  a plain CLI step in `package.json`.
 - [Wiki](https://github.com/Fracital/estrogen/wiki): install, configuration,
   source maps, security and limits, contributing.
 
