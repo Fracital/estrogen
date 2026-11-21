@@ -261,6 +261,8 @@ const CLASSES: &[&str] = &[
     "class A { constructor(...xs) { this.n = xs.length; this.first = xs[0]; } } class B extends A { constructor(a, rest) { super(a, ...rest); } } const b = new B(9, [1, 2]); [b.n, b.first]",
     // an anonymous class assigned to an identifier infers that name
     "let C; C = class { m() { return 7; } }; [new C().m(), C.name]",
+    // a numeric class method key is the property name ToString(value)
+    "class K { 0() { return 'zero'; } 1000() { return 'k'; } } const k = new K(); [k[0](), k[1000]()]",
     // an anonymous class in a bare position (array element) the chunk never
     // names: the value it produces still matches, name observed nowhere
     "const C = [class { m() { return 5; } }][0]; new C().m()",
@@ -590,6 +592,8 @@ const DESTRUCTURING: &[&str] = &[
     "const { a: x, b: y = 9 } = { a: 1 }; [x, y]",
     "const { a = 5, b = 6 } = { a: undefined, b: null }; [a, b]",
     "const k = 'z'; const { [k]: v } = { z: 42 }; v",
+    // a numeric object-pattern key is the property name ToString(value)
+    "const { 0: first, 1: second } = ['a', 'b']; [first, second]",
     "const { a, ...rest } = { a: 1, b: 2, c: 3 }; [a, rest.b, rest.c]",
     "const k = 'a'; const { [k]: first, ...rest } = { a: 1, b: 2, c: 3 }; [first, rest.b, rest.c, Object.keys(rest).length]",
     "const [a, b, c] = [1, 2, 3]; [a, b, c]",

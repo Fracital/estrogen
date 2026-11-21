@@ -4176,6 +4176,19 @@ fn static_key(key: &PropertyKey<'_>) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(id) => Some(id.name.as_str().to_string()),
         PropertyKey::StringLiteral(s) => s.value.as_str().map(|v| v.to_string()),
+        // A numeric literal key is the property name `ToString(value)`: `0` is
+        // "0", `1e3` is "1000". Accept a non-negative integer that `u64` holds
+        // exactly, which covers the generated-code cases (`{ 0() {} }`, `{ 0: x
+        // }`); a fractional or out-of-range value keeps declining, since its JS
+        // string form does not match a plain integer render.
+        PropertyKey::NumericLiteral(n) => {
+            let v = n.value;
+            if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v < 9007199254740992.0 {
+                Some((v as u64).to_string())
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
