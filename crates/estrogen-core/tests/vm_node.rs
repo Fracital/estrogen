@@ -237,6 +237,15 @@ const CLASSES: &[&str] = &[
     "class A { m() { return this.n; } } class B extends A { constructor() { super(); this.n = 9; } test() { const f = super.m; return f.call(this); } } new B().test()",
     // the derived prototype chain and non-writable prototype descriptor
     "class A {} class B extends A {} const p = Object.getOwnPropertyDescriptor(B, 'prototype'); [p.writable, p.enumerable, p.configurable, Object.getPrototypeOf(B.prototype) === A.prototype, Object.getPrototypeOf(B) === A]",
+    // super(...spread): the arguments spread into the superclass constructor
+    "class A { constructor(a, b, c) { this.s = a + b + c; } } class B extends A { constructor(xs) { super(...xs); } } new B([1, 2, 3]).s",
+    // super with a fixed arg then a spread, forwarded to a rest parameter
+    "class A { constructor(...xs) { this.n = xs.length; this.first = xs[0]; } } class B extends A { constructor(a, rest) { super(a, ...rest); } } const b = new B(9, [1, 2]); [b.n, b.first]",
+    // an anonymous class assigned to an identifier infers that name
+    "let C; C = class { m() { return 7; } }; [new C().m(), C.name]",
+    // an anonymous class in a bare position (array element) the chunk never
+    // names: the value it produces still matches, name observed nowhere
+    "const C = [class { m() { return 5; } }][0]; new C().m()",
     // an implicit constructor forwards arguments to super
     "class A { constructor(x) { this.x = x; } } class B extends A {} const b = new B(7); [b.constructor.name, b.x, b instanceof A]",
     // new.target is the constructed class, in a plain function it is set only on new
@@ -791,7 +800,9 @@ fn unsupported_constructs_decline() {
         // handler across a yield, the same limit a standalone generator has
         "class C { *g() { try { yield 1; } finally {} } }",
         "class C { async *g() { for (const x of [1]) yield x; } }",
-        "let C; C = class {}; C.name",
+        // an anonymous class in a bare position (here an object-property value)
+        // whose name the chunk then reads still declines, since the inferred name
+        // would be observable and this path compiles it as the empty string
         "const object = { C: class {} }; object.C.name",
         // a generator (sync or async) declines when its own frame would hold a
         // handler across a yield (try, for-of, for-in)

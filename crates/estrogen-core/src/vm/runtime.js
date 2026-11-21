@@ -866,6 +866,20 @@
 		if (frame.initFields) frame.initFields(o);
 		s.push(o);
 	};
+	// `super(...args)` with a spread argument: the arguments were gathered into
+	// one array on the stack, so pop the array and construct the superclass with
+	// it, the same way SUPER_CALL does with a fixed count.
+	HANDLERS[OP_SUPER_CALL_APPLY] = (frame) => {
+		const s = frame.stack;
+		const args = s.pop();
+		if (frame.thisVal !== THIS_TDZ)
+			throw new ReferenceError('Super constructor may only be called once');
+		const Sup = frame.superClass === null ? Object : frame.superClass;
+		const o = Reflect.construct(Sup, args, frame.newTarget);
+		frame.thisVal = o;
+		if (frame.initFields) frame.initFields(o);
+		s.push(o);
+	};
 	HANDLERS[OP_RETURN] = function (
 		frame,
 		arg,

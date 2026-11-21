@@ -1865,10 +1865,19 @@ impl Compiler {
                     self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 2);
                     self.compile_class(class, None, Some(pack_addr(0, slot)))?;
                     self.close_scope();
+                } else if !self.keep_names {
+                    // The chunk observes no callable name, so every class name is
+                    // dropped to the empty string anyway (see `add_class`). An
+                    // anonymous class expression then compiles with no inferred
+                    // name and nothing can tell the difference.
+                    self.compile_class(class, None, None)?;
                 } else {
-                    // Assignment and object-property forms infer names that
-                    // require their parent's syntax. The variable declarator
-                    // cases call compile_class with that inferred name.
+                    // The chunk reads a callable name, so a wrong inferred name
+                    // would be observable. A named-evaluation position that infers
+                    // a non-empty name (a declarator, a field, or an identifier
+                    // assignment) is compiled with that name by its own path; a
+                    // bare position here would infer the empty string, but to stay
+                    // safe the rarer observed case still declines.
                     return Err(Unsupported("anonymous class name inference"));
                 }
             }
@@ -2267,7 +2276,10 @@ impl Compiler {
         match node.operator {
             AssignmentOperator::Assign => match &node.left {
                 AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                    self.compile_expr(&node.right)?;
+                    // Assigning an anonymous class, function, or arrow to a plain
+                    // identifier infers the binding's name, the same as a
+                    // declarator does, so route it through the named path.
+                    self.compile_named_expr(&node.right, id.name.as_str())?;
                     self.emit_store_name(id.name.as_str());
                 }
                 AssignmentTarget::ArrayAssignmentTarget(_)
@@ -2504,9 +2516,12 @@ impl Compiler {
             Expression::Super(_) => {
                 let (argc, spread) = self.compile_args(&call.arguments)?;
                 if spread {
-                    return Err(Unsupported("spread in super()"));
+                    // The arguments were gathered into one array; construct the
+                    // superclass by applying it, the same as a spread call or new.
+                    self.emit0("SUPER_CALL_APPLY");
+                } else {
+                    self.emit1("SUPER_CALL", argc as i64);
                 }
-                self.emit1("SUPER_CALL", argc as i64);
             }
             // super.method(args): the receiver is `this`, but the method comes
             // from the prototype of the method's home object.
