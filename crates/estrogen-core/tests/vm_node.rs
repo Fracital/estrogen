@@ -249,6 +249,10 @@ const CLASSES: &[&str] = &[
     "class A { greet() { return 'A'; } } class B extends A { greet() { return 'B' + super.greet(); } } new B().greet()",
     // super.prop read as a value, then called with this
     "class A { m() { return this.n; } } class B extends A { constructor() { super(); this.n = 9; } test() { const f = super.m; return f.call(this); } } new B().test()",
+    // super.method(...spread): a spread argument in a super method call
+    "class A { greet(...parts) { return 'A:' + parts.join('-'); } } class B extends A { greet(xs) { return 'B/' + super.greet(...xs); } } new B().greet(['x', 'y', 'z'])",
+    // a fixed arg then a spread in a super method call, with `this` bound
+    "class A { tag(p, ...rest) { return p + this.id + rest.length; } } class B extends A { constructor() { super(); this.id = 'Z'; } run(xs) { return super.tag('p', ...xs); } } new B().run([1, 2])",
     // the derived prototype chain and non-writable prototype descriptor
     "class A {} class B extends A {} const p = Object.getOwnPropertyDescriptor(B, 'prototype'); [p.writable, p.enumerable, p.configurable, Object.getPrototypeOf(B.prototype) === A.prototype, Object.getPrototypeOf(B) === A]",
     // super(...spread): the arguments spread into the superclass constructor

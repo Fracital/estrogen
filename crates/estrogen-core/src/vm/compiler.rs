@@ -2703,9 +2703,14 @@ impl Compiler {
                 self.emit1("SUPER_GET", i as i64);
                 let (argc, spread) = self.compile_args(&call.arguments)?;
                 if spread {
-                    return Err(Unsupported("spread in a super method call"));
+                    // The args were gathered into one array. With the receiver
+                    // `this` and the super-prototype method already on the stack,
+                    // apply the method, the same as a spread call on an ordinary
+                    // member: `super.m(...a)` is `superProto.m.apply(this, a)`.
+                    self.emit0("CALL_METHOD_APPLY");
+                } else {
+                    self.emit1("CALL_METHOD", argc as i64);
                 }
-                self.emit1("CALL_METHOD", argc as i64);
             }
             Expression::StaticMemberExpression(m) if !m.optional => {
                 self.compile_expr(&m.object)?;
