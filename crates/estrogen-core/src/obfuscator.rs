@@ -493,6 +493,11 @@ impl Obfuscator {
     fn minify_css_file(&self, path: &Path) -> Result<FileReport> {
         let kind = FileKind::classify(path);
         let source = fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        // An empty stylesheet has nothing to minify. It is not an unsupported
+        // type, so report it as unchanged rather than "not a processed type".
+        if source.trim().is_empty() {
+            return Ok(FileReport::unchanged(path, kind));
+        }
         let Some(minified) = crate::pass::css::minify_css_asset(&source) else {
             // A parse error or an empty reprint: leave the stylesheet untouched,
             // reported as a skip like any file estrogen does not rewrite.
@@ -722,6 +727,7 @@ fn write_preserving_bom(path: &Path, original: &str, rewritten: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::FileStatus;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -964,6 +970,36 @@ mod tests {
         .unwrap();
         obf.obfuscate_dir(&dir).unwrap();
         assert!(dir.join("app.js.map").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_css_file_with_spaces_in_its_name_is_minified() {
+        let dir = tmp_dir();
+        let css = dir.join("glass - dark.css");
+        fs::write(&css, "/* theme */\n.a {\n    color: #ffffff;\n}\n").unwrap();
+        let report = quiet().obfuscate_dir(&dir).unwrap();
+        let out = fs::read_to_string(&css).unwrap();
+        assert!(
+            !out.contains("theme") && out.contains(".a"),
+            "not minified: {out}"
+        );
+        let fr = report.files.iter().find(|f| f.path == css).unwrap();
+        assert_eq!(fr.kind, FileKind::Other);
+        assert_eq!(fr.status, FileStatus::Obfuscated, "spaced css was skipped");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_empty_css_file_is_unchanged_not_a_policy_skip() {
+        let dir = tmp_dir();
+        let css = dir.join("glass - light.css");
+        fs::write(&css, "").unwrap();
+        let report = quiet().obfuscate_dir(&dir).unwrap();
+        let fr = report.files.iter().find(|f| f.path == css).unwrap();
+        assert_eq!(fr.status, FileStatus::Unchanged);
         fs::remove_dir_all(&dir).ok();
     }
 
