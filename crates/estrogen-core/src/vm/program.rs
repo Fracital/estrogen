@@ -108,6 +108,33 @@ impl ConstPool {
         })
     }
 
+    /// Intern a tagged-template strings object. The runtime's `decodeConst`
+    /// builds one frozen array (with its frozen `.raw`) per call site at load,
+    /// so every evaluation of the site passes the same object, as the language
+    /// requires. A `None` cooked value (an invalid escape in a tagged template)
+    /// becomes `undefined` in the cooked array while `.raw` keeps the text.
+    pub fn add_template(&mut self, cooked: &[Option<String>], raw: &[String]) -> usize {
+        let key = format!("tpl:{cooked:?}|{raw:?}");
+        self.intern(key, || {
+            let mut obj = Map::new();
+            obj.insert("$".to_string(), Value::from("tpl"));
+            obj.insert(
+                "c".to_string(),
+                Value::Array(
+                    cooked
+                        .iter()
+                        .map(|c| c.as_ref().map_or(Value::Null, |s| Value::from(s.clone())))
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "r".to_string(),
+                Value::Array(raw.iter().map(|s| Value::from(s.clone())).collect()),
+            );
+            Value::Object(obj)
+        })
+    }
+
     fn intern(&mut self, key: String, make: impl FnOnce() -> Value) -> usize {
         if let Some(&i) = self.index.get(&key) {
             return i;

@@ -1507,9 +1507,24 @@ impl Compiler {
                             continue;
                         }
                     };
-                    if p.method || p.kind != PropertyKind::Init {
-                        return Err(Unsupported("method/accessor property"));
+                    if matches!(p.kind, PropertyKind::Get | PropertyKind::Set) {
+                        // A getter or setter defines an accessor. Two accessors
+                        // on the same configurable key merge, so `get`/`set`
+                        // pairs compose. Computed accessor keys are not ported.
+                        let key = if p.computed { None } else { static_key(&p.key) };
+                        let key = key.ok_or(Unsupported("computed accessor key"))?;
+                        self.compile_expr(&p.value)?;
+                        let i = self.consts.add_str(&key);
+                        let op = if p.kind == PropertyKind::Get {
+                            "OBJ_DEFINE_GETTER"
+                        } else {
+                            "OBJ_DEFINE_SETTER"
+                        };
+                        self.emit1(op, i as i64);
+                        continue;
                     }
+                    // A method shorthand (`{ foo() {} }`) is an Init property
+                    // whose value is a function, so it takes the path below.
                     let static_key = if p.computed { None } else { static_key(&p.key) };
                     let computed_key = static_key.is_none()
                         || (p.shorthand && static_key.as_deref() == Some("__proto__"));
@@ -1564,6 +1579,7 @@ impl Compiler {
                 }
                 self.emit0("YIELD");
             }
+            Expression::TaggedTemplateExpression(tagged) => self.compile_tagged_template(tagged)?,
             _ => return Err(Unsupported("expression outside the subset")),
         }
         Ok(())
@@ -2009,6 +2025,71 @@ impl Compiler {
                     self.emit1("CALL", argc as i64);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `tag`...`` calls `tag(strings, ...substitutions)`. The strings object is a
+    /// frozen const built once per site (see `ConstPool::add_template`), so the
+    /// call site always passes the same object. A member tag keeps its receiver
+    /// so `this` is the object, matching a normal method call.
+    fn compile_tagged_template(
+        &mut self,
+        tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>,
+    ) -> R<()> {
+        let mut tag = &tagged.tag;
+        while let Expression::ParenthesizedExpression(p) = tag {
+            tag = &p.expression;
+        }
+        if matches!(tag, Expression::ChainExpression(_)) {
+            return Err(Unsupported("tagged template on an optional chain"));
+        }
+        let quasi = &tagged.quasi;
+        let cooked: Vec<Option<String>> = quasi
+            .quasis
+            .iter()
+            .map(|q| {
+                q.value
+                    .cooked
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        let raw: Vec<String> = quasi
+            .quasis
+            .iter()
+            .map(|q| q.value.raw.as_str().to_string())
+            .collect();
+        let strings = self.consts.add_template(&cooked, &raw);
+        let is_method = match tag {
+            Expression::StaticMemberExpression(m) if !m.optional => {
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                let i = self.consts.add_str(m.property.name.as_str());
+                self.emit1("GET_PROP", i as i64);
+                true
+            }
+            Expression::ComputedMemberExpression(m) if !m.optional => {
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                self.compile_expr(&m.expression)?;
+                self.emit0("GET_PROP_DYN");
+                true
+            }
+            other => {
+                self.compile_expr(other)?;
+                false
+            }
+        };
+        self.emit1("PUSH_CONST", strings as i64);
+        for expr in &quasi.expressions {
+            self.compile_expr(expr)?;
+        }
+        let argc = (quasi.expressions.len() + 1) as i64;
+        if is_method {
+            self.emit1("CALL_METHOD", argc);
+        } else {
+            self.emit1("CALL", argc);
         }
         Ok(())
     }

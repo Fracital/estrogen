@@ -444,6 +444,34 @@ const GENERATORS: &[&str] = &[
     "function* g() { yield; yield 5; } const it = g(); [it.next().value, it.next().value]",
 ];
 
+/// Tagged templates, object method shorthand, accessors, and spread in `new`.
+/// Each case's last expression is compared against native eval.
+const TEMPLATES_OBJECTS: &[&str] = &[
+    // tagged template: cooked strings and substitutions in order
+    "function tag(s, ...v) { return s.join('|') + '#' + v.join(','); } tag`a${1}b${2}c`",
+    // the raw strings keep their backslashes
+    "function tag(s) { return s.raw[0]; } tag`a\\nb`",
+    // one frozen strings object per call site: the same site twice is the same object
+    "function tag(s) { return s; } function f() { return tag`y`; } f() === f()",
+    // an invalid escape leaves cooked undefined while raw keeps the text
+    "function tag(s) { return [s[0], s.raw[0]]; } tag`\\u`",
+    // a member tag keeps its receiver as this
+    "const o = { p: 'P', tag(s, v) { return this.p + s[0] + v; } }; o.tag`a${9}`",
+    // the built-in String.raw over a tagged template
+    "String.raw`a${1}\\n${2}b`",
+    // object method shorthand, including this and a computed key
+    "const o = { greet() { return 'hi'; } }; o.greet()",
+    "const o = { x: 5, read() { return this.x; } }; o.read()",
+    "const k = 'm'; const o = { [k]() { return 42; } }; o.m()",
+    // getters and setters, including a get/set pair that composes
+    "const o = { get x() { return 7; } }; o.x",
+    "let captured; const o = { set x(v) { captured = v; } }; o.x = 9; captured",
+    "let store = 0; const o = { get x() { return store; }, set x(v) { store = v * 2; } }; o.x = 5; o.x",
+    "const o = { get x() { return 1; } }; Object.keys(o)",
+    // spread arguments in new
+    "function F(a, b) { this.sum = a + b; } const args = [3, 4]; new F(...args).sum",
+];
+
 #[test]
 fn vm_bytecode_matches_native_eval() {
     if !node_available("vm_bytecode_matches_native_eval") {
@@ -461,6 +489,7 @@ fn vm_bytecode_matches_native_eval() {
         .chain(FUNCTION_SURFACE)
         .chain(DESTRUCTURING)
         .chain(GENERATORS)
+        .chain(TEMPLATES_OBJECTS)
     {
         let json = compile_module_json(src, "vm-node-seed")
             .unwrap_or_else(|| panic!("supported source did not compile: {src}"));

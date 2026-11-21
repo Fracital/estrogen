@@ -102,6 +102,16 @@
 			}
 			if (entry.$ === 're') return new NativeRegExp(entry.s, entry.f);
 			if (entry.$ === 'bi') return BigInt(entry.v);
+			if (entry.$ === 'tpl') {
+				// One frozen strings object per tagged-template site, built once
+				// at load so every evaluation passes the same object. A null
+				// cooked value is an invalid escape and reads as undefined.
+				const strings = entry.c.map(function (v) {
+					return v === null ? undefined : v;
+				});
+				strings.raw = Object.freeze(entry.r.slice());
+				return Object.freeze(strings);
+			}
 		}
 		return entry;
 	}
@@ -769,6 +779,28 @@
 		Object.defineProperty(obj, key, {
 			value: v,
 			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	// Define an accessor. A get then a set on the same configurable key merge
+	// into one get/set accessor, so `{ get x() {}, set x(v) {} }` composes.
+	HANDLERS[OP_OBJ_DEFINE_GETTER] = function (frame, arg, consts) {
+		const s = frame.stack;
+		const getter = s.pop();
+		const obj = s[s.length - 1];
+		Object.defineProperty(obj, consts[arg], {
+			get: getter,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	HANDLERS[OP_OBJ_DEFINE_SETTER] = function (frame, arg, consts) {
+		const s = frame.stack;
+		const setter = s.pop();
+		const obj = s[s.length - 1];
+		Object.defineProperty(obj, consts[arg], {
+			set: setter,
 			enumerable: true,
 			configurable: true,
 		});
