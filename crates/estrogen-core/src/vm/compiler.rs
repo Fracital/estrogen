@@ -118,6 +118,10 @@ struct FnState {
     /// also raised by a top-level `await` in a module main so top-level await
     /// drives the module as a promise.
     is_async: bool,
+    /// The frame is a generator body. `try`, `for`/`of`, and `for`/`in` decline
+    /// inside it (they push handlers that complicate yield resume), and `yield`
+    /// compiles only here.
+    is_generator: bool,
 }
 
 /// One open loop or `switch`. Collects the jump operand indices to patch once the
@@ -182,6 +186,7 @@ impl Compiler {
             base_scope_index: self.scopes.len(),
             var_slots: Vec::new(),
             is_async: false,
+            is_generator: false,
         });
         self.scopes.push(Scope::default());
         if allow_module_var {
@@ -196,6 +201,7 @@ impl Compiler {
             name: None,
             is_async: st.is_async,
             is_arrow: false,
+            is_generator: false,
             num_params: 0,
         }))
     }
@@ -208,6 +214,7 @@ impl Compiler {
         name: Option<String>,
         is_arrow: bool,
         is_async: bool,
+        is_generator: bool,
     ) -> R<usize> {
         self.fns.push(FnState {
             code: Vec::new(),
@@ -218,6 +225,7 @@ impl Compiler {
             base_scope_index: self.scopes.len(),
             var_slots: Vec::new(),
             is_async,
+            is_generator,
         });
         self.scopes.push(Scope::default());
         let num_params = self.compile_params(params)?;
@@ -257,6 +265,7 @@ impl Compiler {
             name,
             is_async: st.is_async,
             is_arrow,
+            is_generator: st.is_generator,
             num_params,
         }))
     }
@@ -327,7 +336,7 @@ impl Compiler {
             Expression::ClassExpression(class) if class.id.is_none() => {
                 self.compile_class(class, Some(name), None)
             }
-            Expression::FunctionExpression(func) if func.id.is_none() && !func.generator => {
+            Expression::FunctionExpression(func) if func.id.is_none() => {
                 let body = func.body.as_ref().ok_or(Unsupported("function body"))?;
                 let index = self.compile_function(
                     &func.params,
@@ -335,6 +344,7 @@ impl Compiler {
                     Some(name.to_string()),
                     false,
                     func.r#async,
+                    func.generator,
                 )?;
                 self.emit1("MAKE_FUNC", index as i64);
                 Ok(())
@@ -350,6 +360,7 @@ impl Compiler {
                     Some(name.to_string()),
                     true,
                     arrow.r#async,
+                    false,
                 )?;
                 self.emit1("MAKE_FUNC", index as i64);
                 Ok(())
@@ -371,6 +382,7 @@ impl Compiler {
             base_scope_index: self.scopes.len(),
             var_slots: Vec::new(),
             is_async: false,
+            is_generator: false,
         });
         self.scopes.push(Scope::default());
         self.compile_named_expr(value, name)?;
@@ -382,6 +394,7 @@ impl Compiler {
             name: None,
             is_async: false,
             is_arrow: false,
+            is_generator: false,
             num_params: 0,
         }))
     }
@@ -430,6 +443,7 @@ impl Compiler {
                                 None,
                                 false,
                                 false,
+                                false,
                             )?);
                         }
                         MethodDefinitionKind::Method => {
@@ -439,6 +453,7 @@ impl Compiler {
                                 &method.value.params,
                                 FnBody::Block(&body.statements),
                                 None,
+                                false,
                                 false,
                                 false,
                             )?;
@@ -533,8 +548,8 @@ impl Compiler {
                     }
                 }
                 Statement::FunctionDeclaration(func) => {
-                    if func.generator {
-                        return Err(Unsupported("generator function"));
+                    if func.r#async && func.generator {
+                        return Err(Unsupported("async generator function"));
                     }
                     let name = func
                         .id
@@ -581,6 +596,7 @@ impl Compiler {
                 name,
                 false,
                 func.r#async,
+                func.generator,
             )?;
             self.emit1("MAKE_FUNC", idx as i64);
             self.emit1("DEF_FUNC_SLOT", slot as i64);
@@ -745,6 +761,12 @@ impl Compiler {
     }
 
     fn compile_try(&mut self, stmt: &TryStatement<'_>) -> R<()> {
+        // A try inside a generator leaves a handler on the frame across a yield,
+        // and a consumer's return/throw at that yield would need to run the
+        // finally and iterator cleanup. That is not ported, so decline.
+        if self.fns.last().expect("frame").is_generator {
+            return Err(Unsupported("try in a generator"));
+        }
         // A return that leaves a try while a for-of iterator is still open needs
         // multi-iterator unwinding that is not ported; decline for both the
         // catch and finally forms.
@@ -980,6 +1002,12 @@ impl Compiler {
         for_in: bool,
         label: Option<&str>,
     ) -> R<()> {
+        // A for-of/in inside a generator keeps an iterator handler on the frame
+        // across a yield; a consumer return/throw there would need to close it.
+        // Not ported, so decline.
+        if self.fns.last().expect("frame").is_generator {
+            return Err(Unsupported("for-of or for-in in a generator"));
+        }
         // A nested for-of with an early return can throw from its IteratorClose
         // while the outer iterator still needs closing. Defer that case until
         // abrupt completion unwinding handles multiple iterators atomically.
@@ -1295,8 +1323,8 @@ impl Compiler {
             Expression::AssignmentExpression(a) => self.compile_assign(a)?,
             Expression::UpdateExpression(u) => self.compile_update(u)?,
             Expression::FunctionExpression(func) => {
-                if func.generator {
-                    return Err(Unsupported("generator function expression"));
+                if func.r#async && func.generator {
+                    return Err(Unsupported("async generator function expression"));
                 }
                 let fb = func
                     .body
@@ -1310,6 +1338,7 @@ impl Compiler {
                             None,
                             false,
                             func.r#async,
+                            func.generator,
                         )?;
                         self.emit1("MAKE_FUNC", idx as i64);
                     }
@@ -1329,6 +1358,7 @@ impl Compiler {
                             Some(name),
                             false,
                             func.r#async,
+                            func.generator,
                         )?;
                         self.emit1("MAKE_FUNC", idx as i64);
                         self.emit0("DUP");
@@ -1359,6 +1389,7 @@ impl Compiler {
                         None,
                         true,
                         arrow.r#async,
+                        false,
                     )?,
                     _ => {
                         let e = arrow.get_expression().ok_or(Unsupported("arrow body"))?;
@@ -1368,6 +1399,7 @@ impl Compiler {
                             None,
                             true,
                             arrow.r#async,
+                            false,
                         )?
                     }
                 };
@@ -1481,6 +1513,21 @@ impl Compiler {
                 let top = self.fns.last().expect("frame").is_module_main;
                 self.fns.last_mut().expect("frame").is_async = true;
                 self.emit0(if top { "AWAIT_TOP" } else { "AWAIT" });
+            }
+            Expression::YieldExpression(y) => {
+                // The parser only accepts yield inside a generator, so the frame
+                // is a generator. `yield*` delegation is not ported. Push the
+                // yielded value (undefined with no argument) and suspend; the
+                // runtime driver pushes the value sent to the next `next` call as
+                // this expression's result.
+                if y.delegate {
+                    return Err(Unsupported("yield* delegation"));
+                }
+                match &y.argument {
+                    Some(arg) => self.compile_expr(arg)?,
+                    None => self.emit0("PUSH_UNDEF"),
+                }
+                self.emit0("YIELD");
             }
             _ => return Err(Unsupported("expression outside the subset")),
         }
@@ -3065,6 +3112,9 @@ fn has_closure_expr(e: &Expression<'_>) -> bool {
             }
             ObjectPropertyKind::SpreadProperty(s) => has_closure_expr(&s.argument),
         }),
+        // await and yield are not closures; a closure is only in their argument.
+        Expression::AwaitExpression(a) => has_closure_expr(&a.argument),
+        Expression::YieldExpression(y) => y.argument.as_ref().is_some_and(has_closure_expr),
         _ => true,
     }
 }

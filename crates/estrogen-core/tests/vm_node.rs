@@ -414,6 +414,24 @@ const DESTRUCTURING: &[&str] = &[
     "const var_a = (function () { var [p, q] = [1, 2]; return p + q; })(); var_a",
 ];
 
+/// Generator functions: the runtime drives the frame to each `yield`. Each
+/// case's last expression is the compared value. These cover spread, manual
+/// `next`, values sent back into `yield`, a `return` inside the body, closure
+/// capture across yields, iteration with `for`/`of`, and early `return` through
+/// a `for`/`of` break.
+const GENERATORS: &[&str] = &[
+    "function* g() { yield 1; yield 2; yield 3; } [...g()]",
+    "function* g() { yield 1; yield 2; } const it = g(); [it.next().value, it.next().value, it.next().value, it.next().done]",
+    "function* g() { const a = yield 1; const b = yield a + 1; return a + b; } const it = g(); [it.next().value, it.next(10).value, it.next(20).value, it.next().done]",
+    "function* range(n) { for (let i = 0; i < n; i++) yield i; } [...range(4)]",
+    "function* g() { yield 1; return 99; yield 2; } [...g()]",
+    "function* counter(start) { let c = start; while (true) { yield c++; if (c > start + 2) return; } } [...counter(5)]",
+    "function* g() { yield 1; yield 2; yield 3; } let s = 0; for (const x of g()) s += x; s",
+    "function* g() { yield 1; yield 2; yield 3; } const r = []; for (const x of g()) { r.push(x); if (x === 2) break; } r",
+    "const make = function* named(n) { yield n; yield n + 1; }; [...make(7)]",
+    "function* g() { yield; yield 5; } const it = g(); [it.next().value, it.next().value]",
+];
+
 #[test]
 fn vm_bytecode_matches_native_eval() {
     if !node_available("vm_bytecode_matches_native_eval") {
@@ -430,6 +448,7 @@ fn vm_bytecode_matches_native_eval() {
         .chain(MUTATION)
         .chain(FUNCTION_SURFACE)
         .chain(DESTRUCTURING)
+        .chain(GENERATORS)
     {
         let json = compile_module_json(src, "vm-node-seed")
             .unwrap_or_else(|| panic!("supported source did not compile: {src}"));
@@ -552,7 +571,12 @@ fn unsupported_constructs_decline() {
         "function fd({ a }) { return a; } fd({ a: 1 })",
         "const fa = ([x]) => x; fa([7])",
         "function fr(...{ length }) { return length; } fr(1, 2)",
-        "function* gen() { yield 1; }",
+        // generators decline when their own frame would hold a handler across a
+        // yield (try, for-of, for-in), plus yield* and async generators
+        "function* g() { try { yield 1; } finally {} }",
+        "function* g() { for (const x of [1, 2]) yield x; }",
+        "function* g() { yield* [1, 2]; }",
+        "async function* g() { yield 1; }",
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",
         "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",

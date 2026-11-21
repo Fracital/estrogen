@@ -26,6 +26,9 @@ pub struct FunctionDef {
     pub is_async: bool,
     /// Whether it is an arrow. Always false in the slice.
     pub is_arrow: bool,
+    /// Whether it is a generator. Calling it returns a generator object the
+    /// runtime drives: the body runs to each `yield` and resumes on `next`.
+    pub is_generator: bool,
     /// Declared parameter count. Zero for the main.
     pub num_params: usize,
 }
@@ -45,6 +48,7 @@ impl FunctionDef {
         );
         obj.insert("isAsync".to_string(), Value::from(self.is_async));
         obj.insert("isArrow".to_string(), Value::from(self.is_arrow));
+        obj.insert("isGenerator".to_string(), Value::from(self.is_generator));
         obj.insert("numParams".to_string(), Value::from(self.num_params as u64));
         Value::Object(obj)
     }

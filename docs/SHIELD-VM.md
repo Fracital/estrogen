@@ -309,6 +309,14 @@ falls back. The subset:
   destructuring leaf can be a nested pattern or, for an assignment, an identifier
   or a member. The `...rest` of an object with a computed key before it builds
   its excluded-key set at runtime.
+- Generators: a `function*` declaration or expression runs on the runtime's
+  generator driver. Calling it returns a generator object; `next(v)` runs the
+  body to the next `yield` or the end, `yield` suspends with its value and
+  resumes with the value `next` was given, and spread, `for`/`of`, and manual
+  `next`/`return` all consume it (a `for`/`of` break calls the generator's
+  `return`). The body must not use `try`, `for`/`of`, or `for`/`in`, since those
+  keep a handler on the frame across a `yield`; `yield*` and async generators
+  are not ported.
 
 Falls back (declines, so the literal and name passes run instead):
 
@@ -322,9 +330,10 @@ Falls back (declines, so the literal and name passes run instead):
   leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
   declares a lexical binding; and a labeled jump that would close more than one
   `for`/`of` iterator at once.
-- Destructured parameters and generators. The destructuring lowering exists for
-  bindings and assignments; wiring it into function parameters is the remaining
-  step.
+- Destructured parameters (the destructuring lowering exists for bindings and
+  assignments; wiring it into function parameters is the remaining step), a
+  generator whose own body uses `try`, `for`/`of`, or `for`/`in`, `yield*`
+  delegation, and async generators.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
   binding where native makes one per iteration, so it declines rather than
   observe the difference wrongly. The closure check is conservative, so a
@@ -378,14 +387,15 @@ ships a `createRuntime` or `.run()` token to key on.
 
 Functions, closures, `async`/`await`, non-derived classes, `try`/`catch`,
 `try`/`finally`, `for`/`of`, `for`/`in`, labeled jumps, the arguments object,
-named function expressions, default and rest parameters, and destructuring now
-compile (see the subset above). Reaching the point where the VM compiles a real
-app bundle, the way the shield's 25-of-25 integration proof does, is still a
-large amount of further work. In rough dependency order:
+named function expressions, default and rest parameters, destructuring, and
+generators now compile (see the subset above). Reaching the point where the VM
+compiles a real app bundle, the way the shield's 25-of-25 integration proof
+does, is still a large amount of further work. In rough dependency order:
 
 1. The rest of the function surface: destructured parameters (reuse the binding
-   destructuring lowering) and generators (the `yield` suspend the async driver's
-   resume model can extend to).
+   destructuring lowering) and the rest of generators (a `try`, `for`/`of`, or
+   `for`/`in` inside a generator body, `yield*`, and async generators, which the
+   completion-record and iterator-close machinery can extend to).
 2. The rest of control flow: `break`/`continue` that escapes a `try` (the
    abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
    `jump` completion record), a `switch` case that declares a lexical binding, and

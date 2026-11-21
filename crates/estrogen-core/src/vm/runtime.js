@@ -34,6 +34,7 @@
 	const SIG_RETURN = 0;
 	const SIG_HALT = 1;
 	const SIG_AWAIT = 2;
+	const SIG_YIELD = 3;
 
 	// A handler on frame.handlers is a catch or a finally. A finally runs on
 	// every way its try completes; the pending completion rides frame.completions
@@ -87,7 +88,7 @@
 		OP_SUPER_CALL_APPLY = _n++, OP_GET_PRIVATE = _n++, OP_SET_PRIVATE = _n++, OP_HAS_PRIVATE = _n++,
 		OP_INIT_PRIVATE = _n++, OP_MODULE_INIT = _n++, OP_IMPORT_BINDING = _n++, OP_EXPORT_BINDING = _n++,
 		OP_DYNAMIC_IMPORT = _n++, OP_IMPORT_META = _n++, OP_AWAIT_TOP = _n++, OP_SET_COMPLETION = _n++,
-		OP_LOAD_ARGUMENTS = _n++;
+		OP_LOAD_ARGUMENTS = _n++, OP_YIELD = _n++;
 
 	// A constant pool entry may be a tagged object for a value JSON cannot carry
 	// directly. The compiler writes these; decodeConst reverses them.
@@ -577,6 +578,12 @@
 	HANDLERS[OP_AWAIT_TOP] = function (frame) {
 		return { type: SIG_AWAIT, value: frame.stack.pop() };
 	};
+	// Suspend a generator frame with the yielded value. The generator driver
+	// returns it as { value, done: false }; the next resume pushes the value
+	// sent to next() back as this expression's result.
+	HANDLERS[OP_YIELD] = function (frame) {
+		return { type: SIG_YIELD, value: frame.stack.pop() };
+	};
 
 	HANDLERS[OP_CALL] = function (
 		frame,
@@ -942,7 +949,11 @@
 		// captured scope, so slot addresses resolve across the closure boundary.
 		function createClosure(def, ctx) {
 			'use strict';
-			const drive = def.isAsync ? runAsync : runSync;
+			const drive = def.isGenerator
+				? makeGenerator
+				: def.isAsync
+					? runAsync
+					: runSync;
 			const fn = def.isArrow
 				? (...callArgs) =>
 						drive(makeFrame(def, ctx.scope, ctx.arrowThis, callArgs))
@@ -1129,6 +1140,68 @@
 			if (sig.type === SIG_AWAIT)
 				throw new TypeError('await is only valid in async functions');
 			return sig.value;
+		}
+
+		// Drive a generator frame. Calling the generator function returns this
+		// object; each next(v) runs the frame from where the last yield left it
+		// until the next yield or the end. The compiler only emits a generator
+		// whose body has no try or for-of/in, so the frame never holds a handler
+		// across a yield: throw(e) with no handler propagates and return(v) stops
+		// the generator, which is the correct behavior without a pending finally.
+		function makeGenerator(frame) {
+			let done = false;
+			let started = false;
+			function resume(value, mode) {
+				if (done) {
+					if (mode === 'throw') throw value;
+					return { value: mode === 'return' ? value : undefined, done: true };
+				}
+				if (!started && mode !== 'next') {
+					// A throw or return before the body starts never runs it.
+					done = true;
+					if (mode === 'throw') throw value;
+					return { value: value, done: true };
+				}
+				if (started) {
+					if (mode === 'throw') {
+						if (!unwindFrame(frame, value)) {
+							done = true;
+							throw value;
+						}
+					} else if (mode === 'return') {
+						done = true;
+						return { value: value, done: true };
+					} else {
+						frame.stack.push(value);
+					}
+				}
+				started = true;
+				let sig;
+				try {
+					sig = runFrame(frame);
+				} catch (error) {
+					done = true;
+					throw error;
+				}
+				if (sig.type === SIG_YIELD) return { value: sig.value, done: false };
+				done = true;
+				return { value: sig.value, done: true };
+			}
+			const gen = {
+				next: function (value) {
+					return resume(value, 'next');
+				},
+				throw: function (error) {
+					return resume(error, 'throw');
+				},
+				return: function (value) {
+					return resume(value, 'return');
+				},
+			};
+			gen[Symbol.iterator] = function () {
+				return this;
+			};
+			return gen;
 		}
 
 		// Drive an async frame to a promise. Each burst runs the frame until it

@@ -150,6 +150,7 @@ pub const OP_NAMES: &[&str] = &[
     "AWAIT_TOP",
     "SET_COMPLETION",
     "LOAD_ARGUMENTS",
+    "YIELD",
 ];
 
 /// How many operand numbers follow this opcode's byte in the flat code array.
@@ -296,7 +297,8 @@ pub fn arity(name: &str) -> usize {
         | "IMPORT_META"
         | "AWAIT_TOP"
         | "SET_COMPLETION"
-        | "LOAD_ARGUMENTS" => 0,
+        | "LOAD_ARGUMENTS"
+        | "YIELD" => 0,
         other => panic!("estrogen vm: unknown opcode {other}"),
     }
 }
