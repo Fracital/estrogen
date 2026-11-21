@@ -246,6 +246,16 @@ const CLASSES: &[&str] = &[
     "class A { get kind() { return 'a'; } } class B extends A {} new B().kind",
     // a setter with no getter leaves the getter undefined
     "class C { set x(v) { this.stored = v; } } const c = new C(); c.x = 9; [c.stored, Object.getOwnPropertyDescriptor(C.prototype, 'x').get]",
+    // a static block runs at definition with the class as this
+    "class C { static { this.init = 'done'; } } C.init",
+    // a static block reads an earlier static field
+    "class C { static x = 1; static { this.y = this.x + 1; } } [C.x, C.y]",
+    // static block and static fields run in source order
+    "const log = []; class C { static a = (log.push('a'), 1); static { log.push('block'); } static b = (log.push('b'), 2); } [log.join(','), C.a, C.b]",
+    // a static block has its own scope for locals
+    "class C { static { let n = 5; this.v = n * 2; } } C.v",
+    // a static block in a derived class sees super through the class
+    "class A { static who() { return 'A'; } } class B extends A { static { this.tag = super.who(); } } B.tag",
 ];
 
 /// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
@@ -688,7 +698,6 @@ fn unsupported_constructs_decline() {
         "class C { [Math.random()]() {} }",
         "class C { [Math.random()] = 1; }",
         "class C { #private = 1; }",
-        "class C { static { this.x = 1; } }",
         "class C { async method() {} }",
         "class C { *method() {} }",
         "let C; C = class {}; C.name",

@@ -1345,7 +1345,18 @@
 				slot.init = true;
 			}
 			for (const field of desc.fields) {
-				if (field.static) defineField(Class, field);
+				if (!field.static) continue;
+				if (field.block) {
+					// A static block runs with the class as this and its own home,
+					// so super resolves on the superclass; the result is discarded.
+					runSync(
+						makeFrame(functions[field.fn], classScope, Class, [], {
+							home: Class,
+						}),
+					);
+				} else {
+					defineField(Class, field);
+				}
 			}
 			return Class;
 		}

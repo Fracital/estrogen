@@ -274,9 +274,11 @@ falls back. The subset:
   top-level `await` compiles its main to the same driver, so the chunk evaluates
   to a promise. `AWAIT` and `AWAIT_TOP` carry the suspend; the driver and the
   synchronous loop share one handler stack.
-- Classes: a constructor, plain methods, static methods, and instance or static
-  fields. `BUILD_CLASS` creates the methods and binds the class before static
-  fields run. A class binding resolves to a slot like any other name.
+- Classes: a constructor, plain methods, static methods, instance or static
+  fields, and `static { ... }` blocks. `BUILD_CLASS` creates the methods and
+  binds the class, then runs the static fields and static blocks in source
+  order, each with the class as `this`. A class binding resolves to a slot like
+  any other name.
 - Derived classes: `extends` wires the instance and static prototype chains, and
   BUILD_CLASS pops the superclass value the compiler pushes before it. `super(...)`
   in a constructor constructs the superclass with the active `new.target` through
@@ -355,7 +357,7 @@ falls back. The subset:
 Falls back (declines, so the literal and name passes run instead):
 
 - A decorated class, a computed method, field, or accessor key, an `async` or
-  generator method, private class members, static blocks, a computed super
+  generator method, private class members, a computed super
   member, and a spread in `super()`. Native
   static imports and reexports work, but the VM's full module loader is not
   ported, so a local export of a value computed in the VM beyond the simple
@@ -443,7 +445,7 @@ does, is still a large amount of further work. In rough dependency order:
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
 4. The rest of the class surface: private state, computed method, field, and
-   accessor keys, `async` and generator methods, static blocks, a computed super
+   accessor keys, `async` and generator methods, a computed super
    member, and a spread in `super()`. The common derived
    case (`extends`, `super(...)`, `super.method()`/`super.prop`, `new.target`,
    instance fields, getters and setters, the prototype chain) compiles.

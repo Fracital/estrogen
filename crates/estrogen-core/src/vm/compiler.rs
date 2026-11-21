@@ -449,6 +449,38 @@ impl Compiler {
         }))
     }
 
+    /// A `static { ... }` block runs once at class definition time with the
+    /// class as `this`, in source order with the static fields. Compile it as a
+    /// nullary function whose body is the block; `BUILD_CLASS` runs it and
+    /// discards the result.
+    fn compile_static_block(&mut self, stmts: &[Statement<'_>]) -> R<usize> {
+        self.fns.push(FnState {
+            code: Vec::new(),
+            loops: Vec::new(),
+            is_module_main: false,
+            allow_module_var: false,
+            allow_root_class: false,
+            base_scope_index: self.scopes.len(),
+            var_slots: Vec::new(),
+            is_async: false,
+            is_generator: false,
+        });
+        self.scopes.push(Scope::default());
+        self.predeclare_vars(stmts)?;
+        self.compile_scope_body(stmts, false)?;
+        self.emit0("RETURN_UNDEF");
+        self.scopes.pop();
+        let state = self.fns.pop().expect("static block frame");
+        Ok(self.add_function(FunctionDef {
+            code: state.code,
+            name: None,
+            is_async: false,
+            is_arrow: false,
+            is_generator: false,
+            num_params: 0,
+        }))
+    }
+
     /// Only public, non-derived classes enter the VM. The class descriptor
     /// holds function indices rather than values; BUILD_CLASS creates all
     /// methods and initializes the class binding before evaluating static fields.
@@ -535,11 +567,11 @@ impl Compiler {
                     };
                     fields.push(json!({"key": key, "static": field.r#static, "fn": initializer}));
                 }
-                _ => {
-                    return Err(Unsupported(
-                        "class static block, accessor or private member",
-                    ))
+                ClassElement::StaticBlock(block) => {
+                    let index = self.compile_static_block(&block.body)?;
+                    fields.push(json!({"key": null, "static": true, "fn": index, "block": true}));
                 }
+                _ => return Err(Unsupported("class accessor or private member")),
             }
         }
         let descriptor = json!({
