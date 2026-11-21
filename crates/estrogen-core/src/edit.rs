@@ -91,6 +91,14 @@ impl EditSet {
         self.edits.extend(other.edits);
     }
 
+    /// Drop every edit that overlaps `start..end`. Used when a later edit
+    /// deletes that byte range (for example a sourceMappingURL comment), so an
+    /// earlier edit inside it (a proxy-name rename of a map filename like
+    /// `scramjet.js.map`) does not overlap the deletion and fail the apply.
+    pub fn drop_within(&mut self, start: usize, end: usize) {
+        self.edits.retain(|e| e.start >= end || e.end <= start);
+    }
+
     /// The edits in the order [`apply`](Self::apply) splices them: by start
     /// offset, then by end, stably. A source map is built by walking these in the
     /// same order as the output is assembled.

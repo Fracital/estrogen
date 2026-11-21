@@ -342,6 +342,10 @@ impl Obfuscator {
         // edit would overlap the whole-file replacement).
         if kind == FileKind::Js && !vm_replaced {
             if let Some(edit) = sourcemap_strip_edit(&source) {
+                // The comment is deleted, so drop any earlier edit inside it (a
+                // proxy-name rename of a map filename such as scramjet.js.map),
+                // which would otherwise overlap the strip and fail the apply.
+                edits.drop_within(edit.start, edit.end);
                 edits.push(edit);
             }
         }
@@ -645,6 +649,37 @@ mod tests {
         ));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn a_vendor_sourcemappingurl_naming_a_proxy_does_not_overlap() {
+        // A vendored transport whose source map filename carries a proxy-name
+        // token (scramjet.js.map, as the upstream scramjet bundle ships) must not
+        // fail closed. The proxy-name rename of "scramjet" falls inside the
+        // sourceMappingURL comment the strip deletes; the rename is dropped, the
+        // comment is stripped, and the file obfuscates cleanly.
+        let dir = tmp_dir();
+        let vendor = dir.join("vendor");
+        fs::create_dir_all(&vendor).unwrap();
+        let js = vendor.join("transport.js");
+        fs::write(
+            &js,
+            "globalThis.scramjet = 1;\n//# sourceMappingURL=scramjet.js.map\n",
+        )
+        .unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"s".to_vec()),
+            ..Options::default()
+        })
+        .unwrap();
+        // Before the fix this returned Err("overlapping edits ...").
+        obf.obfuscate_dir(&dir).unwrap();
+        let out = fs::read_to_string(&js).unwrap();
+        assert!(
+            !out.contains("sourceMappingURL"),
+            "the map comment must be stripped: {out}"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
