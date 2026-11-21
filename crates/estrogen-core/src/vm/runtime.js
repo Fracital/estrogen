@@ -1002,7 +1002,28 @@
 				? opts.budget
 				: 0;
 		const consts = program.k.map(decodeConst);
+		// Each function's code ships as base64 of unsigned LEB128 varints. Unpack
+		// it once here to a number array so the dispatch loop reads numbers. The
+		// accumulator is arithmetic, not 32-bit bitwise, so an operand up to 2^53
+		// decodes exactly.
 		const functions = program.f;
+		for (const d of functions) {
+			const bin = atob(d.c);
+			const code = [];
+			let i = 0;
+			while (i < bin.length) {
+				let val = 0;
+				let mul = 1;
+				let byte;
+				do {
+					byte = bin.charCodeAt(i++);
+					val += (byte & 0x7f) * mul;
+					mul *= 128;
+				} while (byte & 0x80);
+				code.push(val);
+			}
+			d.c = code;
+		}
 		const layout = program.l;
 		let steps = 0;
 

@@ -9,9 +9,39 @@
 
 use std::collections::HashMap;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde_json::{Map, Value};
 
 use super::layout::Layout;
+
+/// Encode a flat code array as a base64 string of unsigned LEB128 varints. Every
+/// code value is non-negative (opcode bytes and operands: const indices, packed
+/// slot addresses, absolute jump targets, and counts), so unsigned LEB128 is
+/// exact. This is far smaller than a JSON number array, which pays a comma and
+/// several digits per value; the runtime unpacks it once when the program loads.
+fn encode_code(code: &[i64]) -> String {
+    let mut bytes = Vec::with_capacity(code.len());
+    for &n in code {
+        debug_assert!(
+            n >= 0,
+            "VM code value must be non-negative for unsigned LEB128, got {n}"
+        );
+        let mut v = n as u64;
+        loop {
+            let mut byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+    STANDARD.encode(&bytes)
+}
 
 /// One compiled function: a flat code array, plus the metadata the runtime uses
 /// to build a closure. The slice emits one function (the module main), but the
@@ -41,10 +71,7 @@ impl FunctionDef {
     /// count, and a missing name are left out.
     fn to_json(&self) -> Value {
         let mut obj = Map::new();
-        obj.insert(
-            "c".to_string(),
-            Value::Array(self.code.iter().map(|&n| Value::from(n)).collect()),
-        );
+        obj.insert("c".to_string(), Value::from(encode_code(&self.code)));
         if let Some(name) = &self.name {
             obj.insert("n".to_string(), Value::from(name.clone()));
         }
@@ -225,5 +252,46 @@ impl Program {
     /// The program serialized to a compact JSON string.
     pub fn into_json_string(self) -> String {
         self.into_json().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The packed base64 form of a representative code array is smaller than the
+    /// JSON number array it replaces, and the varints decode back to the input.
+    #[test]
+    fn packed_code_is_smaller_and_round_trips() {
+        let code: Vec<i64> = vec![12, 5, 34, 0, 100, 200, 5, 65536, 131073, 42, 7];
+        let packed = encode_code(&code);
+        let array = serde_json::to_string(&code).unwrap();
+        assert!(
+            packed.len() < array.len(),
+            "packed {packed:?} ({} B) should beat array {array:?} ({} B)",
+            packed.len(),
+            array.len(),
+        );
+
+        // Decode the base64 LEB128 the way the runtime does, and confirm it
+        // reconstructs the input exactly.
+        let bytes = STANDARD.decode(packed).unwrap();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let mut val: u64 = 0;
+            let mut shift = 0;
+            loop {
+                let b = bytes[i];
+                i += 1;
+                val |= u64::from(b & 0x7f) << shift;
+                shift += 7;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            out.push(val as i64);
+        }
+        assert_eq!(out, code);
     }
 }

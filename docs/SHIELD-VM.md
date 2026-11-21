@@ -72,14 +72,19 @@ out, to keep the encrypted payload small: `l`=layout, `k`=consts, `f`=functions,
 `m`=mainIndex (omitted when 0); a function is `c`=code, `n`=name, `a`=isAsync,
 `r`=isArrow, `g`=isGenerator, `p`=numParams, each omitted when false, null, or 0.
 The unused version tag is gone. The runtime defaults every omitted field, so a
-plain sync function with no name and no parameters is just `{ "c": [ … ] }`
-rather than the seven-key form, which saves about seventy bytes per function:
+plain sync function with no name and no parameters is just `{ "c": "…" }` rather
+than the seven-key form, which saves about seventy bytes per function. `c` is not
+a JSON number array: it is a base64 string of the opcode bytes and operands
+encoded as unsigned LEB128 varints. Every code value is non-negative, so the
+encoding is exact, and it drops the comma and the digits a number array pays per
+value. The runtime decodes `c` to a number array once when the program loads, so
+the dispatch loop still reads numbers.
 
 ```
 {
   "l": { "version": 1, "tableSize": 256, "ops": {…} },
   "k": [ … ],
-  "f": [ { "c": [ … ] }, { "c": [ … ], "n": "name", "p": 2, "a": 1 } ]
+  "f": [ { "c": "DAUi…" }, { "c": "…", "n": "name", "p": 2, "a": 1 } ]
 }
 ```
 
@@ -98,10 +103,12 @@ rather than the seven-key form, which saves about seventy bytes per function:
   values the slice interns. NaN, the infinities, and negative zero use the
   shield's tagged form (`{ "$": "n", "v": "NaN" }` and so on), which the runtime's
   `decodeConst` reverses, because JSON cannot carry them.
-- `code` is the flat opcode array: an opcode byte, then its one inline operand
-  when it takes one (a const index, a packed slot address `depth << 16 | index`, a
-  jump target as an absolute code index, or an argument count). Jump targets are
-  patched to absolute indices after the body is emitted.
+- `code` (the `c` field) is the flat opcode array: an opcode byte, then its one
+  inline operand when it takes one (a const index, a packed slot address
+  `depth << 16 | index`, a jump target as an absolute code index, or an argument
+  count). Jump targets are patched to absolute indices after the body is emitted.
+  It ships as the base64 LEB128 string described above, which the runtime unpacks
+  to this number array on load.
 - The main function ends by setting the completion value on the last top-level
   expression statement (`SET_COMPLETION`) and then `HALT`, which returns that
   value. This matches the shield, and it matches native `eval` of the same
