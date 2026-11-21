@@ -231,6 +231,12 @@ impl Compiler {
                     | Statement::ExportFromDeclaration(_)
                     | Statement::ExportNamedDeclaration(_)
                     | Statement::ExportDefaultDeclaration(_)
+                    // A declaration-form export (`export const`, `export
+                    // function`, `export class`) is this distinct variant, not
+                    // ExportNamedDeclaration. It is module syntax too, so a chunk
+                    // that carries only this form is still a module, where no
+                    // top-level binding is a page global.
+                    | Statement::ExportDeclaration(_)
             )
         });
         // A classic script's top-level declaration is a page global: a

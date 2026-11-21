@@ -921,6 +921,28 @@ fn classic_script_top_level_declarations_decline_and_keep_globals() {
 }
 
 #[test]
+fn a_declaration_form_export_marks_the_chunk_a_module() {
+    // A chunk whose only module syntax is a declaration-form export (`export
+    // const`, this is the `ExportDeclaration` variant, not a specifier list) is
+    // still a module: a sibling non-exported top-level binding is module-local,
+    // not a page global, so the chunk must VM-compile rather than decline on the
+    // classic-script rule.
+    let opts = Options {
+        seed: Some(b"vm-export-decl".to_vec()),
+        ..Options::default()
+    };
+    for source in [
+        "const x = 1; export const out = x;",
+        "const helper = 2; export const doubled = helper * 2;",
+    ] {
+        let output = try_compile_chunk(source, &opts)
+            .expect("compile")
+            .unwrap_or_else(|| panic!("VM declined a module with a sibling binding: {source}"));
+        assert!(output.contains("JSON.parse("), "not bytecode: {source}");
+    }
+}
+
+#[test]
 fn class_chunks_require_known_module_scope() {
     let opts = Options {
         seed: Some(b"vm-class-module".to_vec()),
