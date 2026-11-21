@@ -80,6 +80,19 @@ encoding is exact, and it drops the comma and the digits a number array pays per
 value. The runtime decodes `c` to a number array once when the program loads, so
 the dispatch loop still reads numbers.
 
+The `n` name and the class descriptor name are dropped unless the chunk observes
+a callable name. A function's name and a class's name only reach the program for
+reflection: `fn.name`, a `"name"` string, `.constructor`, or `new.target`. When
+`compile_program` walks the chunk and finds none of these (`names_observable`),
+it sets `keep_names` false, `add_function` nulls every `FunctionDef.name`, and the
+class descriptor name becomes `""`. So a chunk that never reads a name ships a
+program with no `n` key and no class name, and decrypting the program still turns
+up no original identifier, not even the one an exported or top-level function used
+to carry. When the chunk does read a name, the names stay and `fn.name` keeps its
+value, so reflection still agrees with native semantics. This mirrors the mangle
+pass's `reads_callable_names`, with `.constructor` added because the VM also drops
+the class descriptor name.
+
 ```
 {
   "l": 3221897405,
