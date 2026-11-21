@@ -23,3 +23,6 @@ node_modules/
 # Generated demo wasm. web/scripts/build-wasm.sh regenerates these from
 # crates/estrogen-wasm at build time (npm prebuild), so they are not committed.
 web/src/wasm/
+
+# Local developer cargo config (mold linker)
+.cargo/config.toml
