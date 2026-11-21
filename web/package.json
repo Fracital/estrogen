@@ -5,7 +5,9 @@
 	"version": "0.1.0",
 	"scripts": {
 		"dev": "astro dev",
-		"build": "astro build",
+		"build:wasm": "bash scripts/build-wasm.sh",
+		"prebuild": "bash scripts/build-wasm.sh",
+		"build": "astro build && node scripts/verify-vm.mjs",
 		"preview": "astro preview"
 	},
 	"dependencies": {
