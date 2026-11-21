@@ -35,6 +35,16 @@
 	const SIG_HALT = 1;
 	const SIG_AWAIT = 2;
 
+	// A handler on frame.handlers is a catch or a finally. A finally runs on
+	// every way its try completes; the pending completion rides frame.completions
+	// as a numeric kind so no readable word ships. END_FINALLY replays it: a
+	// normal completion falls through, a throw rethrows, a return re-returns.
+	const HANDLER_CATCH = 0;
+	const HANDLER_FINALLY = 1;
+	const DONE_NORMAL = 0;
+	const DONE_THROW = 1;
+	const DONE_RETURN = 2;
+
 	// Stable opcode indices, in the exact order of estrogen-core's opcodes.rs
 	// OP_NAMES. The counter assigns each name its position, so a handler stored at
 	// OP_<name> below sits at the same index the compiler's layout records for
@@ -485,6 +495,7 @@
 	};
 	HANDLERS[OP_PUSH_HANDLER] = function (frame, target) {
 		frame.handlers.push({
+			type: HANDLER_CATCH,
 			pc: target,
 			scope: frame.scope,
 			stackLength: frame.stack.length,
@@ -492,6 +503,43 @@
 	};
 	HANDLERS[OP_POP_HANDLER] = function (frame) {
 		frame.handlers.pop();
+	};
+	// A finally handler. It stays on the stack while the try body and any catch
+	// run, so an abrupt completion (throw, return) that crosses it routes a
+	// completion record through the finally block before leaving.
+	HANDLERS[OP_PUSH_FINALLY] = function (frame, target) {
+		frame.handlers.push({
+			type: HANDLER_FINALLY,
+			pc: target,
+			scope: frame.scope,
+			stackLength: frame.stack.length,
+		});
+	};
+	// Normal completion of a try: the finally runs and then falls through to the
+	// code after it.
+	HANDLERS[OP_PUSH_COMPLETION_NORMAL] = function (frame) {
+		frame.completions.push({ kind: DONE_NORMAL });
+	};
+	// Run after a finally block. Replay the pending completion: a normal one
+	// jumps past the finally, a throw rethrows, a return re-returns (routing
+	// through any outer finally in turn).
+	HANDLERS[OP_END_FINALLY] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+	) {
+		const record = frame.completions.pop();
+		if (record.kind === DONE_NORMAL) {
+			frame.pc = arg;
+			return;
+		}
+		if (record.kind === DONE_THROW) throw record.value;
+		return doReturn(frame, record.value);
 	};
 	// Suspend the frame with the value on top of the stack. The async driver
 	// resumes the frame after the value settles, pushing the resolved value
@@ -811,6 +859,7 @@
 				pc: 0,
 				stack: [],
 				handlers: [],
+				completions: [],
 				scope: { parent: closureScope, slots: [] },
 				thisVal,
 				args,
@@ -929,23 +978,42 @@
 			return Reflect.apply(fn, thisArg, args);
 		}
 
-		// Perform a return. A return leaves the frame directly with a return
-		// signal; the driver and runSync turn that into the function result.
+		// Perform a return, routing through any active finally handlers. Pops
+		// catch handlers it leaves; at the nearest finally it records the pending
+		// return, jumps to the finally block, and returns null so the frame keeps
+		// running (END_FINALLY completes the return). With no finally left it
+		// returns the return signal the driver and runSync turn into the result.
 		function doReturn(frame, value) {
+			while (frame.handlers.length) {
+				const handler = frame.handlers.pop();
+				if (handler.type === HANDLER_FINALLY) {
+					frame.scope = handler.scope;
+					frame.stack.length = handler.stackLength;
+					frame.completions.push({ kind: DONE_RETURN, value });
+					frame.pc = handler.pc;
+					return null;
+				}
+			}
 			return { type: SIG_RETURN, value };
 		}
 
-		// Route a thrown value into the frame's nearest catch handler. Pops one
-		// handler, restores its scope and stack height, pushes the error, and
-		// jumps to its pc. Returns true when a handler took over, false when the
-		// value should propagate out of the frame. Shared by the synchronous
-		// dispatch loop and the async driver's rejection path.
+		// Route a thrown value into the frame's nearest handler. Pops one handler
+		// and restores its scope and stack height. A catch lands the error on the
+		// stack and jumps to the catch body; a finally records the pending throw
+		// and jumps to the finally block (END_FINALLY rethrows). Returns true when
+		// a handler took over, false when the value should propagate out of the
+		// frame. Shared by the synchronous dispatch loop and the async driver's
+		// rejection path.
 		function unwindFrame(frame, error) {
 			const handler = frame.handlers.pop();
 			if (!handler) return false;
 			frame.scope = handler.scope;
 			frame.stack.length = handler.stackLength;
-			frame.stack.push(error);
+			if (handler.type === HANDLER_FINALLY) {
+				frame.completions.push({ kind: DONE_THROW, value: error });
+			} else {
+				frame.stack.push(error);
+			}
 			frame.pc = handler.pc;
 			return true;
 		}

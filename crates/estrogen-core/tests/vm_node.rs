@@ -286,6 +286,27 @@ const CONTROL: &[&str] = &[
     "let t = 0; let i = 1; L: while (i < 5) { for (const y of [10, 20, 30]) { if (i * y >= 60) break L; t += i + y; } i++; } t",
     // labeled continue to an outer for-of from an inner plain loop
     "let s = 0; L: for (const x of [1, 2, 3]) { for (let j = 0; j < 3; j++) { if (j === x) continue L; s += x * 10 + j; } } s",
+    // finally runs after the try block completes normally, then control falls
+    // through to the code after it
+    "let o = []; function f() { try { o.push('t'); } finally { o.push('f'); } o.push('c'); return o; } f()",
+    // finally runs on the way out of a return; the returned value is computed
+    // before the finally
+    "let x = 0; function f() { try { return 1; } finally { x = 9; } } const r = f(); [r, x]",
+    // a return in the finally overrides a return in the try
+    "function f() { try { return 1; } finally { return 2; } } f()",
+    // a return in the finally overrides a throw in the try, swallowing it
+    "function f() { try { throw new Error('x'); } finally { return 9; } } f()",
+    // try, catch, and finally all run in order when the body throws
+    "let o = []; function f() { try { o.push('t'); throw 1; } catch (e) { o.push('c'); } finally { o.push('f'); } return o; } f()",
+    // a finally with no catch lets the throw propagate to an outer catch, after
+    // the finally runs
+    "let x = 0; function f() { try { try { throw 5; } finally { x = 7; } } catch (e) { return [e, x]; } } f()",
+    // nested try/finally run inner to outer
+    "let o = []; function f() { try { try { o.push(1); } finally { o.push(2); } } finally { o.push(3); } return o; } f()",
+    // the return value is read before the finally mutates shared state
+    "let o = []; function f() { try { o.push('t'); return o.length; } finally { o.push('x'); } } const r = f(); [r, o.length]",
+    // finally over a for-of body (iterator closes normally, finally still runs)
+    "let o = []; function f() { for (const n of [1, 2]) { try { o.push(n); } finally { o.push(-n); } } return o; } f()",
 ];
 
 /// Expression-surface mutation: compound, logical, and update assignment to a
@@ -474,7 +495,10 @@ fn unsupported_constructs_decline() {
         "function f() { const x = 7; return eval('x'); } f()",
         "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",
         "while (true) { try { break; } catch(e){} }",
-        "try { 1; } finally { 2; }",
+        // a break or continue that escapes a try (catch or finally) needs the
+        // abrupt-jump trampoline, which is not emitted yet, so it declines.
+        "while (true) { try { break; } finally {} }",
+        "for (;;) { try { x(); } finally { continue; } }",
         "try { throw { x: 1 }; } catch ({ x }) {}",
         // a for-let binding captured by a closure must decline, because estrogen
         // uses one binding where native makes one per iteration.

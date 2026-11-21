@@ -266,8 +266,11 @@ falls back. The subset:
   class before static fields run. A class binding resolves to a slot like any
   other name.
 - Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `for`/`of`,
-  `for`/`in`, `switch`, `try`/`catch`, `throw`, and `break`/`continue`, both
-  unlabeled and to a label on an enclosing loop, `switch`, or block. A lexical
+  `for`/`in`, `switch`, `try`/`catch`/`finally`, `throw`, and `break`/`continue`,
+  both unlabeled and to a label on an enclosing loop, `switch`, or block. A
+  `finally` runs on normal completion, a `throw`, and a `return` that leaves the
+  try, with its completion record replayed by `END_FINALLY`; a `return` in the
+  `finally` overrides the pending one. A lexical
   block pushes a runtime scope (`ENTER_SCOPE`/`EXIT_SCOPE`); a block with no
   lexical declaration is elided. A `break` or `continue` that jumps out of blocks
   emits the `EXIT_SCOPE`s it skips, so the scope chain is at the depth its
@@ -300,9 +303,11 @@ Falls back (declines, so the literal and name passes run instead):
   and local exported declarations or export specifiers. Native static imports and
   reexports work, but the VM's full module loader is not ported, so executable
   exports still take the fallback.
-- `try`/`finally`, a `break`/`continue` that crosses a `try`/`catch`, a `switch`
-  case that declares a lexical binding, and a labeled jump that would close more
-  than one `for`/`of` iterator at once.
+- A `break` or `continue` that escapes a `try` (its block, catch, or finally),
+  which needs the abrupt-jump trampoline that is not emitted yet; a `return` that
+  leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
+  declares a lexical binding; and a labeled jump that would close more than one
+  `for`/`of` iterator at once.
 - Named function expressions, default, rest, and destructured parameters,
   generators, and `arguments`.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
@@ -358,19 +363,19 @@ ships a `createRuntime` or `.run()` token to key on.
 ## Remaining work to full default-on coverage
 
 Functions, closures, `async`/`await`, non-derived classes, `try`/`catch`,
-`for`/`of`, `for`/`in`, and labeled jumps now compile (see the subset above).
-Reaching the point where the VM compiles a real app bundle, the way the shield's
-25-of-25 integration proof does, is still a large amount of further work. In
-rough dependency order:
+`try`/`finally`, `for`/`of`, `for`/`in`, and labeled jumps now compile (see the
+subset above). Reaching the point where the VM compiles a real app bundle, the
+way the shield's 25-of-25 integration proof does, is still a large amount of
+further work. In rough dependency order:
 
 1. The rest of the function surface: `arguments`, named function expressions,
    default, rest, and destructured parameters, and generators (the `yield` suspend
    the async driver's resume model can extend to).
-2. The rest of control flow: the `try`/`finally` completion-record path and
-   `break`/`continue`/`return` across a `finally` (which the shield routes through
-   completion records), a `switch` case that declares a lexical binding, and the
-   conservative closure check that makes a `for (let ...)` containing a `for`/`of`,
-   `try`, or labeled statement decline.
+2. The rest of control flow: `break`/`continue` that escapes a `try` (the
+   abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
+   `jump` completion record), a `switch` case that declares a lexical binding, and
+   the conservative closure check that makes a `for (let ...)` containing a
+   `for`/`of`, `try`, or labeled statement decline.
 3. ES modules and the loader: static imports and native reexports have a hybrid
    wrapper now. Locally declared exports, the module descriptor (`imports`,
    `exports`, `reexports`, `deps`, `exportSlots`), the module ops, and the shield

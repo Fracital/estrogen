@@ -648,9 +648,9 @@ impl Compiler {
     }
 
     fn compile_try(&mut self, stmt: &TryStatement<'_>) -> R<()> {
-        if stmt.finalizer.is_some() {
-            return Err(Unsupported("try/finally"));
-        }
+        // A return that leaves a try while a for-of iterator is still open needs
+        // multi-iterator unwinding that is not ported; decline for both the
+        // catch and finally forms.
         if contains_return_stmt(&stmt.block.body)
             && self
                 .fns
@@ -666,35 +666,63 @@ impl Compiler {
         {
             return Err(Unsupported("return inside try in iterated loop"));
         }
-        let catch = stmt
-            .handler
-            .as_ref()
-            .ok_or(Unsupported("try without catch"))?;
-        // A break or continue that exits this try needs a matching POP_HANDLER.
-        // Restrict this first slice to abrupt exits via return and throw.
-        if contains_loop_jump(&stmt.block.body) {
-            return Err(Unsupported("break or continue across try/catch"));
+        let catch = stmt.handler.as_ref();
+        let finalizer = stmt.finalizer.as_ref();
+        if catch.is_none() && finalizer.is_none() {
+            return Err(Unsupported("try without catch or finally"));
         }
-        let catch_target = self.emit_jump("PUSH_HANDLER");
-        self.compile_block(&stmt.block.body)?;
-        self.emit0("POP_HANDLER");
-        let after_catch = self.emit_jump("JMP");
-        self.patch_here(catch_target);
+        // A break or continue that escapes the try needs the ABRUPT_JUMP
+        // trampoline, which is not emitted yet. Decline when any of the block,
+        // catch, or finally bodies carries one. A jump that stays inside the try
+        // (targeting a loop nested within it) is handled by that loop.
+        if contains_loop_jump(&stmt.block.body)
+            || catch.is_some_and(|handler| contains_loop_jump(&handler.body.body))
+            || finalizer.is_some_and(|block| contains_loop_jump(&block.body))
+        {
+            return Err(Unsupported("break or continue across try"));
+        }
 
-        // The handler enters after unwinding the try block. An exception is
-        // left on the stack, ready to initialize the optional catch binding.
-        self.open_scope();
-        if let Some(parameter) = &catch.param {
-            let name = binding_identifier(&parameter.pattern)?;
-            let slot = self.add_local(name.name.as_str());
-            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
-            self.emit1("INIT_SLOT", pack_addr(0, slot));
+        // `finally` pushes a handler that stays live through the body and the
+        // catch, so an abrupt completion routes its completion record through
+        // the finally block before leaving.
+        let finally_handler = finalizer.map(|_| self.emit_jump("PUSH_FINALLY"));
+
+        if let Some(catch) = catch {
+            let catch_target = self.emit_jump("PUSH_HANDLER");
+            self.compile_block(&stmt.block.body)?;
+            self.emit0("POP_HANDLER");
+            let after_catch = self.emit_jump("JMP");
+            self.patch_here(catch_target);
+
+            // The handler enters after unwinding the try block. An exception is
+            // left on the stack, ready to initialize the optional catch binding.
+            self.open_scope();
+            if let Some(parameter) = &catch.param {
+                let name = binding_identifier(&parameter.pattern)?;
+                let slot = self.add_local(name.name.as_str());
+                self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
+                self.emit1("INIT_SLOT", pack_addr(0, slot));
+            } else {
+                self.emit0("POP");
+            }
+            self.compile_scope_body(&catch.body.body, false)?;
+            self.close_scope();
+            self.patch_here(after_catch);
         } else {
-            self.emit0("POP");
+            self.compile_block(&stmt.block.body)?;
         }
-        self.compile_scope_body(&catch.body.body, false)?;
-        self.close_scope();
-        self.patch_here(after_catch);
+
+        if let (Some(finally_handler), Some(finalizer)) = (finally_handler, finalizer) {
+            // Normal completion: drop the finally handler, record a normal
+            // completion, and fall into the finally body. An abrupt completion
+            // jumped here with its own record already pushed.
+            self.emit0("POP_HANDLER");
+            self.emit0("PUSH_COMPLETION_NORMAL");
+            self.patch_here(finally_handler);
+            self.compile_block(&finalizer.body)?;
+            let end = self.emit_jump("END_FINALLY");
+            self.patch_here(end);
+        }
         Ok(())
     }
 
