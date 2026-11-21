@@ -824,9 +824,9 @@ impl Compiler {
         // trampoline, which is not emitted yet. Decline when any of the block,
         // catch, or finally bodies carries one. A jump that stays inside the try
         // (targeting a loop nested within it) is handled by that loop.
-        if contains_loop_jump(&stmt.block.body)
-            || catch.is_some_and(|handler| contains_loop_jump(&handler.body.body))
-            || finalizer.is_some_and(|block| contains_loop_jump(&block.body))
+        if escaping_jump_in(&stmt.block.body)
+            || catch.is_some_and(|handler| escaping_jump_in(&handler.body.body))
+            || finalizer.is_some_and(|block| escaping_jump_in(&block.body))
         {
             return Err(Unsupported("break or continue across try"));
         }
@@ -3036,34 +3036,65 @@ fn contains_return_stmt(stmts: &[Statement<'_>]) -> bool {
     })
 }
 
-fn contains_loop_jump(stmts: &[Statement<'_>]) -> bool {
-    stmts.iter().any(|stmt| match stmt {
-        Statement::BreakStatement(_) | Statement::ContinueStatement(_) => true,
-        Statement::BlockStatement(block) => contains_loop_jump(&block.body),
+/// Whether a statement list holds a `break`/`continue` that would leave it,
+/// i.e. one not caught by a loop or `switch` nested inside the list. A jump that
+/// targets an inner loop stays inside and is handled by that loop, so it does
+/// not count. A labeled jump counts conservatively, because its target label may
+/// sit outside the list and the VM does not route a labeled jump across a
+/// `finally` yet.
+fn escaping_jump_in(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(|stmt| escaping_jump_stmt(stmt, false, false))
+}
+
+fn escaping_jump_stmt(stmt: &Statement<'_>, break_bound: bool, continue_bound: bool) -> bool {
+    match stmt {
+        // A labeled jump may target a label outside the scanned region; treat it
+        // as escaping. An unlabeled jump escapes only when no enclosing loop or
+        // switch inside the region catches it.
+        Statement::BreakStatement(s) => s.label.is_some() || !break_bound,
+        Statement::ContinueStatement(s) => s.label.is_some() || !continue_bound,
+        Statement::BlockStatement(block) => block
+            .body
+            .iter()
+            .any(|s| escaping_jump_stmt(s, break_bound, continue_bound)),
         Statement::IfStatement(s) => {
-            contains_loop_jump(std::slice::from_ref(&s.consequent))
+            escaping_jump_stmt(&s.consequent, break_bound, continue_bound)
                 || s.alternate
                     .as_ref()
-                    .is_some_and(|s| contains_loop_jump(std::slice::from_ref(s)))
+                    .is_some_and(|a| escaping_jump_stmt(a, break_bound, continue_bound))
         }
-        Statement::WhileStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
-        Statement::DoWhileStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
-        Statement::ForStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
-        Statement::SwitchStatement(s) => s
-            .cases
-            .iter()
-            .any(|case| contains_loop_jump(&case.consequent)),
+        Statement::LabeledStatement(s) => escaping_jump_stmt(&s.body, break_bound, continue_bound),
+        // A loop binds both break and continue for the statements inside it.
+        Statement::WhileStatement(s) => escaping_jump_stmt(&s.body, true, true),
+        Statement::DoWhileStatement(s) => escaping_jump_stmt(&s.body, true, true),
+        Statement::ForStatement(s) => escaping_jump_stmt(&s.body, true, true),
+        Statement::ForOfStatement(s) => escaping_jump_stmt(&s.body, true, true),
+        Statement::ForInStatement(s) => escaping_jump_stmt(&s.body, true, true),
+        // A switch binds break but not continue.
+        Statement::SwitchStatement(s) => s.cases.iter().any(|case| {
+            case.consequent
+                .iter()
+                .any(|st| escaping_jump_stmt(st, true, continue_bound))
+        }),
         Statement::TryStatement(s) => {
-            contains_loop_jump(&s.block.body)
-                || s.handler
-                    .as_ref()
-                    .is_some_and(|h| contains_loop_jump(&h.body.body))
-                || s.finalizer
-                    .as_ref()
-                    .is_some_and(|b| contains_loop_jump(&b.body))
+            s.block
+                .body
+                .iter()
+                .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
+                || s.handler.as_ref().is_some_and(|h| {
+                    h.body
+                        .body
+                        .iter()
+                        .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
+                })
+                || s.finalizer.as_ref().is_some_and(|b| {
+                    b.body
+                        .iter()
+                        .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
+                })
         }
         _ => false,
-    })
+    }
 }
 
 fn pack_addr(depth: usize, index: usize) -> i64 {

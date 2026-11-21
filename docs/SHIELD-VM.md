@@ -328,7 +328,10 @@ Falls back (declines, so the literal and name passes run instead):
   reexports work, but the VM's full module loader is not ported, so executable
   exports still take the fallback.
 - A `break` or `continue` that escapes a `try` (its block, catch, or finally),
-  which needs the abrupt-jump trampoline that is not emitted yet; a `return` that
+  which needs the abrupt-jump trampoline that is not emitted yet. A jump that
+  targets a loop or `switch` nested inside the try stays inside it and compiles;
+  only a jump that would leave the try declines, and a labeled jump declines
+  conservatively. A `return` that
   leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
   declares a lexical binding; and a labeled jump that would close more than one
   `for`/`of` iterator at once.

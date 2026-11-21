@@ -321,6 +321,15 @@ const CONTROL: &[&str] = &[
     "function f() { let x = 5; switch (x) { case 5: let x = 99; return x; default: return -1; } } f()",
     // a case-scoped let is in TDZ for a case that does not declare it
     "function f(n) { switch (n) { case 1: return 'a'; case 2: let v = 7; return v; } } [f(1), f(2)]",
+    // a break that targets a loop nested inside the try does not escape it, so
+    // the try compiles even with a finally present
+    "let o = []; function f() { try { for (let i = 0; i < 5; i++) { if (i === 2) break; o.push(i); } } finally { o.push('f'); } return o; } f()",
+    // a continue to an inner loop inside a try/finally also stays inside
+    "let s = 0; function f() { try { for (let i = 0; i < 4; i++) { if (i % 2 === 0) continue; s += i; } } finally { s += 100; } return s; } f()",
+    // a switch break inside a try block stays inside the try
+    "function f() { let r = ''; try { switch (2) { case 2: r += 'a'; break; default: r += 'b'; } } finally { r += 'z'; } return r; } f()",
+    // an inner loop with break inside a plain try/catch
+    "function f() { let t = 0; try { for (const x of [1, 2, 3]) { if (x === 3) break; t += x; } } catch (e) { t = -1; } return t; } f()",
 ];
 
 /// Expression-surface mutation: compound, logical, and update assignment to a
