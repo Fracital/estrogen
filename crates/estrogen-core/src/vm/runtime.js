@@ -86,7 +86,8 @@
 		OP_SUPER_GET_DYN = _n++, OP_SUPER_SET = _n++, OP_SUPER_SET_DYN = _n++, OP_SUPER_CALL = _n++,
 		OP_SUPER_CALL_APPLY = _n++, OP_GET_PRIVATE = _n++, OP_SET_PRIVATE = _n++, OP_HAS_PRIVATE = _n++,
 		OP_INIT_PRIVATE = _n++, OP_MODULE_INIT = _n++, OP_IMPORT_BINDING = _n++, OP_EXPORT_BINDING = _n++,
-		OP_DYNAMIC_IMPORT = _n++, OP_IMPORT_META = _n++, OP_AWAIT_TOP = _n++, OP_SET_COMPLETION = _n++;
+		OP_DYNAMIC_IMPORT = _n++, OP_IMPORT_META = _n++, OP_AWAIT_TOP = _n++, OP_SET_COMPLETION = _n++,
+		OP_LOAD_ARGUMENTS = _n++;
 
 	// A constant pool entry may be a tagged object for a value JSON cannot carry
 	// directly. The compiler writes these; decodeConst reverses them.
@@ -120,6 +121,15 @@
 	}
 	const TDZ_READ = 'Cannot access a lexical binding before initialization';
 	const NativeRegExp = /(?:)/.constructor;
+	// Build a real arguments object from the call arguments. Applying a strict
+	// helper with no parameters yields an unmapped arguments object, so the
+	// result has the right length, indices, and iterator and is not an Array.
+	function buildArguments(args) {
+		'use strict';
+		return function () {
+			return arguments;
+		}.apply(null, args);
+	}
 
 	// Opcode handlers, indexed by stable opcode index. Each receives
 	// (frame, arg, consts, functions, globals, createClosure, callValue, doReturn)
@@ -213,6 +223,22 @@
 			kind: 0,
 			init: true,
 		};
+	};
+	// Push one call argument by index (undefined past the end). Used by default
+	// parameters, which test the loaded value against undefined.
+	HANDLERS[OP_LOAD_ARG] = function (frame, arg) {
+		frame.stack.push(frame.args[arg]);
+	};
+	// Push a fresh array of the call arguments from `arg` onward. Backs a rest
+	// parameter (`...xs`), which is a real Array.
+	HANDLERS[OP_LOAD_ARGS_FROM] = function (frame, arg) {
+		frame.stack.push(frame.args.slice(arg));
+	};
+	// Push a genuine (unmapped) arguments object built from the call arguments.
+	// A fresh arguments object is array-like with the right length, indices, and
+	// iterator, and is not an Array, matching a strict function's `arguments`.
+	HANDLERS[OP_LOAD_ARGUMENTS] = function (frame) {
+		frame.stack.push(buildArguments(frame.args));
 	};
 	// Store a freshly made closure into a hoisted function-declaration slot.
 	HANDLERS[OP_DEF_FUNC_SLOT] = function (frame, arg) {

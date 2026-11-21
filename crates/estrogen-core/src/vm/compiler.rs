@@ -46,6 +46,7 @@ use oxc_ast::ast::{
     SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, TryStatement,
     UnaryOperator, UpdateOperator, VariableDeclarationKind,
 };
+use oxc_ast_visit::Visit;
 
 use super::layout::Layout;
 use super::program::{ConstPool, FunctionDef, Program as VmProgram};
@@ -199,8 +200,6 @@ impl Compiler {
         is_arrow: bool,
         is_async: bool,
     ) -> R<usize> {
-        let param_names = parse_params(params)?;
-        let num_params = param_names.len();
         self.fns.push(FnState {
             code: Vec::new(),
             loops: Vec::new(),
@@ -212,9 +211,22 @@ impl Compiler {
             is_async,
         });
         self.scopes.push(Scope::default());
-        for (arg_index, pn) in param_names.iter().enumerate() {
-            let slot = self.add_local(pn);
-            self.emit1("BIND_PARAM", ((slot as i64) << 8) | (arg_index as i64));
+        let num_params = self.compile_params(params)?;
+        // A non-arrow function that references `arguments` binds a local
+        // arguments object from the call args. Arrows inherit it through the
+        // scope chain, so they never bind their own.
+        if !is_arrow {
+            if let FnBody::Block(stmts) = &body {
+                if references_arguments(stmts) && !params_bind_arguments(params) {
+                    if body_binds_arguments(stmts) {
+                        return Err(Unsupported("arguments shadowed by a local binding"));
+                    }
+                    let slot = self.add_local("arguments");
+                    self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+                    self.emit0("LOAD_ARGUMENTS");
+                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+            }
         }
         if let FnBody::Block(stmts) = &body {
             self.predeclare_vars(stmts)?;
@@ -238,6 +250,59 @@ impl Compiler {
             is_arrow,
             num_params,
         }))
+    }
+
+    /// Bind the formal parameters into the fresh function scope and return the
+    /// function's `length` (the count of leading plain parameters, stopping at
+    /// the first default or rest, matching native `Function.prototype.length`).
+    fn compile_params(&mut self, params: &FormalParameters<'_>) -> R<usize> {
+        if params.items.len() > 0xff {
+            return Err(Unsupported("too many parameters"));
+        }
+        let mut length = 0usize;
+        let mut counting = true;
+        for (i, item) in params.items.iter().enumerate() {
+            let name = binding_identifier(&item.pattern)?.name.as_str().to_string();
+            let slot = self.add_local(&name);
+            match &item.initializer {
+                None => {
+                    if counting {
+                        length += 1;
+                    }
+                    self.emit1("BIND_PARAM", ((slot as i64) << 8) | (i as i64));
+                }
+                Some(init) => {
+                    // A default runs its initializer only when the argument is
+                    // missing, that is strictly equal to undefined.
+                    counting = false;
+                    self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+                    self.emit1("LOAD_ARG", i as i64);
+                    self.emit0("DUP");
+                    self.emit0("PUSH_UNDEF");
+                    self.emit0("SEQ");
+                    let use_default = self.emit_jump("JMP_IF_TRUE");
+                    let done = self.emit_jump("JMP");
+                    self.patch_here(use_default);
+                    self.emit0("POP");
+                    self.compile_expr(init)?;
+                    self.patch_here(done);
+                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+            }
+        }
+        if let Some(rest) = &params.rest {
+            // A rest parameter binds an Array of the arguments past the plain
+            // ones. A destructured rest target declines through binding_identifier.
+            let name = binding_identifier(&rest.rest.argument)?
+                .name
+                .as_str()
+                .to_string();
+            let slot = self.add_local(&name);
+            self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+            self.emit1("LOAD_ARGS_FROM", params.items.len() as i64);
+            self.emit1("INIT_SLOT", pack_addr(0, slot));
+        }
+        Ok(length)
     }
 
     fn add_function(&mut self, def: FunctionDef) -> usize {
@@ -1201,21 +1266,44 @@ impl Compiler {
                 if func.generator {
                     return Err(Unsupported("generator function expression"));
                 }
-                if func.id.is_some() {
-                    return Err(Unsupported("named function expression"));
-                }
                 let fb = func
                     .body
                     .as_ref()
                     .ok_or(Unsupported("function without a body"))?;
-                let idx = self.compile_function(
-                    &func.params,
-                    FnBody::Block(&fb.statements),
-                    None,
-                    false,
-                    func.r#async,
-                )?;
-                self.emit1("MAKE_FUNC", idx as i64);
+                match &func.id {
+                    None => {
+                        let idx = self.compile_function(
+                            &func.params,
+                            FnBody::Block(&fb.statements),
+                            None,
+                            false,
+                            func.r#async,
+                        )?;
+                        self.emit1("MAKE_FUNC", idx as i64);
+                    }
+                    Some(id) => {
+                        // A named function expression binds its own name to the
+                        // function, visible only inside the body. A wrapper scope
+                        // holds the slot; the closure captures that scope, so the
+                        // name resolves there even after the scope leaves the
+                        // chain. The outer scope never sees the name.
+                        let name = id.name.as_str().to_string();
+                        self.open_scope();
+                        let slot = self.add_local(&name);
+                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 2);
+                        let idx = self.compile_function(
+                            &func.params,
+                            FnBody::Block(&fb.statements),
+                            Some(name),
+                            false,
+                            func.r#async,
+                        )?;
+                        self.emit1("MAKE_FUNC", idx as i64);
+                        self.emit0("DUP");
+                        self.emit1("INIT_SLOT", pack_addr(0, slot));
+                        self.close_scope();
+                    }
+                }
             }
             Expression::ClassExpression(class) => {
                 if let Some(name) = &class.id {
@@ -1992,7 +2080,6 @@ impl Compiler {
         match self.resolve(name) {
             Some((depth, slot)) => self.emit1("LOAD_SLOT", pack_addr(depth, slot)),
             None => {
-                self.reject_arguments(name)?;
                 let i = self.consts.add_str(name);
                 self.emit1("LOAD_GLOBAL", i as i64);
             }
@@ -2014,21 +2101,9 @@ impl Compiler {
         match self.resolve(name) {
             Some((depth, slot)) => self.emit1("TYPEOF_SLOT", pack_addr(depth, slot)),
             None => {
-                self.reject_arguments(name)?;
                 let i = self.consts.add_str(name);
                 self.emit1("TYPEOF_GLOBAL", i as i64);
             }
-        }
-        Ok(())
-    }
-
-    /// `arguments` inside a function is the arguments object, which estrogen does
-    /// not model, so a function that reads it falls back. At the module top level
-    /// `arguments` is a genuine free name (a `ReferenceError`), so it is left as a
-    /// global, matching native.
-    fn reject_arguments(&self, name: &str) -> R<()> {
-        if name == "arguments" && !self.fns.last().expect("frame").is_module_main {
-            return Err(Unsupported("arguments object"));
         }
         Ok(())
     }
@@ -2445,21 +2520,59 @@ fn binding_identifier<'a, 'b>(
 
 /// The plain identifier names of a parameter list, or [`Unsupported`] for rest,
 /// default, or destructured parameters.
-fn parse_params(params: &FormalParameters<'_>) -> R<Vec<String>> {
-    if params.rest.is_some() {
-        return Err(Unsupported("rest parameter"));
+/// Whether a function body references `arguments` as a free name. It matches an
+/// identifier reference only, so `obj.arguments` (a property) and `{ arguments:
+/// 1 }` (a key) do not count. Nested function bodies are not pruned, so a nested
+/// function's own `arguments` can raise this; that only makes the enclosing
+/// function build an unused arguments object, which is harmless.
+fn references_arguments(stmts: &[Statement<'_>]) -> bool {
+    struct Scan {
+        found: bool,
     }
-    if params.items.len() > 0xff {
-        return Err(Unsupported("too many parameters"));
-    }
-    let mut names = Vec::with_capacity(params.items.len());
-    for item in &params.items {
-        if item.initializer.is_some() {
-            return Err(Unsupported("default parameter"));
+    impl<'a> Visit<'a> for Scan {
+        fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
+            if it.name == "arguments" {
+                self.found = true;
+            }
         }
-        names.push(binding_identifier(&item.pattern)?.name.as_str().to_string());
     }
-    Ok(names)
+    let mut scan = Scan { found: false };
+    for stmt in stmts {
+        scan.visit_statement(stmt);
+    }
+    scan.found
+}
+
+/// Whether a parameter is named `arguments`, so the parameter itself binds the
+/// name and no arguments object is synthesized.
+fn params_bind_arguments(params: &FormalParameters<'_>) -> bool {
+    let item = params
+        .items
+        .iter()
+        .any(|p| binding_identifier(&p.pattern).is_ok_and(|id| id.name == "arguments"));
+    let rest = params.rest.as_ref().is_some_and(|r| {
+        binding_identifier(&r.rest.argument).is_ok_and(|id| id.name == "arguments")
+    });
+    item || rest
+}
+
+/// Whether a function body declares `arguments` with a `var`, lexical, function,
+/// or class binding. Such a binding would shadow a synthesized arguments object,
+/// which the slot model does not express, so the function declines instead.
+fn body_binds_arguments(stmts: &[Statement<'_>]) -> bool {
+    let mut vars = Vec::new();
+    if collect_function_vars(stmts, &mut vars).is_ok() && vars.iter().any(|n| n == "arguments") {
+        return true;
+    }
+    stmts.iter().any(|s| match s {
+        Statement::FunctionDeclaration(f) => f.id.as_ref().is_some_and(|id| id.name == "arguments"),
+        Statement::ClassDeclaration(c) => c.id.as_ref().is_some_and(|id| id.name == "arguments"),
+        Statement::VariableDeclaration(d) if !matches!(d.kind, VariableDeclarationKind::Var) => d
+            .declarations
+            .iter()
+            .any(|dc| binding_identifier(&dc.id).is_ok_and(|id| id.name == "arguments")),
+        _ => false,
+    })
 }
 
 /// Whether a block's statement list introduces a lexical scope (a `let`/`const`,

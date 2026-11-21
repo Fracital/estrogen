@@ -352,6 +352,37 @@ const MUTATION: &[&str] = &[
     "const a = { b: { c: () => 'deep' } }; a.b?.c?.()",
 ];
 
+/// The wider function surface: default and rest parameters, the arguments
+/// object, and named function expressions. Each case's last expression is the
+/// value compared against native eval.
+const FUNCTION_SURFACE: &[&str] = &[
+    // default parameters, including one that reads an earlier parameter
+    "function f(a, b = 10) { return a + b; } [f(1), f(1, 2), f(1, undefined)]",
+    "const g = (x, y = x * 2) => x + y; [g(3), g(3, 1)]",
+    "function f(a, b = a + 1) { return [a, b]; } [f(5), f(5, 0)]",
+    // native length stops at the first default or rest
+    "function f(a, b = 1, c) { return f.length; } f()",
+    // rest parameters bind a real Array
+    "function sum(...xs) { let t = 0; for (const x of xs) t += x; return t; } [sum(), sum(1, 2, 3)]",
+    "function h(a, ...rest) { return [a, rest.length, Array.isArray(rest)]; } [h(1), h(1, 2, 3)]",
+    "const r = (...x) => x.length; [r(), r(1, 2), r.length]",
+    // the arguments object: length, indexing, iteration, spread, and that it is
+    // a genuine arguments object rather than an Array
+    "function f() { return arguments.length; } [f(), f(1, 2, 3)]",
+    "function f() { let t = 0; for (let i = 0; i < arguments.length; i++) t += arguments[i]; return t; } f(1, 2, 3, 4)",
+    "function f() { return [Array.isArray(arguments), Object.prototype.toString.call(arguments)]; } f(1)",
+    "function f() { return [...arguments]; } f(1, 2, 3)",
+    // an arrow shares the enclosing function's arguments through the scope chain
+    "function f() { const g = () => arguments[0] + arguments.length; return g(); } f(40, 2)",
+    // named function expressions: the name is bound to the function in its body
+    "const fact = function self(n) { return n <= 1 ? 1 : n * self(n - 1); }; fact(5)",
+    "const f = function g() { return typeof g; }; f()",
+    // the inner name does not leak to the outer scope
+    "const f = function g() { return 1; }; typeof g",
+    // the function expression's own name wins over the inferred binding name
+    "const f = function named() { return named.name; }; f()",
+];
+
 #[test]
 fn vm_bytecode_matches_native_eval() {
     if !node_available("vm_bytecode_matches_native_eval") {
@@ -366,6 +397,7 @@ fn vm_bytecode_matches_native_eval() {
         .chain(CONTROL)
         .chain(CLASSES)
         .chain(MUTATION)
+        .chain(FUNCTION_SURFACE)
     {
         let json = compile_module_json(src, "vm-node-seed")
             .unwrap_or_else(|| panic!("supported source did not compile: {src}"));
@@ -483,14 +515,13 @@ fn unsupported_constructs_decline() {
         "class C { static { this.x = 1; } }",
         "class C { async method() {} }",
         "class C { *method() {} }",
-        "class C { constructor(...args) {} }",
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
         "const [a, b] = [1, 2]; a",
+        "function fd({ a }) { return a; } fd({ a: 1 })",
+        "const fa = ([x]) => x; fa([7])",
+        "function fr(...{ length }) { return length; } fr(1, 2)",
         "function* gen() { yield 1; }",
-        "const g = (...rest) => rest.length; g(1, 2)",
-        "function withArgs() { return arguments.length; } withArgs(1, 2)",
-        "const named = function self() { return self; };",
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",
         "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",
