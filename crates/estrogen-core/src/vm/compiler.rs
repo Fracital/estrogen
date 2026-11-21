@@ -80,6 +80,7 @@ pub fn compile_program(program: &Program<'_>, seed: &str, known_module: bool) ->
         uses_import_meta: false,
         uses_dynamic_import: false,
         exports: Vec::new(),
+        keep_names: names_observable(program),
     };
     let main_index = c.compile_main(program, known_module)?;
     Ok(VmProgram {
@@ -196,6 +197,12 @@ struct Compiler {
     uses_import_meta: bool,
     uses_dynamic_import: bool,
     exports: Vec<String>,
+    /// Whether the chunk observes a callable's name. When false, every function
+    /// and class name is dropped from the emitted program, so a decoded program
+    /// carries no original identifier and `fn.name`/`constructor.name` read as
+    /// the empty string, which nothing observes. When true, names are kept so
+    /// reflection keeps working.
+    keep_names: bool,
 }
 
 impl Compiler {
@@ -404,7 +411,13 @@ impl Compiler {
         Ok(())
     }
 
-    fn add_function(&mut self, def: FunctionDef) -> usize {
+    fn add_function(&mut self, mut def: FunctionDef) -> usize {
+        // When the chunk never observes a callable name, drop it: a decoded
+        // program then carries no original identifier, and `fn.name` reads as the
+        // empty string, which nothing in the chunk looks at.
+        if !self.keep_names {
+            def.name = None;
+        }
         let idx = self.functions.len();
         self.functions.push(def);
         idx
@@ -631,8 +644,11 @@ impl Compiler {
                 _ => return Err(Unsupported("class accessor or private member")),
             }
         }
+        // Drop the class name too when nothing in the chunk observes a callable
+        // name, so the decoded descriptor carries no original identifier and
+        // `constructor.name` reads as the empty string.
         let descriptor = json!({
-            "name": name,
+            "name": if self.keep_names { name } else { "" },
             "bind": bind,
             "ctor": constructor,
             "methods": methods,
@@ -3469,6 +3485,43 @@ fn export_const_declaration<'a, 'b>(
 
 /// The plain identifier names of a parameter list, or [`Unsupported`] for rest,
 /// default, or destructured parameters.
+/// Whether the chunk observes a callable's name, so dropping function and class
+/// names would change what it sees. It is true when any `.name` or `.constructor`
+/// member access, any `"name"` or `"constructor"` string (a computed access like
+/// `obj["name"]`), or `new.target` appears. When it is false, every function and
+/// class name is dropped from the emitted program, so a decoded program carries
+/// no original identifier and `fn.name`/`constructor.name` read as the empty
+/// string, which nothing in the chunk looks at. The scan is deliberately broad:
+/// a false positive keeps a name, which is only less concealment, never wrong.
+/// This mirrors the mangle pass's `reads_callable_names`, with `.constructor`
+/// added because the VM also drops the class descriptor name.
+fn names_observable(program: &Program<'_>) -> bool {
+    struct Scan {
+        found: bool,
+    }
+    impl<'a> Visit<'a> for Scan {
+        fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
+            if it.property.name == "name" || it.property.name == "constructor" {
+                self.found = true;
+            }
+            oxc_ast_visit::walk::walk_static_member_expression(self, it);
+        }
+        fn visit_string_literal(&mut self, it: &oxc_ast::ast::StringLiteral<'a>) {
+            if matches!(it.value.as_str(), Some("name") | Some("constructor")) {
+                self.found = true;
+            }
+        }
+        fn visit_new_target(&mut self, _it: &oxc_ast::ast::NewTarget) {
+            // `new.target` is the running constructor, so the chunk can reach its
+            // name. `import.meta` is a separate node and does not count.
+            self.found = true;
+        }
+    }
+    let mut scan = Scan { found: false };
+    scan.visit_program(program);
+    scan.found
+}
+
 /// Whether a function body references `arguments` as a free name. It matches an
 /// identifier reference only, so `obj.arguments` (a property) and `{ arguments:
 /// 1 }` (a key) do not count. Nested function bodies are not pruned, so a nested

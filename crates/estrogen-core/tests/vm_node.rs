@@ -1033,6 +1033,96 @@ fn vm_function_chunk_leaks_no_plaintext() {
     );
 }
 
+/// A chunk that never observes a callable name carries no function or class
+/// name in its program, so decrypting the program still reveals no original
+/// identifier. A chunk that reads `.name`, `.constructor`, a `"name"` string, or
+/// `new.target` keeps the names so reflection stays correct.
+#[test]
+fn vm_drops_callable_names_only_when_unobserved() {
+    // Unobserved: no `.name`, `"name"`, `.constructor`, or `new.target`. The
+    // program carries no `"n"` key and none of the original identifiers.
+    let dropped = [
+        ("function alpha(x) { return x + 1; } function beta(y) { return alpha(y) * 2; } beta(20)",
+         &["alpha", "beta"][..]),
+        ("const sum = (a, b) => a + b; const twice = (n) => sum(n, n); twice(21)",
+         &["sum", "twice"][..]),
+        ("class Point { constructor(x) { this.x = x; } read() { return this.x; } } new Point(42).read()",
+         &["Point"][..]),
+    ];
+    for (src, idents) in dropped {
+        let json = compile_module_json(src, "name-drop-seed")
+            .unwrap_or_else(|| panic!("supported source did not VM-compile: {src}"));
+        assert!(
+            !json.contains("\"n\":"),
+            "a function name survived though nothing observes it: {src}\n{json}"
+        );
+        for ident in idents {
+            assert!(
+                !json.contains(ident),
+                "the identifier {ident} leaked into the program: {src}\n{json}"
+            );
+        }
+    }
+
+    // Observed: each reads a callable name, so the name stays in the program and
+    // the identifier is present.
+    let kept = [
+        ("function alpha(x) { return x; } alpha.name", "alpha"),
+        ("function beta() {} [beta.name, beta()]", "beta"),
+        (
+            "function gamma() { return gamma['name']; } gamma()",
+            "gamma",
+        ),
+        (
+            "class Widget { who() { return new.target; } } new Widget().who()",
+            "Widget",
+        ),
+        ("class Gadget {} Gadget.name", "Gadget"),
+    ];
+    for (src, name) in kept {
+        let json = compile_module_json(src, "name-keep-seed")
+            .unwrap_or_else(|| panic!("supported source did not VM-compile: {src}"));
+        assert!(
+            json.contains(name),
+            "the name {name} was dropped though the chunk observes a callable name: {src}\n{json}"
+        );
+    }
+
+    // Node parity: dropping names changes nothing the dropped chunks compute, so
+    // each still matches native eval of the same source.
+    if !node_available("vm_drops_callable_names_only_when_unobserved") {
+        return;
+    }
+    let mut cases = String::from("const CASES = [\n");
+    for (src, _) in dropped {
+        let json = compile_module_json(src, "name-drop-seed").unwrap();
+        let src_lit = serde_json::to_string(src).unwrap();
+        cases.push_str(&format!("  {{ src: {src_lit}, program: {json} }},\n"));
+    }
+    cases.push_str("];\n");
+    let script = format!(
+        "const __mk = {runtime};\n\
+         {cases}\n\
+         const fails = [];\n\
+         for (const c of CASES) {{\n\
+         \tlet vm, nat;\n\
+         \ttry {{ vm = __mk(c.program)(); }} catch (e) {{ vm = {{ __err: e && e.constructor && e.constructor.name }}; }}\n\
+         \ttry {{ nat = (0, eval)(c.src); }} catch (e) {{ nat = {{ __err: e && e.constructor && e.constructor.name }}; }}\n\
+         \tconst a = JSON.stringify(vm), b = JSON.stringify(nat);\n\
+         \tif (!(Object.is(vm, nat) || a === b)) fails.push(c.src + '  vm=' + a + '  native=' + b);\n\
+         }}\n\
+         if (fails.length) {{ console.error(fails.join('\\n')); process.exit(1); }}\n\
+         console.log('OK ' + CASES.length);\n",
+        runtime = runtime_iife(),
+    );
+    let (ok, stdout, stderr) = run_node(&script, "name-drop");
+    assert!(ok, "name-drop parity failed:\n{stderr}\n{stdout}");
+    assert!(
+        stdout.starts_with("OK "),
+        "unexpected node output: {stdout}"
+    );
+}
+
 /// The shipped VM runtime leaks no opcode name and no readable runtime
 /// identifier, and its body is one minified line. This is the obfuscation
 /// guarantee for the runtime itself, on top of the per-chunk canary scan.
