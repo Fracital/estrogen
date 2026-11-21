@@ -1501,20 +1501,6 @@ impl Compiler {
         if self.fns.last().expect("frame").is_generator {
             return Err(Unsupported("for-of or for-in in a generator"));
         }
-        // A nested for-of with an early return can throw from its IteratorClose
-        // while the outer iterator still needs closing. Defer that case until
-        // abrupt completion unwinding handles multiple iterators atomically.
-        if contains_return_stmt(std::slice::from_ref(body))
-            && self
-                .fns
-                .last()
-                .expect("frame")
-                .loops
-                .iter()
-                .any(|loop_state| loop_state.iterator.is_some())
-        {
-            return Err(Unsupported("return across nested iterators"));
-        }
         // The loop head is either a fresh binding declaration or an existing
         // assignment target. `for (let x of it)` declares a per-iteration
         // binding; `for (obj.k of it)`, `for (x of it)` with an outer `x`, and a
@@ -3319,9 +3305,13 @@ impl Compiler {
             .filter_map(|loop_state| loop_state.iterator)
             .filter(|iterator| iterator.handler_active)
             .collect();
-        if iterators.len() > 1 {
-            return Err(Unsupported("return across nested iterators"));
-        }
+        // Close each open for-of iterator innermost first. Popping a handler just
+        // before closing its iterator leaves every outer iterator handler live, so
+        // if an inner `return()` throws, the next outer handler catches it, closes
+        // its own iterator with the throw flag, and rethrows, which is what
+        // IteratorClose does for a nested abrupt return. No try/finally sits
+        // between the return and these iterators here: a return that crosses a
+        // finally while an iterator is open declines earlier in compile_try.
         for iterator in iterators.into_iter().rev() {
             self.emit0("POP_HANDLER");
             self.emit_close_iterator(iterator);

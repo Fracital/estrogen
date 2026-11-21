@@ -840,7 +840,6 @@ fn unsupported_constructs_decline() {
         "async function f() { for await (const x of []) {} }",
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",
-        "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",
         // a break or continue inside a finally that escapes it would abandon the
         // pending completion record, which is not ported, so it declines.
         "for (;;) { try { x(); } finally { continue; } }",
@@ -1045,6 +1044,59 @@ fn vm_module_context_matches_native() {
         let (ok_vm, stdout_vm, stderr_vm) = run_node(&transformed, &format!("module-vm-{i}"));
         assert!(ok_vm, "VM module failed: {stderr_vm}\n{output}");
         assert_eq!(stdout_vm, stdout_native, "module context changed: {source}");
+    }
+}
+
+/// A `return` that leaves more than one open `for-of` closes every iterator,
+/// innermost first, and matches native including the order of each iterator's
+/// `return()` side effect and the case where an inner `return()` throws (the
+/// throw propagates, and the outer iterator is still closed). Each source runs
+/// natively and as its VM chunk; the observed log, result, and error are
+/// compared.
+#[test]
+fn vm_return_across_nested_iterators_matches_native() {
+    if !node_available("vm_return_across_nested_iterators_matches_native") {
+        return;
+    }
+    // A manual iterable whose `return()` records a close and may throw, so the
+    // test sees the exact close order of a nested-loop early return.
+    let prelude = "import 'data:text/javascript,';\n\
+        function mk(tag, boom, log) {\n\
+        \tlet i = 0;\n\
+        \treturn { [Symbol.iterator]() { return this; },\n\
+        \t\tnext() { return i < 3 ? { value: tag + (i++), done: false } : { value: undefined, done: true }; },\n\
+        \t\treturn() { log.push('c' + tag); if (boom) throw new Error('boom' + tag); return { done: true }; } };\n\
+        }\n";
+    let cases = [
+        // Two nested for-of, early return: closes B then A, returns the value.
+        "const log = []; function f(){ for (const a of mk('A', false, log)) for (const b of mk('B', false, log)) if (b === 'B1') return a + b; return 'none'; } const r = f(); globalThis.__r = [log, r];",
+        // Inner return() throws: both iterators still close, the throw wins.
+        "const log = []; function f(){ for (const a of mk('A', false, log)) for (const b of mk('B', true, log)) if (b === 'B1') return a + b; return 'none'; } let r, e = null; try { r = f(); } catch (x) { e = x.message; } globalThis.__r = [log, r, e];",
+        // Three nested for-of, early return from the innermost.
+        "const log = []; function f(){ for (const a of mk('A', false, log)) for (const b of mk('B', false, log)) for (const c of mk('C', false, log)) if (c === 'C0') return a + b + c; return 'none'; } globalThis.__r = [log, f()];",
+    ];
+    for (i, source) in cases.iter().enumerate() {
+        let full = format!("{prelude}{source}");
+        let output = try_compile_chunk(
+            &full,
+            &Options {
+                seed: Some(b"vm-nested-return".to_vec()),
+                ..Options::default()
+            },
+        )
+        .expect("VM compile")
+        .unwrap_or_else(|| panic!("VM declined a nested-iterator return: {source}"));
+        assert!(output.contains("JSON.parse("), "not VM bytecode: {source}");
+        let native = format!("{full}\nconsole.log(JSON.stringify(globalThis.__r));");
+        let vm = format!("{output}\nconsole.log(JSON.stringify(globalThis.__r));");
+        let (ok_native, native_out, native_err) = run_node(&native, &format!("nested-native-{i}"));
+        assert!(ok_native, "native nested return failed: {native_err}");
+        let (ok_vm, vm_out, vm_err) = run_node(&vm, &format!("nested-vm-{i}"));
+        assert!(ok_vm, "VM nested return failed: {vm_err}");
+        assert_eq!(
+            vm_out, native_out,
+            "nested-iterator return behavior changed: {source}"
+        );
     }
 }
 
