@@ -21,7 +21,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast::AstKind;
 use oxc_mangler::{MangleOptions, MangleOptionsKeepNames, Mangler};
-use oxc_semantic::{AstNodes, Scoping, SemanticBuilder, SymbolId};
+use oxc_semantic::{AstNodes, NodeId, Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, Span};
 
 use crate::edit::{Edit, EditSet};
@@ -150,9 +150,43 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
             }
             AstKind::VariableDeclarator(decl) => {
                 if let Some(init) = &decl.init {
-                    // An initializer can be on a later `var` declaration for
-                    // the same symbol, not its first declaration.
-                    keep_inferred_name(&decl.id, init, &mut options);
+                    // A const/let/var bound to an anonymous arrow or function
+                    // infers its name from the binding, and keep_names keeps it,
+                    // so OXC leaves it readable. Rename it like a private
+                    // callable declaration when every use is a direct call,
+                    // nothing in the file observes a callable name, and it is not
+                    // exported. A class is left alone: an instance's
+                    // `constructor.name` is observable outside this file.
+                    let callable = matches!(
+                        init,
+                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                    ) && init.is_anonymous_function_definition();
+                    let symbol = if callable {
+                        if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                            id.symbol_id.get().filter(|symbol| {
+                                !reads_callable_names
+                                    && !declarator_is_exported(nodes, node.id())
+                                    && (has_module_syntax
+                                        || (explicitly_strict
+                                            && scoping.symbol_scope_id(*symbol) != root))
+                                    && scoping.symbol_redeclarations(*symbol).is_empty()
+                                    && uses_are_direct(nodes, scoping, *symbol, false)
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match (symbol, &decl.id) {
+                        (Some(symbol), BindingPattern::BindingIdentifier(id)) => {
+                            // Reserve the original so OXC does not hand it to
+                            // another symbol while allocating the fresh name.
+                            reserve_binding(Some(id), &mut options);
+                            fresh_renames.push((symbol, id.name.as_str()));
+                        }
+                        _ => keep_inferred_name(&decl.id, init, &mut options),
+                    }
                 }
             }
             AstKind::AssignmentPattern(pattern) => {
@@ -433,6 +467,16 @@ fn occurrence<'a>(
 
 /// Rename a callable only when every use is an immediate call or construction.
 /// Passing it as a value could let other code observe its original name.
+/// Whether a variable declarator sits directly under an `export` declaration,
+/// so its binding name is public and must keep its spelling. The declarator's
+/// parent is the `VariableDeclaration`; its grandparent is the export.
+fn declarator_is_exported(nodes: &AstNodes<'_>, declarator: NodeId) -> bool {
+    matches!(
+        nodes.parent_kind(nodes.parent_id(declarator)),
+        AstKind::ExportNamedDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
+    )
+}
+
 fn uses_are_direct(
     nodes: &AstNodes<'_>,
     scoping: &Scoping,
