@@ -301,8 +301,11 @@ falls back. The subset:
   top-level `await` compiles its main to the same driver, so the chunk evaluates
   to a promise. `AWAIT` and `AWAIT_TOP` carry the suspend; the driver and the
   synchronous loop share one handler stack.
-- Classes: a constructor, plain methods, static methods, instance or static
-  fields, and `static { ... }` blocks. `BUILD_CLASS` creates the methods and
+- Classes: a constructor, plain methods, static methods, async and generator
+  methods (instance or static), instance or static
+  fields, and `static { ... }` blocks. An async or generator method drives
+  through the same promise and generator machinery a standalone function uses, so
+  it returns a promise or an iterator. `BUILD_CLASS` creates the methods and
   binds the class, then runs the static fields and static blocks in source
   order, each with the class as `this`. A class binding resolves to a slot like
   any other name.
@@ -391,9 +394,11 @@ falls back. The subset:
 
 Falls back (declines, so the literal and name passes run instead):
 
-- A decorated class, a computed method, field, or accessor key, an `async` or
-  generator method, private class members, a computed super
-  member, and a spread in `super()`. Native
+- A decorated class, a computed method, field, or accessor key, private class
+  members, a computed super
+  member, and a spread in `super()`. An async or generator method whose own body
+  holds a handler across a `yield` declines the same way a standalone generator
+  does. Native
   static imports and reexports work, but the VM's full module loader is not
   ported, so a local export of a value computed in the VM beyond the simple
   cases takes the fallback.

@@ -294,6 +294,16 @@ const CLASSES: &[&str] = &[
     "class C { #a = 2; #b = this.#a * 3; get() { return this.#b; } } new C().get()",
     // a private field in a nested closure inside a method
     "class C { #x = 4; make() { return () => this.#x * 2; } } new C().make()()",
+    // a generator method returns an iterator, spread to a value
+    "class K { *g() { yield 1; yield 2; yield 3; } } [...new K().g()]",
+    // a generator method reads this across yields
+    "class K { constructor() { this.n = 5; } *g() { yield this.n; yield this.n + 1; } } [...new K().g()]",
+    // a static generator method
+    "class K { static *g() { yield 7; yield 8; } } [...K.g()]",
+    // a generator method is non-enumerable on the prototype and is a function
+    "class K { *g() {} } const d = Object.getOwnPropertyDescriptor(K.prototype, 'g'); [d.enumerable, d.writable, typeof d.value, typeof new K().g().next]",
+    // a generator method inherited through extends
+    "class A { *g() { yield 1; yield 2; } } class B extends A {} [...new B().g()]",
 ];
 
 /// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
@@ -688,6 +698,16 @@ const ASYNC_CASES: &[&str] = &[
     "async function* range(n) { let i = 0; while (i < n) { yield await Promise.resolve(i * 10); i++; } } const it = range(3); (async () => { const out = []; let x; while (!(x = await it.next()).done) out.push(x.value); return out; })()",
     // a rejection awaited in the body propagates out of next()
     "async function* g() { yield await Promise.reject(new Error('boom')); } const it = g(); (async () => { try { await it.next(); return 'no'; } catch (e) { return 'caught ' + e.message; } })()",
+    // an async class method returns a promise of its awaited result
+    "class K { async a() { return await Promise.resolve(2) * 21; } } new K().a()",
+    // an async method reads this after an await
+    "class K { constructor() { this.n = 20; } async a() { return this.n + (await Promise.resolve(1)); } } new K().a()",
+    // a static async method
+    "class K { static async sa() { return (await Promise.resolve(3)) + 1; } } K.sa()",
+    // an async method calls super.method() in a derived class
+    "class A { async base() { return await Promise.resolve(10); } } class B extends A { async run() { return (await super.base()) + 5; } } new B().run()",
+    // an async generator method, driven by hand
+    "class K { async *ag() { yield await Promise.resolve(3); yield 4; } } const it = new K().ag(); (async () => { const r = []; r.push((await it.next()).value); r.push((await it.next()).value); const d = await it.next(); r.push(d.done); return r; })()",
 ];
 
 #[test]
@@ -753,8 +773,10 @@ fn unsupported_constructs_decline() {
         "class C { [Math.random()] = 1; }",
         "class C { #m() { return 1; } }",
         "class C { static #s = 1; }",
-        "class C { async method() {} }",
-        "class C { *method() {} }",
+        // an async or generator method's body still declines when it would hold a
+        // handler across a yield, the same limit a standalone generator has
+        "class C { *g() { try { yield 1; } finally {} } }",
+        "class C { async *g() { for (const x of [1]) yield x; } }",
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
         // a generator (sync or async) declines when its own frame would hold a
