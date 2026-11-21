@@ -60,7 +60,9 @@ button {
 	align-items: center;
 	gap: 8px;
 	height: 48px;
-	padding: 0 20px 0 0;
+	/* Clear the right edge and the scrollbar, so the GitHub button is not
+	   crowded against them. */
+	padding: 0 40px 0 0;
 }
 .holo-actionBar .brand-actions a {
 	display: inline-flex;
