@@ -115,7 +115,9 @@
 		OP_SUPER_CALL_APPLY = _n++, OP_GET_PRIVATE = _n++, OP_SET_PRIVATE = _n++, OP_HAS_PRIVATE = _n++,
 		OP_INIT_PRIVATE = _n++, OP_MODULE_INIT = _n++, OP_IMPORT_BINDING = _n++, OP_EXPORT_BINDING = _n++,
 		OP_DYNAMIC_IMPORT = _n++, OP_IMPORT_META = _n++, OP_AWAIT_TOP = _n++, OP_SET_COMPLETION = _n++,
-		OP_LOAD_ARGUMENTS = _n++, OP_YIELD = _n++, OP_YIELD_STAR = _n++;
+		OP_LOAD_ARGUMENTS = _n++, OP_YIELD = _n++, OP_YIELD_STAR = _n++,
+		OP_OBJ_DEFINE_GETTER_DYN = _n++, OP_OBJ_DEFINE_SETTER_DYN = _n++,
+		OP_BUILD_CLASS_DYN = _n++;
 
 	// A constant pool entry may be a tagged object for a value JSON cannot carry
 	// directly. The compiler writes these; decodeConst reverses them.
@@ -839,6 +841,24 @@
 		const superClass = frame.stack.pop();
 		frame.stack.push(buildClass(consts[arg], frame.scope, superClass));
 	};
+	HANDLERS[OP_BUILD_CLASS_DYN] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+		buildClass,
+	) {
+		// A class with computed member keys: the keys were evaluated in source
+		// order into an array on top of the superclass, so pop the array, then the
+		// superclass, and pass the keys to buildClass.
+		const computedKeys = frame.stack.pop();
+		const superClass = frame.stack.pop();
+		frame.stack.push(buildClass(consts[arg], frame.scope, superClass, computedKeys));
+	};
 	// `new.target` in the active frame.
 	HANDLERS[OP_LOAD_NEW_TARGET] = (frame) => {
 		frame.stack.push(frame.newTarget);
@@ -982,6 +1002,31 @@
 		const setter = s.pop();
 		const obj = s[s.length - 1];
 		Object.defineProperty(obj, consts[arg], {
+			set: setter,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	// A getter or setter with a computed key: the key was evaluated and pushed
+	// before the accessor function. Defining get then set (or the reverse) on the
+	// same configurable key merges into one accessor, the same as the static ops.
+	HANDLERS[OP_OBJ_DEFINE_GETTER_DYN] = (frame) => {
+		const s = frame.stack;
+		const getter = s.pop();
+		const key = s.pop();
+		const obj = s[s.length - 1];
+		Object.defineProperty(obj, key, {
+			get: getter,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	HANDLERS[OP_OBJ_DEFINE_SETTER_DYN] = (frame) => {
+		const s = frame.stack;
+		const setter = s.pop();
+		const key = s.pop();
+		const obj = s[s.length - 1];
+		Object.defineProperty(obj, key, {
 			set: setter,
 			enumerable: true,
 			configurable: true,
@@ -1183,7 +1228,7 @@
 			slots[j] = tmp;
 		}
 		const ARITY =
-			'0000000100000111111111111111111111111111000000000000000000000000000001010101111111111100010000001001110010000011001101010101011111110000000';
+			'0000000100000111111111111111111111111111000000000000000000000000000001010101111111111100010000001001110010000011001101010101011111110000000001';
 		for (let idx = 0; idx < ARITY.length; idx++) {
 			const byte = slots[idx];
 			const handler = HANDLERS[idx];
@@ -1267,9 +1312,13 @@
 			return fn;
 		}
 
-		function buildClass(desc, classScope, superClass) {
+		function buildClass(desc, classScope, superClass, computedKeys) {
 			'use strict';
 			const hasSuper = !!desc.hasSuper;
+			// A member with a computed key reads its key from the evaluated array
+			// by index; a static-keyed member uses its own string key.
+			const memberKey = (m) =>
+				m.ckey == null ? m.key : computedKeys[m.ckey];
 			if (hasSuper && superClass !== null && typeof superClass !== 'function') {
 				throw new TypeError(
 					'Class extends value ' +
@@ -1299,7 +1348,7 @@
 					// property, so it never appears in Object.keys or JSON.
 					privEnv[field.priv].map.set(receiver, value);
 				} else {
-					Object.defineProperty(receiver, field.key, {
+					Object.defineProperty(receiver, memberKey(field), {
 						value,
 						writable: true,
 						enumerable: true,
@@ -1422,7 +1471,7 @@
 				})[name];
 			};
 			for (const method of desc.methods) {
-				const key = method.key;
+				const key = memberKey(method);
 				const def = functions[method.fn];
 				const target = method.static ? Class : proto;
 				const kind = method.kind || 'method';

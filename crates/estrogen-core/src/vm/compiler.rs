@@ -581,11 +581,15 @@ impl Compiler {
         let mut methods = Vec::new();
         let mut fields = Vec::new();
         let mut priv_names: Vec<String> = Vec::new();
+        // Computed member keys, in source order. Each computed method or field
+        // records an index into this list; the key expressions are evaluated at
+        // class-definition time into one array that BUILD_CLASS_DYN reads.
+        let mut computed_keys: Vec<&Expression<'_>> = Vec::new();
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    if method.computed || !method.decorators.is_empty() {
-                        return Err(Unsupported("computed or decorated class method"));
+                    if !method.decorators.is_empty() {
+                        return Err(Unsupported("decorated class method"));
                     }
                     let body = method
                         .value
@@ -608,13 +612,32 @@ impl Compiler {
                         // A plain method, a getter, or a setter. All compile to a
                         // function; `kind` tells BUILD_CLASS whether to install a
                         // value or an accessor on the prototype or the class.
-                        let key = static_key(&method.key)
-                            .ok_or(Unsupported("non-static class method key"))?;
                         let kind = match method.kind {
                             MethodDefinitionKind::Method => "method",
                             MethodDefinitionKind::Get => "get",
                             MethodDefinitionKind::Set => "set",
                             MethodDefinitionKind::Constructor => unreachable!(),
+                        };
+                        // A computed key is evaluated at class definition and read
+                        // from the keys array by index. A computed accessor key
+                        // would need symbol-safe `get`/`set` naming, so only a
+                        // plain computed method key is ported; a computed accessor
+                        // still declines.
+                        let (key, ckey) = if method.computed {
+                            if !matches!(method.kind, MethodDefinitionKind::Method) {
+                                return Err(Unsupported("computed class accessor key"));
+                            }
+                            let ke = method
+                                .key
+                                .as_expression()
+                                .ok_or(Unsupported("class method key expression"))?;
+                            let idx = computed_keys.len();
+                            computed_keys.push(ke);
+                            (serde_json::Value::Null, Some(idx))
+                        } else {
+                            let k = static_key(&method.key)
+                                .ok_or(Unsupported("non-static class method key"))?;
+                            (serde_json::Value::String(k), None)
                         };
                         // A getter or setter is never async or generator (that is
                         // a syntax error), so only a plain method carries either
@@ -628,12 +651,16 @@ impl Compiler {
                             method.value.r#async,
                             method.value.generator,
                         )?;
-                        methods.push(json!({
+                        let mut entry = json!({
                             "key": key,
                             "static": method.r#static,
                             "fn": index,
                             "kind": kind,
-                        }));
+                        });
+                        if let Some(idx) = ckey {
+                            entry["ckey"] = json!(idx);
+                        }
+                        methods.push(entry);
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
@@ -658,16 +685,33 @@ impl Compiler {
                         );
                         continue;
                     }
-                    if field.computed {
-                        return Err(Unsupported("computed class field"));
-                    }
-                    let key =
-                        static_key(&field.key).ok_or(Unsupported("non-static class field key"))?;
+                    let (key, ckey, init_name) = if field.computed {
+                        let ke = field
+                            .key
+                            .as_expression()
+                            .ok_or(Unsupported("class field key expression"))?;
+                        let idx = computed_keys.len();
+                        computed_keys.push(ke);
+                        // The initializer's inferred name would be the computed
+                        // key, not known statically. An anonymous function value
+                        // then names as the empty string; the chunk drops names
+                        // anyway unless it observes one.
+                        (serde_json::Value::Null, Some(idx), String::new())
+                    } else {
+                        let k = static_key(&field.key)
+                            .ok_or(Unsupported("non-static class field key"))?;
+                        (serde_json::Value::String(k.clone()), None, k)
+                    };
                     let initializer = match &field.value {
-                        Some(value) => Some(self.compile_field_initializer(value, &key)?),
+                        Some(value) => Some(self.compile_field_initializer(value, &init_name)?),
                         None => None,
                     };
-                    fields.push(json!({"key": key, "static": field.r#static, "fn": initializer}));
+                    let mut entry =
+                        json!({"key": key, "static": field.r#static, "fn": initializer});
+                    if let Some(idx) = ckey {
+                        entry["ckey"] = json!(idx);
+                    }
+                    fields.push(entry);
                 }
                 ClassElement::StaticBlock(block) => {
                     let index = self.compile_static_block(&block.body)?;
@@ -689,13 +733,25 @@ impl Compiler {
             "privNames": priv_names,
         });
         let index = self.consts.add_class(descriptor);
-        // Push the superclass value (null for a non-derived class) for
+        // Push the superclass value (null for a non-derived class) first, since a
+        // class heritage evaluates before the body's computed keys, for
         // BUILD_CLASS to pop.
         match class.heritage.as_ref() {
             Some(heritage) => self.compile_expr(&heritage.expression)?,
             None => self.emit0("PUSH_NULL"),
         }
-        self.emit1("BUILD_CLASS", index as i64);
+        if computed_keys.is_empty() {
+            self.emit1("BUILD_CLASS", index as i64);
+        } else {
+            // Evaluate each computed key in source order into one array on top of
+            // the superclass; BUILD_CLASS_DYN pops the array, then the superclass.
+            self.emit0("ARR_EMPTY");
+            for key_expr in &computed_keys {
+                self.compile_expr(key_expr)?;
+                self.emit0("ARR_APPEND");
+            }
+            self.emit1("BUILD_CLASS_DYN", index as i64);
+        }
         Ok(())
     }
 
@@ -2001,17 +2057,33 @@ impl Compiler {
                     if matches!(p.kind, PropertyKind::Get | PropertyKind::Set) {
                         // A getter or setter defines an accessor. Two accessors
                         // on the same configurable key merge, so `get`/`set`
-                        // pairs compose. Computed accessor keys are not ported.
-                        let key = if p.computed { None } else { static_key(&p.key) };
-                        let key = key.ok_or(Unsupported("computed accessor key"))?;
-                        self.compile_expr(&p.value)?;
-                        let i = self.consts.add_str(&key);
-                        let op = if p.kind == PropertyKind::Get {
-                            "OBJ_DEFINE_GETTER"
+                        // pairs compose. A computed key is evaluated and pushed
+                        // before the accessor function, then a dynamic define op
+                        // reads it off the stack.
+                        let static_key = if p.computed { None } else { static_key(&p.key) };
+                        if let Some(key) = static_key {
+                            self.compile_expr(&p.value)?;
+                            let i = self.consts.add_str(&key);
+                            let op = if p.kind == PropertyKind::Get {
+                                "OBJ_DEFINE_GETTER"
+                            } else {
+                                "OBJ_DEFINE_SETTER"
+                            };
+                            self.emit1(op, i as i64);
                         } else {
-                            "OBJ_DEFINE_SETTER"
-                        };
-                        self.emit1(op, i as i64);
+                            let key = p
+                                .key
+                                .as_expression()
+                                .ok_or(Unsupported("object accessor key expression"))?;
+                            self.compile_expr(key)?;
+                            self.compile_expr(&p.value)?;
+                            let op = if p.kind == PropertyKind::Get {
+                                "OBJ_DEFINE_GETTER_DYN"
+                            } else {
+                                "OBJ_DEFINE_SETTER_DYN"
+                            };
+                            self.emit0(op);
+                        }
                         continue;
                     }
                     // A method shorthand (`{ foo() {} }`) is an Init property

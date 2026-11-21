@@ -152,6 +152,9 @@ pub const OP_NAMES: &[&str] = &[
     "LOAD_ARGUMENTS",
     "YIELD",
     "YIELD_STAR",
+    "OBJ_DEFINE_GETTER_DYN",
+    "OBJ_DEFINE_SETTER_DYN",
+    "BUILD_CLASS_DYN",
 ];
 
 /// How many operand numbers follow this opcode's byte in the flat code array.
@@ -214,6 +217,7 @@ pub fn arity(name: &str) -> usize {
         | "END_FINALLY"
         | "ABRUPT_JUMP"
         | "BUILD_CLASS"
+        | "BUILD_CLASS_DYN"
         | "SUPER_GET"
         | "SUPER_SET"
         | "SUPER_CALL"
@@ -300,7 +304,9 @@ pub fn arity(name: &str) -> usize {
         | "SET_COMPLETION"
         | "LOAD_ARGUMENTS"
         | "YIELD"
-        | "YIELD_STAR" => 0,
+        | "YIELD_STAR"
+        | "OBJ_DEFINE_GETTER_DYN"
+        | "OBJ_DEFINE_SETTER_DYN" => 0,
         other => panic!("estrogen vm: unknown opcode {other}"),
     }
 }

@@ -394,9 +394,13 @@ falls back. The subset:
 
 Falls back (declines, so the literal and name passes run instead):
 
-- A decorated class, a computed method, field, or accessor key, private class
-  members, a computed super
-  member, and a spread in `super()`. An async or generator method whose own body
+- A decorated class, a computed class accessor key, private class members, and a
+  computed super member (`super[x]`). A computed method or field key compiles,
+  each key expression evaluated in source order into the array BUILD_CLASS_DYN
+  reads; a computed object-literal getter or setter key compiles too. A spread in
+  `super()` compiles through SUPER_CALL_APPLY, and an anonymous class expression
+  compiles, taking its name from an identifier assignment or declarator the way a
+  function does. An async or generator method whose own body
   holds a handler across a `yield` declines the same way a standalone generator
   does. Native
   static imports and reexports work, and a local `export const`, an
@@ -491,9 +495,10 @@ does, is still a large amount of further work. In rough dependency order:
    still needs a port. A real Vite graph also has
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
-4. The rest of the class surface: private state, computed method, field, and
-   accessor keys, `async` and generator methods, a computed super
-   member, and a spread in `super()`. The common derived
+4. The rest of the class surface: private state, a computed class accessor key,
+   and a computed super member. Computed method and field keys, `async` and
+   generator methods, a spread in `super()`, and an anonymous class expression
+   now compile. The common derived
    case (`extends`, `super(...)`, `super.method()`/`super.prop`, `new.target`,
    instance fields, getters and setters, the prototype chain) compiles.
 5. The soundness fixpoint the shield computes (no native chunk may import a VM

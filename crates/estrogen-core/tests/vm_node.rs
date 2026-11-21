@@ -246,6 +246,15 @@ const CLASSES: &[&str] = &[
     // an anonymous class in a bare position (array element) the chunk never
     // names: the value it produces still matches, name observed nowhere
     "const C = [class { m() { return 5; } }][0]; new C().m()",
+    // computed method and field keys, instance and static, read back
+    "const k = 'dyn'; class K { [k]() { return 1; } static [k + '3']() { return 3; } [k + '4'] = 4; } const o = new K(); [o.dyn(), K.dyn3(), o.dyn4]",
+    // a computed method key that reads this, and a computed field key
+    "const name = 'go'; class K { v = 9; [name]() { return this.v; } } new K().go()",
+    // a symbol computed method key, called through the symbol
+    "const s = Symbol('m'); class K { [s]() { return 42; } } new K()[s]()",
+    // computed keys evaluate in source order at class definition, a field key
+    // interleaved between two method keys
+    "let log = []; class K { [(log.push(1), 'a')]() {} [(log.push(2), 'b')] = 0; [(log.push(3), 'c')]() {} } new K(); log.join(',')",
     // an implicit constructor forwards arguments to super
     "class A { constructor(x) { this.x = x; } } class B extends A {} const b = new B(7); [b.constructor.name, b.x, b instanceof A]",
     // new.target is the constructed class, in a plain function it is set only on new
@@ -644,6 +653,10 @@ const TEMPLATES_OBJECTS: &[&str] = &[
     "let captured; const o = { set x(v) { captured = v; } }; o.x = 9; captured",
     "let store = 0; const o = { get x() { return store; }, set x(v) { store = v * 2; } }; o.x = 5; o.x",
     "const o = { get x() { return 1; } }; Object.keys(o)",
+    // a computed getter/setter key, the get and set pair composing on one key
+    "const k = 'x'; let store = 0; const o = { get [k]() { return store; }, set [k](v) { store = v * 3; } }; o.x = 4; o.x",
+    // a computed getter key read back through the dynamic key
+    "const k = 'v' + 1; const o = { get [k]() { return 99; } }; o.v1",
     // spread arguments in new
     "function F(a, b) { this.sum = a + b; } const args = [3, 4]; new F(...args).sum",
 ];
@@ -792,8 +805,9 @@ fn unsupported_constructs_decline() {
     let unsupported = [
         "var z = 1; z",
         "import x from './y.js'; x",
-        "class C { [Math.random()]() {} }",
-        "class C { [Math.random()] = 1; }",
+        // a computed class accessor key still declines (symbol-safe get/set
+        // naming is not ported), though a computed method or field key compiles
+        "class C { get [Math.random()]() { return 1; } }",
         "class C { #m() { return 1; } }",
         "class C { static #s = 1; }",
         // an async or generator method's body still declines when it would hold a
