@@ -295,6 +295,13 @@ falls back. The subset:
 - Function-local `var` with declaration hoisting through nested blocks, loops
   and switch cases. Module-root `var` only when a native import or export
   declaration proves ES module semantics.
+- Parameters and the arguments object: default parameters (evaluated only when
+  the argument is `undefined`, and able to read an earlier parameter), rest
+  parameters bound to a real array, and `Function.length` counting the leading
+  plain parameters. A non-arrow function reads an unmapped `arguments` object; an
+  arrow inherits the enclosing function's. Named function expressions bind their
+  own name to the function inside the body, so recursion works and the name does
+  not leak out.
 - Destructuring, as a `let`/`const`/`var` binding or an assignment target: object
   patterns (renaming, defaults, computed keys, and `...rest`) and array patterns
   (holes, defaults, nesting, and `...rest`). Array patterns walk the iterator
@@ -315,8 +322,9 @@ Falls back (declines, so the literal and name passes run instead):
   leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
   declares a lexical binding; and a labeled jump that would close more than one
   `for`/`of` iterator at once.
-- Named function expressions, default, rest, and destructured parameters,
-  generators, and `arguments`.
+- Destructured parameters and generators. The destructuring lowering exists for
+  bindings and assignments; wiring it into function parameters is the remaining
+  step.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
   binding where native makes one per iteration, so it declines rather than
   observe the difference wrongly. The closure check is conservative, so a
@@ -369,14 +377,15 @@ ships a `createRuntime` or `.run()` token to key on.
 ## Remaining work to full default-on coverage
 
 Functions, closures, `async`/`await`, non-derived classes, `try`/`catch`,
-`try`/`finally`, `for`/`of`, `for`/`in`, and labeled jumps now compile (see the
-subset above). Reaching the point where the VM compiles a real app bundle, the
-way the shield's 25-of-25 integration proof does, is still a large amount of
-further work. In rough dependency order:
+`try`/`finally`, `for`/`of`, `for`/`in`, labeled jumps, the arguments object,
+named function expressions, default and rest parameters, and destructuring now
+compile (see the subset above). Reaching the point where the VM compiles a real
+app bundle, the way the shield's 25-of-25 integration proof does, is still a
+large amount of further work. In rough dependency order:
 
-1. The rest of the function surface: `arguments`, named function expressions,
-   default, rest, and destructured parameters, and generators (the `yield` suspend
-   the async driver's resume model can extend to).
+1. The rest of the function surface: destructured parameters (reuse the binding
+   destructuring lowering) and generators (the `yield` suspend the async driver's
+   resume model can extend to).
 2. The rest of control flow: `break`/`continue` that escapes a `try` (the
    abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
    `jump` completion record), a `switch` case that declares a lexical binding, and
