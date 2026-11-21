@@ -1239,17 +1239,24 @@ impl Compiler {
             .as_ref()
             .is_some_and(ForStatementInit::is_lexical_declaration);
         if lexical_head {
-            // A `for (let ...)` binding is fresh per iteration only so a closure
-            // can capture each iteration's value. estrogen uses one binding, so if
-            // the loop makes a closure the two models differ; decline instead of
-            // miscompiling.
-            let captured = s.test.as_ref().is_some_and(|e| has_closure_expr(e))
-                || s.update.as_ref().is_some_and(|e| has_closure_expr(e))
-                || has_closure_stmt(&s.body);
-            if captured {
-                return Err(Unsupported(
-                    "for-loop lexical binding may be captured by a closure",
-                ));
+            // A `for (let ...)` binding is fresh per iteration, so a closure made
+            // in the body or the test captures that iteration's value. When one
+            // can, lower to per-iteration environments (`compile_for_captured`)
+            // instead of the single-binding fast path below.
+            let test_captures = s.test.as_ref().is_some_and(|e| has_closure_expr(e));
+            let update_captures = s.update.as_ref().is_some_and(|e| has_closure_expr(e));
+            let body_captures = has_closure_stmt(&s.body);
+            if test_captures || update_captures || body_captures {
+                // The update runs in the canonical scope, not the per-iteration
+                // one the spec evaluates it in, so a closure in the update would
+                // capture a different environment. That case is rare; decline it
+                // rather than miscompile.
+                if update_captures {
+                    return Err(Unsupported(
+                        "for-loop update closure captures the loop binding",
+                    ));
+                }
+                return self.compile_for_captured(s, label);
             }
             self.open_scope();
         }
@@ -1323,6 +1330,98 @@ impl Compiler {
         let lp = self.pop_loop();
         self.patch_all(&lp.break_sites, l_end);
         self.patch_all(&lp.continue_sites, l_cont);
+        Ok(())
+    }
+
+    /// Lower a `for (let ...; test; update)` whose body or test makes a closure
+    /// that captures the loop binding. A canonical scope holds the running
+    /// values; each iteration opens a fresh child scope, copies the bindings in,
+    /// runs the test and body there (so a closure captures that iteration's
+    /// copy), copies any mutation back, exits the child, then runs the update in
+    /// the canonical scope. This gives each iteration its own binding, matching
+    /// `CreatePerIterationEnvironment`, while the C-style update still carries the
+    /// value forward. Only identifier bindings are supported, like the fast path.
+    fn compile_for_captured(&mut self, s: &ForStatement<'_>, label: Option<&str>) -> R<()> {
+        let Some(ForStatementInit::VariableDeclaration(decl)) = &s.init else {
+            unreachable!("compile_for_captured requires a lexical for-init")
+        };
+        let kind = lexical_kind(decl.kind)?;
+        let mut names = Vec::with_capacity(decl.declarations.len());
+        for d in &decl.declarations {
+            let id = binding_identifier(&d.id)?;
+            names.push((id.name.as_str(), d.init.as_ref()));
+        }
+
+        let outer_base = self.scopes.len();
+        // Canonical scope: holds the running value of each binding between
+        // iterations, so the update can carry it forward.
+        self.open_scope();
+        let mut canon_slots = Vec::with_capacity(names.len());
+        for (name, _) in &names {
+            let slot = self.add_local(name);
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+            canon_slots.push(slot);
+        }
+        for (i, (_, init)) in names.iter().enumerate() {
+            match init {
+                Some(e) => self.compile_expr(e)?,
+                None => self.emit0("PUSH_UNDEF"),
+            }
+            self.emit1("INIT_SLOT", pack_addr(0, canon_slots[i]));
+        }
+
+        let break_depth = outer_base;
+        let l_test = self.code_len();
+        // Per-iteration scope: a fresh binding a body closure captures.
+        self.open_scope();
+        let mut iter_slots = Vec::with_capacity(names.len());
+        for (name, _) in &names {
+            let slot = self.add_local(name);
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+            iter_slots.push(slot);
+        }
+        // Copy each binding in from the canonical scope (one level out).
+        for i in 0..names.len() {
+            self.emit1("LOAD_SLOT", pack_addr(1, canon_slots[i]));
+            self.emit1("INIT_SLOT", pack_addr(0, iter_slots[i]));
+        }
+        let continue_depth = self.scopes.len();
+        self.push_loop(break_depth, continue_depth, false, label);
+        let exit = match &s.test {
+            Some(t) => {
+                self.compile_expr(t)?;
+                Some(self.emit_jump("JMP_IF_FALSE"))
+            }
+            None => None,
+        };
+        self.compile_statement(&s.body, false)?;
+        let l_cont = self.code_len();
+        // Carry any body mutation back to the canonical scope. A `const` binding
+        // cannot be reassigned, so its copy never diverges and needs no write.
+        if kind == 1 {
+            for i in 0..names.len() {
+                self.emit1("LOAD_SLOT", pack_addr(0, iter_slots[i]));
+                self.emit1("STORE_SLOT", pack_addr(1, canon_slots[i]));
+                self.emit0("POP");
+            }
+        }
+        self.close_scope();
+        if let Some(u) = &s.update {
+            self.compile_expr(u)?;
+            self.emit0("POP");
+        }
+        self.emit1("JMP", l_test as i64);
+        // Test-false path: the per-iteration scope is still open at runtime (the
+        // compiler already accounts it closed), so exit it before the canonical.
+        if let Some(exit) = exit {
+            self.patch_here(exit);
+            self.emit0("EXIT_SCOPE");
+        }
+        let lp = self.pop_loop();
+        self.patch_all(&lp.continue_sites, l_cont);
+        self.close_scope();
+        let l_end = self.code_len();
+        self.patch_all(&lp.break_sites, l_end);
         Ok(())
     }
 

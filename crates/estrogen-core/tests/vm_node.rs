@@ -406,6 +406,20 @@ const CONTROL: &[&str] = &[
     "let o = []; function f() { try { o.push('t'); return o.length; } finally { o.push('x'); } } const r = f(); [r, o.length]",
     // finally over a for-of body (iterator closes normally, finally still runs)
     "let o = []; function f() { for (const n of [1, 2]) { try { o.push(n); } finally { o.push(-n); } } return o; } f()",
+    // a C-style for-let binding a body closure captures: fresh per iteration
+    "const fns = []; for (let i = 0; i < 3; i++) fns.push(() => i); fns.map((f) => f())",
+    // the capture reaches through an inner for-of and still sees each i
+    "const fns = []; for (let i = 0; i < 2; i++) { for (const x of [0]) fns.push(() => i); } fns.map((f) => f())",
+    // the body both captures and mutates i: the mutation carries to the update
+    "const fns = []; for (let i = 0; i < 6; i++) { fns.push(() => i); i += 1; } fns.map((f) => f())",
+    // two lexical bindings captured together, each fresh per iteration
+    "const fns = []; for (let i = 0, j = 10; i < 3; i++, j--) fns.push(() => i + j); fns.map((f) => f())",
+    // the test reads the per-iteration binding through a closure
+    "const fns = []; for (let i = 0; (() => i < 3)(); i++) fns.push(() => i); fns.map((f) => f())",
+    // a closure capturing a const for-let binding sees its one value
+    "const fns = []; for (const i = 7; fns.length < 3; ) { fns.push(() => i); if (fns.length === 3) break; } fns.map((f) => f())",
+    // continue skips the push but the per-iteration binding stays correct
+    "const fns = []; for (let i = 0; i < 5; i++) { if (i % 2) continue; fns.push(() => i); } fns.map((f) => f())",
     // a for-let whose body contains a for-of no longer over-declines
     "let total = 0; for (let i = 0; i < 3; i++) { for (const x of [10, 20]) total += i * x; } total",
     // a for-let whose body contains a try no longer over-declines
@@ -799,11 +813,9 @@ fn unsupported_constructs_decline() {
         // close, so it declines.
         "for (const x of [1, 2]) { try { if (x === 1) break; } finally {} }",
         "try { throw { x: 1 }; } catch ({ x }) {}",
-        // a for-let binding captured by a closure must decline, because estrogen
-        // uses one binding where native makes one per iteration.
-        "const fns = []; for (let i = 0; i < 3; i++) { fns.push(() => i); } fns[0]()",
-        // the closure check still finds a capture reached through an inner for-of
-        "const fns = []; for (let i = 0; i < 2; i++) { for (const x of [0]) fns.push(() => i); } fns[0]()",
+        // a closure in the update runs in the canonical scope, not the
+        // per-iteration one, so the capturing update still declines
+        "const fns = []; for (let i = 0; i < 3; i = (() => i + 1)()) { fns.push(() => i); } fns[0]()",
         // a function declaration in a switch case has Annex B hoisting the VM does
         // not model, so it declines even though lexical case bindings compile
         "switch (1) { case 1: function g() { return 1; } g(); }",
