@@ -35,10 +35,11 @@ This pass takes (a), with one deliberate change to the outer layer. The reasons:
   is plain JavaScript with no Node built-ins, so it runs unchanged in a browser.
   Rewriting it in Rust would mean reimplementing and re-proving a 977-line
   interpreter for no gain. Porting only the compiler keeps the proven half.
-- The program shape is small and stable: `{ version, layout, consts, functions,
-mainIndex }`, where a function is `{ code, name, isAsync, isArrow, numParams }`
-  and `layout` is the per-build opcode byte assignment. Rust emits that JSON
-  directly.
+- The program shape is small and stable: a layout, a constant pool, a function
+  list, and the main index, where a function carries its code and, only when set,
+  a name, the async/arrow/generator flags, and a parameter count. `layout` is the
+  per-build opcode byte assignment. Rust emits that JSON directly, with the
+  single-character keys described under "The format estrogen emits".
 - The opcode semantics live in the runtime's handler table. estrogen's compiler
   emits bytecode the runtime already knows how to run, so the runtime defines
   correctness and the Rust side is checked against it by running real programs
@@ -66,16 +67,19 @@ swaps only the decrypt wrapper. The vendored runtime is
 ## The format estrogen emits
 
 A program is the shield's `ShieldProgram`, minus the module descriptor the slice
-does not emit yet:
+does not emit yet. The keys are single characters and a default field is left
+out, to keep the encrypted payload small: `l`=layout, `k`=consts, `f`=functions,
+`m`=mainIndex (omitted when 0); a function is `c`=code, `n`=name, `a`=isAsync,
+`r`=isArrow, `g`=isGenerator, `p`=numParams, each omitted when false, null, or 0.
+The unused version tag is gone. The runtime defaults every omitted field, so a
+plain sync function with no name and no parameters is just `{ "c": [ … ] }`
+rather than the seven-key form, which saves about seventy bytes per function:
 
 ```
 {
-  "version": 1,
-  "layout":  { "version": 1, "tableSize": 256, "ops": {…} },
-  "consts":  [ … ],
-  "functions": [ { "code": [ … ], "name": null, "isAsync": false,
-                   "isArrow": false, "numParams": 0 } ],
-  "mainIndex": 0
+  "l": { "version": 1, "tableSize": 256, "ops": {…} },
+  "k": [ … ],
+  "f": [ { "c": [ … ] }, { "c": [ … ], "n": "name", "p": 2, "a": 1 } ]
 }
 ```
 

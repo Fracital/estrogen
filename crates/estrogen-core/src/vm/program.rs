@@ -34,22 +34,32 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
+    /// Serialize with single-character keys and no default fields, so a
+    /// function costs the fewest bytes in the encrypted program. The runtime
+    /// defaults every omitted field: `c`=code, `n`=name, `a`=isAsync,
+    /// `r`=isArrow, `g`=isGenerator, `p`=numParams. A false flag, a zero param
+    /// count, and a missing name are left out.
     fn to_json(&self) -> Value {
         let mut obj = Map::new();
         obj.insert(
-            "code".to_string(),
+            "c".to_string(),
             Value::Array(self.code.iter().map(|&n| Value::from(n)).collect()),
         );
-        obj.insert(
-            "name".to_string(),
-            self.name
-                .as_ref()
-                .map_or(Value::Null, |n| Value::from(n.clone())),
-        );
-        obj.insert("isAsync".to_string(), Value::from(self.is_async));
-        obj.insert("isArrow".to_string(), Value::from(self.is_arrow));
-        obj.insert("isGenerator".to_string(), Value::from(self.is_generator));
-        obj.insert("numParams".to_string(), Value::from(self.num_params as u64));
+        if let Some(name) = &self.name {
+            obj.insert("n".to_string(), Value::from(name.clone()));
+        }
+        if self.is_async {
+            obj.insert("a".to_string(), Value::from(1u8));
+        }
+        if self.is_arrow {
+            obj.insert("r".to_string(), Value::from(1u8));
+        }
+        if self.is_generator {
+            obj.insert("g".to_string(), Value::from(1u8));
+        }
+        if self.num_params > 0 {
+            obj.insert("p".to_string(), Value::from(self.num_params as u64));
+        }
         Value::Object(obj)
     }
 }
@@ -197,18 +207,18 @@ pub struct Program {
 impl Program {
     /// The program as its JSON value, the exact shape the runtime consumes.
     pub fn into_json(self) -> Value {
+        // Short keys, and the unused version tag and a zero main index are left
+        // out: `l`=layout, `k`=consts, `f`=functions, `m`=mainIndex.
         let mut obj = Map::new();
-        obj.insert("version".to_string(), Value::from(1u32));
-        obj.insert("layout".to_string(), self.layout.to_json());
+        obj.insert("l".to_string(), self.layout.to_json());
+        obj.insert("k".to_string(), Value::Array(self.consts.into_values()));
         obj.insert(
-            "consts".to_string(),
-            Value::Array(self.consts.into_values()),
-        );
-        obj.insert(
-            "functions".to_string(),
+            "f".to_string(),
             Value::Array(self.functions.iter().map(FunctionDef::to_json).collect()),
         );
-        obj.insert("mainIndex".to_string(), Value::from(self.main_index as u64));
+        if self.main_index > 0 {
+            obj.insert("m".to_string(), Value::from(self.main_index as u64));
+        }
         Value::Object(obj)
     }
 

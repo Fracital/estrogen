@@ -1001,9 +1001,9 @@
 			opts.budget > 0
 				? opts.budget
 				: 0;
-		const consts = program.consts.map(decodeConst);
-		const functions = program.functions;
-		const layout = program.layout;
+		const consts = program.k.map(decodeConst);
+		const functions = program.f;
+		const layout = program.l;
 		let steps = 0;
 
 		const tableSize = layout.tableSize;
@@ -1024,7 +1024,7 @@
 
 		function makeFrame(def, closureScope, thisVal, args) {
 			return {
-				code: def.code,
+				code: def.c,
 				pc: 0,
 				stack: [],
 				handlers: [],
@@ -1043,12 +1043,8 @@
 		// captured scope, so slot addresses resolve across the closure boundary.
 		function createClosure(def, ctx) {
 			'use strict';
-			const drive = def.isGenerator
-				? makeGenerator
-				: def.isAsync
-					? runAsync
-					: runSync;
-			const fn = def.isArrow
+			const drive = def.g ? makeGenerator : def.a ? runAsync : runSync;
+			const fn = def.r
 				? (...callArgs) =>
 						drive(makeFrame(def, ctx.scope, ctx.arrowThis, callArgs))
 				: function (...callArgs) {
@@ -1056,13 +1052,13 @@
 					};
 			try {
 				Object.defineProperty(fn, 'length', {
-					value: def.numParams,
+					value: def.p || 0,
 					configurable: true,
 				});
 			} catch (e) {}
 			try {
 				Object.defineProperty(fn, 'name', {
-					value: def.name || '',
+					value: def.n || '',
 					configurable: true,
 				});
 			} catch (e) {}
@@ -1108,7 +1104,7 @@
 				configurable: true,
 			});
 			Object.defineProperty(Class, 'length', {
-				value: desc.ctor === null ? 0 : functions[desc.ctor].numParams,
+				value: desc.ctor === null ? 0 : functions[desc.ctor].p || 0,
 				configurable: true,
 			});
 			Object.defineProperty(Class, 'prototype', { writable: false });
@@ -1122,7 +1118,7 @@
 					},
 				}[key];
 				Object.defineProperty(fn, 'length', {
-					value: def.numParams,
+					value: def.p || 0,
 					configurable: true,
 				});
 				Object.defineProperty(method.static ? Class : Class.prototype, key, {
@@ -1420,9 +1416,9 @@
 
 		function run(args) {
 			steps = 0;
-			const def = functions[program.mainIndex];
+			const def = functions[program.m || 0];
 			const frame = makeFrame(def, null, undefined, args || []);
-			return def.isAsync ? runAsync(frame) : runSync(frame);
+			return def.a ? runAsync(frame) : runSync(frame);
 		}
 
 		return run;
