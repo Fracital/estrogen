@@ -383,6 +383,35 @@ const FUNCTION_SURFACE: &[&str] = &[
     "const f = function named() { return named.name; }; f()",
 ];
 
+/// Destructuring bindings and assignment targets. Each case's last expression
+/// is the value the VM and native eval compare on. These exercise object and
+/// array patterns, defaults, renaming, computed keys, object and array rest,
+/// holes, nesting, member targets, and the iterator protocol for arrays.
+const DESTRUCTURING: &[&str] = &[
+    "const { a, b } = { a: 1, b: 2 }; [a, b]",
+    "const { a: x, b: y = 9 } = { a: 1 }; [x, y]",
+    "const { a = 5, b = 6 } = { a: undefined, b: null }; [a, b]",
+    "const k = 'z'; const { [k]: v } = { z: 42 }; v",
+    "const { a, ...rest } = { a: 1, b: 2, c: 3 }; [a, rest.b, rest.c]",
+    "const k = 'a'; const { [k]: first, ...rest } = { a: 1, b: 2, c: 3 }; [first, rest.b, rest.c, Object.keys(rest).length]",
+    "const [a, b, c] = [1, 2, 3]; [a, b, c]",
+    "const [a, , c] = [1, 2, 3]; [a, c]",
+    "const [a = 7, b = 8] = [1]; [a, b]",
+    "const [a, ...rest] = [1, 2, 3, 4]; [a, rest.length, rest[0], rest[2]]",
+    "const [a, [b, c]] = [1, [2, 3]]; [a, b, c]",
+    "const { a: { b } } = { a: { b: 10 } }; b",
+    "const [{ a }, { b }] = [{ a: 1 }, { b: 2 }]; [a, b]",
+    "const [a, b] = new Set([10, 20, 30]); [a, b]",
+    "const [a, b] = 'hi'; [a, b]",
+    "let a, b; ({ a, b } = { a: 1, b: 2 }); [a, b]",
+    "let a, b; [a, b] = [3, 4]; [a, b]",
+    "const o = {}; [o.x, o.y] = [5, 6]; [o.x, o.y]",
+    "let a, rest; ({ a, ...rest } = { a: 1, b: 2 }); [a, rest.b]",
+    "let x = 1, y = 2; [x, y] = [y, x]; [x, y]",
+    "let a = 0; [a = 9] = []; a",
+    "const var_a = (function () { var [p, q] = [1, 2]; return p + q; })(); var_a",
+];
+
 #[test]
 fn vm_bytecode_matches_native_eval() {
     if !node_available("vm_bytecode_matches_native_eval") {
@@ -398,6 +427,7 @@ fn vm_bytecode_matches_native_eval() {
         .chain(CLASSES)
         .chain(MUTATION)
         .chain(FUNCTION_SURFACE)
+        .chain(DESTRUCTURING)
     {
         let json = compile_module_json(src, "vm-node-seed")
             .unwrap_or_else(|| panic!("supported source did not compile: {src}"));
@@ -517,7 +547,6 @@ fn unsupported_constructs_decline() {
         "class C { *method() {} }",
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
-        "const [a, b] = [1, 2]; a",
         "function fd({ a }) { return a; } fd({ a: 1 })",
         "const fa = ([x]) => x; fa([7])",
         "function fr(...{ length }) { return length; } fr(1, 2)",

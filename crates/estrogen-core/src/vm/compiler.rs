@@ -39,12 +39,13 @@
 
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, BinaryOperator, BindingPattern, ChainElement, ChainExpression, Class,
-    ClassElement, ComputedMemberExpression, Expression, ForStatement, ForStatementInit,
-    ForStatementLeft, FormalParameters, Function, IfStatement, LabeledStatement, LogicalOperator,
-    MemberExpression, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-    SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, TryStatement,
-    UnaryOperator, UpdateOperator, VariableDeclarationKind,
+    AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BinaryOperator,
+    BindingPattern, ChainElement, ChainExpression, Class, ClassElement, ComputedMemberExpression,
+    Expression, ForStatement, ForStatementInit, ForStatementLeft, FormalParameters, Function,
+    IfStatement, LabeledStatement, LogicalOperator, MemberExpression, MethodDefinitionKind,
+    ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+    StaticMemberExpression, SwitchStatement, TryStatement, UnaryOperator, UpdateOperator,
+    VariableDeclarationKind,
 };
 use oxc_ast_visit::Visit;
 
@@ -96,6 +97,14 @@ struct Scope {
 /// Per-function emission state. A function has its own code array and its own
 /// loop stack, so `break`/`continue` and jump targets never cross a function
 /// boundary.
+/// How a destructuring leaf stores its value: a lexical `let`/`const` binding
+/// initializes its TDZ cell, a `var` binding stores into its hoisted slot.
+#[derive(Clone, Copy)]
+enum BindMode {
+    Lexical,
+    Var,
+}
+
 struct FnState {
     code: Vec<i64>,
     loops: Vec<LoopState>,
@@ -515,9 +524,12 @@ impl Compiler {
                     }
                     let kind = lexical_kind(decl.kind)?;
                     for d in &decl.declarations {
-                        let id = binding_identifier(&d.id)?;
-                        let slot = self.add_local(id.name.as_str());
-                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                        let mut names = Vec::new();
+                        collect_pattern_names(&d.id, &mut names)?;
+                        for name in names {
+                            let slot = self.add_local(&name);
+                            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                        }
                     }
                 }
                 Statement::FunctionDeclaration(func) => {
@@ -613,16 +625,36 @@ impl Compiler {
                         return Err(Unsupported("top-level var needs a script kind"));
                     }
                     for d in &decl.declarations {
-                        let id = binding_identifier(&d.id)?;
-                        if let Some(init) = &d.init {
-                            self.compile_var_init(id.name.as_str(), init)?;
+                        match &d.id {
+                            BindingPattern::BindingIdentifier(id) => {
+                                if let Some(init) = &d.init {
+                                    self.compile_var_init(id.name.as_str(), init)?;
+                                }
+                            }
+                            _ => {
+                                let init = d.init.as_ref().ok_or(Unsupported(
+                                    "destructuring var without an initializer",
+                                ))?;
+                                self.compile_expr(init)?;
+                                self.destructure_binding(&d.id, BindMode::Var)?;
+                            }
                         }
                     }
                     return Ok(());
                 }
                 lexical_kind(decl.kind)?;
                 for d in &decl.declarations {
-                    let id = binding_identifier(&d.id)?;
+                    let id = match &d.id {
+                        BindingPattern::BindingIdentifier(id) => id,
+                        _ => {
+                            let init = d.init.as_ref().ok_or(Unsupported(
+                                "destructuring binding without an initializer",
+                            ))?;
+                            self.compile_expr(init)?;
+                            self.destructure_binding(&d.id, BindMode::Lexical)?;
+                            continue;
+                        }
+                    };
                     if d.init
                         .as_ref()
                         .is_some_and(|expr| matches!(expr, Expression::ClassExpression(_)))
@@ -1637,6 +1669,14 @@ impl Compiler {
                     self.compile_expr(&node.right)?;
                     self.emit_store_name(id.name.as_str());
                 }
+                AssignmentTarget::ArrayAssignmentTarget(_)
+                | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                    // The assignment value is the right side; keep a copy as the
+                    // expression result and destructure the duplicate.
+                    self.compile_expr(&node.right)?;
+                    self.emit0("DUP");
+                    self.destructure_assign(&node.left)?;
+                }
                 other => {
                     let me = other
                         .as_member_expression()
@@ -2049,6 +2089,290 @@ impl Compiler {
         slot
     }
 
+    /// Store the destructured value on top of the stack into a binding leaf,
+    /// consuming it. A lexical leaf initializes its TDZ cell; a `var` leaf
+    /// stores and drops the duplicate the store leaves behind.
+    fn bind_leaf(&mut self, name: &str, mode: BindMode) {
+        match mode {
+            BindMode::Lexical => self.emit_init_name(name),
+            BindMode::Var => {
+                self.emit_store_name(name);
+                self.emit0("POP");
+            }
+        }
+    }
+
+    fn emit_init_name(&mut self, name: &str) {
+        let (depth, slot) = self
+            .resolve(name)
+            .expect("a destructuring leaf initializes a declared slot");
+        self.emit1("INIT_SLOT", pack_addr(depth, slot));
+    }
+
+    /// Value on top of the stack: if it is `undefined`, replace it with the
+    /// default. This is the per-leaf default of `{ a = 1 }` and `[a = 2]`, which
+    /// applies only to `undefined`, not to `null` or other falsy values.
+    fn apply_default(&mut self, default: &Expression<'_>) -> R<()> {
+        self.emit0("DUP");
+        self.emit0("PUSH_UNDEF");
+        self.emit0("SEQ");
+        let have = self.emit_jump("JMP_IF_FALSE");
+        self.emit0("POP");
+        self.compile_expr(default)?;
+        self.patch_here(have);
+        Ok(())
+    }
+
+    /// Destructure the value on top of the stack into a binding pattern,
+    /// consuming it. Leaves bind through [`bind_leaf`]. Array patterns walk the
+    /// iterator protocol; object patterns read named properties and copy the
+    /// remainder for `...rest`.
+    fn destructure_binding(&mut self, pat: &BindingPattern<'_>, mode: BindMode) -> R<()> {
+        match pat {
+            BindingPattern::BindingIdentifier(id) => {
+                self.bind_leaf(id.name.as_str(), mode);
+            }
+            BindingPattern::AssignmentPattern(ap) => {
+                self.apply_default(&ap.right)?;
+                self.destructure_binding(&ap.left, mode)?;
+            }
+            BindingPattern::ArrayPattern(arr) => {
+                self.emit0("GET_ITERATOR");
+                for element in &arr.elements {
+                    match element {
+                        None => {
+                            self.emit0("ITER_NEXT_PUSH");
+                            self.emit0("POP");
+                        }
+                        Some(target) => {
+                            self.emit0("ITER_NEXT_PUSH");
+                            self.destructure_binding(target, mode)?;
+                        }
+                    }
+                }
+                if let Some(rest) = &arr.rest {
+                    self.emit0("ITER_REST_PUSH");
+                    self.destructure_binding(&rest.argument, mode)?;
+                }
+                self.emit0("POP");
+            }
+            BindingPattern::ObjectPattern(obj) => {
+                let has_computed = obj.properties.iter().any(|prop| prop.computed);
+                if obj.rest.is_some() && has_computed {
+                    return self.destructure_object_rest_dynamic(obj, mode);
+                }
+                let mut excluded: Vec<String> = Vec::new();
+                for prop in &obj.properties {
+                    self.emit0("DUP");
+                    if prop.computed {
+                        let key = prop
+                            .key
+                            .as_expression()
+                            .ok_or(Unsupported("object pattern computed key"))?;
+                        self.compile_expr(key)?;
+                        self.emit0("GET_PROP_DYN");
+                    } else {
+                        let key = static_key(&prop.key).ok_or(Unsupported("object pattern key"))?;
+                        let index = self.consts.add_str(&key);
+                        excluded.push(key);
+                        self.emit1("GET_PROP", index as i64);
+                    }
+                    self.destructure_binding(&prop.value, mode)?;
+                }
+                if let Some(rest) = &obj.rest {
+                    let json = serde_json::to_string(&excluded).expect("string list serializes");
+                    let index = self.consts.add_str(&json);
+                    self.emit1("OBJ_REST", index as i64);
+                    self.destructure_binding(&rest.argument, mode)?;
+                } else {
+                    self.emit0("POP");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Object pattern with `...rest` after a computed key: the excluded-key set
+    /// is not known until the computed keys evaluate, so it is built in a runtime
+    /// array and `OBJ_REST_DYN` reads it.
+    fn destructure_object_rest_dynamic(
+        &mut self,
+        obj: &oxc_ast::ast::ObjectPattern<'_>,
+        mode: BindMode,
+    ) -> R<()> {
+        let excluded = self.declare_temp();
+        self.emit0("ARR_EMPTY");
+        self.emit1("INIT_SLOT", pack_addr(0, excluded));
+        for prop in &obj.properties {
+            let key_tmp = self.declare_temp();
+            if prop.computed {
+                let key = prop
+                    .key
+                    .as_expression()
+                    .ok_or(Unsupported("object pattern computed key"))?;
+                self.compile_expr(key)?;
+            } else {
+                let key = static_key(&prop.key).ok_or(Unsupported("object pattern key"))?;
+                let index = self.consts.add_str(&key);
+                self.emit1("PUSH_CONST", index as i64);
+            }
+            self.emit1("INIT_SLOT", pack_addr(0, key_tmp));
+            self.emit1("LOAD_SLOT", pack_addr(0, excluded));
+            self.emit1("LOAD_SLOT", pack_addr(0, key_tmp));
+            self.emit0("ARR_APPEND");
+            self.emit0("POP");
+            self.emit0("DUP");
+            self.emit1("LOAD_SLOT", pack_addr(0, key_tmp));
+            self.emit0("GET_PROP_DYN");
+            self.destructure_binding(&prop.value, mode)?;
+        }
+        let rest = obj.rest.as_ref().expect("dynamic rest path has a rest");
+        self.emit1("LOAD_SLOT", pack_addr(0, excluded));
+        self.emit0("OBJ_REST_DYN");
+        self.destructure_binding(&rest.argument, mode)?;
+        Ok(())
+    }
+
+    /// Destructure the value on top of the stack into an assignment target
+    /// pattern (`[a, b] = v`, `({ a } = v)`), consuming it. Leaves store to an
+    /// existing identifier or member, mirroring [`destructure_binding`] but
+    /// targeting places rather than fresh bindings.
+    fn destructure_assign(&mut self, target: &AssignmentTarget<'_>) -> R<()> {
+        match target {
+            AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                self.emit0("GET_ITERATOR");
+                for element in &arr.elements {
+                    match element {
+                        None => {
+                            self.emit0("ITER_NEXT_PUSH");
+                            self.emit0("POP");
+                        }
+                        Some(target) => {
+                            self.emit0("ITER_NEXT_PUSH");
+                            self.assign_maybe_default(target)?;
+                        }
+                    }
+                }
+                if let Some(rest) = &arr.rest {
+                    self.emit0("ITER_REST_PUSH");
+                    self.assign_leaf(&rest.target)?;
+                }
+                self.emit0("POP");
+            }
+            AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                let mut excluded: Vec<String> = Vec::new();
+                for prop in &obj.properties {
+                    match prop {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                            let name = id.binding.name.as_str().to_string();
+                            self.emit0("DUP");
+                            let index = self.consts.add_str(&name);
+                            self.emit1("GET_PROP", index as i64);
+                            if let Some(init) = &id.init {
+                                self.apply_default(init)?;
+                            }
+                            self.emit_store_name(&name);
+                            self.emit0("POP");
+                            excluded.push(name);
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            self.emit0("DUP");
+                            if pp.computed {
+                                let key = pp
+                                    .name
+                                    .as_expression()
+                                    .ok_or(Unsupported("object assign computed key"))?;
+                                self.compile_expr(key)?;
+                                self.emit0("GET_PROP_DYN");
+                            } else {
+                                let key =
+                                    static_key(&pp.name).ok_or(Unsupported("object assign key"))?;
+                                let index = self.consts.add_str(&key);
+                                excluded.push(key);
+                                self.emit1("GET_PROP", index as i64);
+                            }
+                            self.assign_maybe_default(&pp.binding)?;
+                        }
+                    }
+                }
+                if let Some(rest) = &obj.rest {
+                    let json = serde_json::to_string(&excluded).expect("string list serializes");
+                    let index = self.consts.add_str(&json);
+                    self.emit1("OBJ_REST", index as i64);
+                    self.assign_leaf(&rest.target)?;
+                } else {
+                    self.emit0("POP");
+                }
+            }
+            simple => self.assign_leaf(simple)?,
+        }
+        Ok(())
+    }
+
+    /// One array or object element target, which may carry a default and may
+    /// itself be a nested pattern. Value on top of the stack, consumed.
+    fn assign_maybe_default(&mut self, mb: &AssignmentTargetMaybeDefault<'_>) -> R<()> {
+        match mb {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(wd) => {
+                self.apply_default(&wd.init)?;
+                self.assign_leaf(&wd.binding)
+            }
+            other => {
+                let target = other
+                    .as_assignment_target()
+                    .ok_or(Unsupported("assignment target element"))?;
+                self.assign_leaf(target)
+            }
+        }
+    }
+
+    /// Store the value on top of the stack into an assignment target, consuming
+    /// it. A nested pattern recurses; an identifier stores by name; a member
+    /// stashes the value, rebuilds the reference, and sets the property.
+    fn assign_leaf(&mut self, target: &AssignmentTarget<'_>) -> R<()> {
+        match target {
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => self.destructure_assign(target),
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.emit_store_name(id.name.as_str());
+                self.emit0("POP");
+                Ok(())
+            }
+            member => {
+                let me = member
+                    .as_member_expression()
+                    .ok_or(Unsupported("destructuring assign target"))?;
+                let tmp = self.declare_temp();
+                self.emit1("INIT_SLOT", pack_addr(0, tmp));
+                match me {
+                    MemberExpression::StaticMemberExpression(m) => {
+                        if m.optional {
+                            return Err(Unsupported("optional assignment target"));
+                        }
+                        self.compile_expr(&m.object)?;
+                        self.emit1("LOAD_SLOT", pack_addr(0, tmp));
+                        let index = self.consts.add_str(m.property.name.as_str());
+                        self.emit1("SET_PROP", index as i64);
+                    }
+                    MemberExpression::ComputedMemberExpression(m) => {
+                        if m.optional {
+                            return Err(Unsupported("optional assignment target"));
+                        }
+                        self.compile_expr(&m.object)?;
+                        self.compile_expr(&m.expression)?;
+                        self.emit1("LOAD_SLOT", pack_addr(0, tmp));
+                        self.emit0("SET_PROP_DYN");
+                    }
+                    MemberExpression::PrivateFieldExpression(_) => {
+                        return Err(Unsupported("private field assignment"));
+                    }
+                }
+                self.emit0("POP");
+                Ok(())
+            }
+        }
+    }
+
     fn compile_var_init(&mut self, name: &str, init: &Expression<'_>) -> R<()> {
         let frame = self.fns.last().expect("frame");
         let slot = frame
@@ -2361,9 +2685,39 @@ fn collect_var_decl(
         return Ok(());
     }
     for d in &decl.declarations {
-        let name = binding_identifier(&d.id)?.name.as_str();
-        if !names.iter().any(|existing| existing == name) {
-            names.push(name.to_string());
+        collect_pattern_names(&d.id, names)?;
+    }
+    Ok(())
+}
+
+/// Collect every binding name a pattern introduces, deduped, in source order.
+/// Used to declare lexical slots and to hoist `var` names for a destructuring
+/// declaration. Computed keys and default expressions bind no name here; only
+/// the leaf identifiers do.
+fn collect_pattern_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) -> R<()> {
+    match pat {
+        BindingPattern::BindingIdentifier(id) => {
+            let name = id.name.as_str();
+            if !out.iter().any(|existing| existing == name) {
+                out.push(name.to_string());
+            }
+        }
+        BindingPattern::AssignmentPattern(ap) => collect_pattern_names(&ap.left, out)?,
+        BindingPattern::ArrayPattern(arr) => {
+            for element in arr.elements.iter().flatten() {
+                collect_pattern_names(element, out)?;
+            }
+            if let Some(rest) = &arr.rest {
+                collect_pattern_names(&rest.argument, out)?;
+            }
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_pattern_names(&prop.value, out)?;
+            }
+            if let Some(rest) = &obj.rest {
+                collect_pattern_names(&rest.argument, out)?;
+            }
         }
     }
     Ok(())

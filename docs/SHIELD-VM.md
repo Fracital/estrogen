@@ -295,6 +295,13 @@ falls back. The subset:
 - Function-local `var` with declaration hoisting through nested blocks, loops
   and switch cases. Module-root `var` only when a native import or export
   declaration proves ES module semantics.
+- Destructuring, as a `let`/`const`/`var` binding or an assignment target: object
+  patterns (renaming, defaults, computed keys, and `...rest`) and array patterns
+  (holes, defaults, nesting, and `...rest`). Array patterns walk the iterator
+  protocol, so a string, Set, or Map destructures like the engine does. A
+  destructuring leaf can be a nested pattern or, for an assignment, an identifier
+  or a member. The `...rest` of an object with a computed key before it builds
+  its excluded-key set at runtime.
 
 Falls back (declines, so the literal and name passes run instead):
 
@@ -315,9 +322,8 @@ Falls back (declines, so the literal and name passes run instead):
   observe the difference wrongly. The closure check is conservative, so a
   `for (let ...)` whose body contains a `for`/`of`, `for`/`in`, `try`, or labeled
   statement also declines for now.
-- Root `var` when the caller cannot prove ES module scope, `using`, destructuring
-  bindings, compound or update assignment to a member, a BigInt operand of
-  `++`/`--`, computed and method object keys, tagged templates, and `yield`.
+- Root `var` when the caller cannot prove ES module scope, `using`, a BigInt
+  operand of `++`/`--`, method object keys, tagged templates, and `yield`.
 
 ## The proof
 
@@ -389,9 +395,9 @@ further work. In rough dependency order:
    chunk), the emit-time guard against a chunk naming a renamed sibling file, and
    the per-chunk integrity hash and anti-tamper checks (P7), which estrogen does
    not emit yet.
-6. The rest of the expression surface: destructuring, computed or method object
-   keys, compound and update assignment to a member, a BigInt operand of
-   `++`/`--`, tagged templates, and the other forms the compiler declines.
+6. The rest of the expression surface: computed or method object-literal keys, a
+   BigInt operand of `++`/`--`, tagged templates, and the other forms the
+   compiler declines.
 7. A shared runtime bootstrap. Today a VM chunk inlines the runtime, which is
    fine for the import-free chunks the slice compiles but would duplicate the
    runtime across many chunks once the loader lands. The shield emits one

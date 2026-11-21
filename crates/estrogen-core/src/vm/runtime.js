@@ -823,6 +823,48 @@
 			},
 		});
 	};
+	// Array destructuring steps. The iterator wrapper (from GET_ITERATOR) stays
+	// on the stack so later elements keep pulling from it; the value, or the
+	// remaining values as an array, is pushed above it.
+	HANDLERS[OP_ITER_NEXT_PUSH] = function (frame) {
+		const s = frame.stack;
+		const item = s[s.length - 1].nextStep();
+		s.push(item.done ? undefined : item.value);
+	};
+	HANDLERS[OP_ITER_REST_PUSH] = function (frame) {
+		const s = frame.stack;
+		const iterator = s[s.length - 1];
+		const rest = [];
+		while (true) {
+			const item = iterator.nextStep();
+			if (item.done) break;
+			rest.push(item.value);
+		}
+		s.push(rest);
+	};
+	// Object rest: a new object with the source's own enumerable keys minus the
+	// ones already bound. OBJ_REST reads the excluded names from a JSON const;
+	// OBJ_REST_DYN reads them from an array on the stack (computed keys).
+	HANDLERS[OP_OBJ_REST] = function (frame, arg, consts) {
+		const s = frame.stack;
+		const source = Object(s.pop());
+		const excluded = JSON.parse(consts[arg]);
+		const rest = {};
+		for (const key of Object.keys(source))
+			if (excluded.indexOf(key) < 0) rest[key] = source[key];
+		s.push(rest);
+	};
+	HANDLERS[OP_OBJ_REST_DYN] = function (frame) {
+		const s = frame.stack;
+		const excluded = s
+			.pop()
+			.map((key) => (typeof key === 'symbol' ? key : String(key)));
+		const source = Object(s.pop());
+		const rest = {};
+		for (const key of Object.keys(source))
+			if (excluded.indexOf(key) < 0) rest[key] = source[key];
+		s.push(rest);
+	};
 	HANDLERS[OP_FOR_ITER] = function (frame, target) {
 		const iterator = frame.stack.pop();
 		const item = iterator.nextStep();
