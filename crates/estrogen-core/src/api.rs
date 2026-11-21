@@ -195,15 +195,17 @@ mod tests {
 
     #[test]
     fn a_chunk_off_the_vm_subset_falls_back_with_a_map() {
-        // A local export declaration is outside the VM subset. An import
-        // alone is now supported by the native-linking wrapper.
+        // An async generator is outside the VM subset, so the whole chunk takes
+        // the literal edit-and-splice path instead of compiling to bytecode. That
+        // path keeps an edit list, so the private debug map is written. (Imports
+        // and local exports on their own now compile through the VM wrapper.)
         let opts = Options {
             seed: Some(b"vm".to_vec()),
             minify: false,
             ..Options::default()
         };
         let out = obfuscate_js(
-            "import x from 'm'; export const s = 'hello world'; x(s);",
+            "export const s = 'hello world'; async function* g() { yield s; }",
             &opts,
         )
         .unwrap();

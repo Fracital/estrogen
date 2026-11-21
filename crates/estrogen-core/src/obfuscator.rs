@@ -898,6 +898,10 @@ mod tests {
             seed: Some(b"s".to_vec()),
             sourcemap_dir: Some(maps.clone()),
             minify: false,
+            // The edit-list map is a feature of the non-VM path; a VM chunk has
+            // no edit map, and an export chunk now VM-compiles, so pin the VM off
+            // to exercise the map, which is the documented debug-map workflow.
+            vm: false,
             ..Options::default()
         })
         .unwrap();
@@ -930,13 +934,15 @@ mod tests {
     fn a_minified_literal_chunk_is_a_single_line() {
         let dir = tmp_dir();
         let js = dir.join("app.js");
-        // A multi-line chunk the VM subset does not cover (a top-level function),
-        // so it takes the literal edit-and-splice path. Its string holds a `\n`.
+        // A multi-line chunk forced onto the literal edit-and-splice path (the VM
+        // compiles this export now, so pin it off to test the minified literal
+        // printing). Its string holds a `\n`.
         let src = "export function greet(name) {\n    const hi = 'hello\\nthere';\n    return hi + name;\n}\n";
         fs::write(&js, src).unwrap();
 
         let obf = Obfuscator::new(Options {
             seed: Some(b"min-seed".to_vec()),
+            vm: false,
             ..Options::default()
         })
         .unwrap();
@@ -964,6 +970,8 @@ mod tests {
         let obf = Obfuscator::new(Options {
             seed: Some(b"min-seed".to_vec()),
             minify: false,
+            // The VM compiles this export; pin it off to keep the edit output.
+            vm: false,
             ..Options::default()
         })
         .unwrap();
@@ -999,6 +1007,8 @@ mod tests {
             let obf = Obfuscator::new(Options {
                 seed: Some(b"eq-seed".to_vec()),
                 minify,
+                // Compare the two literal printings; the VM would replace both.
+                vm: false,
                 ..Options::default()
             })
             .unwrap();
@@ -1027,7 +1037,10 @@ mod tests {
         let obf = Obfuscator::new(Options {
             seed: Some(b"map-seed".to_vec()),
             sourcemap_dir: Some(maps.clone()),
-            // minify on by default
+            // minify on by default; pin the VM off so this tests the minified
+            // literal path (the VM would also write no map, but for a different
+            // reason).
+            vm: false,
             ..Options::default()
         })
         .unwrap();
