@@ -424,6 +424,27 @@ const DESTRUCTURING: &[&str] = &[
     "let x = 1, y = 2; [x, y] = [y, x]; [x, y]",
     "let a = 0; [a = 9] = []; a",
     "const var_a = (function () { var [p, q] = [1, 2]; return p + q; })(); var_a",
+    // destructured function parameters
+    "function f({ a, b }) { return a + b; } f({ a: 1, b: 2 })",
+    "function f({ a, b = 10 }) { return a + b; } [f({ a: 1 }), f({ a: 1, b: 2 })]",
+    "function f([x, y]) { return x - y; } f([5, 2])",
+    "function f([x, ...rest]) { return [x, rest.length, rest[1]]; } f([1, 2, 3])",
+    "const g = ({ a }, [b]) => a + b; g({ a: 1 }, [2])",
+    "function f({ a: { b } }) { return b; } f({ a: { b: 9 } })",
+    "function f({ a } = {}) { return a === undefined; } [f(), f({ a: 7 })]",
+    "function f(...[a, b]) { return a + b; } f(1, 2)",
+    // a destructured param without a default still counts toward length
+    "function f({ a }, b) { return f.length; } f()",
+    "function f({ a } = {}, b) { return f.length; } f()",
+    // destructuring in for-of and for-in heads
+    "let s = 0; for (const { a } of [{ a: 1 }, { a: 2 }]) s += a; s",
+    "let s = 0; for (const [x, y] of [[1, 2], [3, 4]]) s += x * y; s",
+    "const r = []; for (const { a, b = 0 } of [{ a: 1 }, { a: 2, b: 5 }]) r.push(a + b); r",
+    "const out = []; for (const [i, v] of [[0, 'a'], [1, 'b']]) out.push(i + v); out",
+    // a fresh binding per iteration, captured by a closure
+    "const fns = []; for (const { a } of [{ a: 1 }, { a: 2 }]) fns.push(() => a); [fns[0](), fns[1]()]",
+    // destructured var head leaks the binding to the function scope
+    "const run = () => { let out = []; for (var { a } of [{ a: 1 }, { a: 2 }]) out.push(a); return [out, typeof a]; }; run()",
 ];
 
 /// Generator functions: the runtime drives the frame to each `yield`. Each
@@ -609,9 +630,6 @@ fn unsupported_constructs_decline() {
         "class C { *method() {} }",
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
-        "function fd({ a }) { return a; } fd({ a: 1 })",
-        "const fa = ([x]) => x; fa([7])",
-        "function fr(...{ length }) { return length; } fr(1, 2)",
         // generators decline when their own frame would hold a handler across a
         // yield (try, for-of, for-in), plus yield* and async generators
         "function* g() { try { yield 1; } finally {} }",

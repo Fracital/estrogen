@@ -302,13 +302,15 @@ falls back. The subset:
   arrow inherits the enclosing function's. Named function expressions bind their
   own name to the function inside the body, so recursion works and the name does
   not leak out.
-- Destructuring, as a `let`/`const`/`var` binding or an assignment target: object
-  patterns (renaming, defaults, computed keys, and `...rest`) and array patterns
-  (holes, defaults, nesting, and `...rest`). Array patterns walk the iterator
-  protocol, so a string, Set, or Map destructures like the engine does. A
-  destructuring leaf can be a nested pattern or, for an assignment, an identifier
-  or a member. The `...rest` of an object with a computed key before it builds
-  its excluded-key set at runtime.
+- Destructuring, as a `let`/`const`/`var` binding, an assignment target, a
+  function parameter, or a `for`/`of` or `for`/`in` head: object patterns
+  (renaming, defaults, computed keys, and `...rest`) and array patterns (holes,
+  defaults, nesting, and `...rest`). Array patterns walk the iterator protocol,
+  so a string, Set, or Map destructures like the engine does. A destructuring
+  leaf can be a nested pattern or, for an assignment, an identifier or a member.
+  The `...rest` of an object with a computed key before it builds its
+  excluded-key set at runtime. A destructured parameter without a default counts
+  toward `Function.length`; a rest parameter can itself be a pattern.
 - Generators: a `function*` declaration or expression runs on the runtime's
   generator driver. Calling it returns a generator object; `next(v)` runs the
   body to the next `yield` or the end, `yield` suspends with its value and
@@ -330,10 +332,8 @@ Falls back (declines, so the literal and name passes run instead):
   leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
   declares a lexical binding; and a labeled jump that would close more than one
   `for`/`of` iterator at once.
-- Destructured parameters (the destructuring lowering exists for bindings and
-  assignments; wiring it into function parameters is the remaining step), a
-  generator whose own body uses `try`, `for`/`of`, or `for`/`in`, `yield*`
-  delegation, and async generators.
+- A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
+  delegation; and async generators.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
   binding where native makes one per iteration, so it declines rather than
   observe the difference wrongly. The closure check is conservative, so a
@@ -392,10 +392,9 @@ generators now compile (see the subset above). Reaching the point where the VM
 compiles a real app bundle, the way the shield's 25-of-25 integration proof
 does, is still a large amount of further work. In rough dependency order:
 
-1. The rest of the function surface: destructured parameters (reuse the binding
-   destructuring lowering) and the rest of generators (a `try`, `for`/`of`, or
-   `for`/`in` inside a generator body, `yield*`, and async generators, which the
-   completion-record and iterator-close machinery can extend to).
+1. The rest of generators: a `try`, `for`/`of`, or `for`/`in` inside a generator
+   body, `yield*`, and async generators, which the completion-record and
+   iterator-close machinery can extend to.
 2. The rest of control flow: `break`/`continue` that escapes a `try` (the
    abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
    `jump` completion record), a `switch` case that declares a lexical binding, and

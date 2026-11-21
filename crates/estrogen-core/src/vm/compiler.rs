@@ -280,47 +280,77 @@ impl Compiler {
         let mut length = 0usize;
         let mut counting = true;
         for (i, item) in params.items.iter().enumerate() {
-            let name = binding_identifier(&item.pattern)?.name.as_str().to_string();
-            let slot = self.add_local(&name);
-            match &item.initializer {
-                None => {
+            match (&item.pattern, &item.initializer) {
+                // Plain identifier, no default: bind the slot straight from the
+                // argument. This counts toward Function.length.
+                (BindingPattern::BindingIdentifier(id), None) => {
                     if counting {
                         length += 1;
                     }
+                    let slot = self.add_local(id.name.as_str());
                     self.emit1("BIND_PARAM", ((slot as i64) << 8) | (i as i64));
                 }
-                Some(init) => {
-                    // A default runs its initializer only when the argument is
-                    // missing, that is strictly equal to undefined.
+                // Identifier with a default: a default and everything after it
+                // stops the length count.
+                (BindingPattern::BindingIdentifier(id), Some(init)) => {
                     counting = false;
+                    let slot = self.add_local(id.name.as_str());
                     self.emit1("DECLARE_SLOT", (slot as i64) << 2);
                     self.emit1("LOAD_ARG", i as i64);
-                    self.emit0("DUP");
-                    self.emit0("PUSH_UNDEF");
-                    self.emit0("SEQ");
-                    let use_default = self.emit_jump("JMP_IF_TRUE");
-                    let done = self.emit_jump("JMP");
-                    self.patch_here(use_default);
-                    self.emit0("POP");
-                    self.compile_expr(init)?;
-                    self.patch_here(done);
+                    self.apply_default(init)?;
                     self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+                // Destructured parameter. A destructured param without a default
+                // still counts toward Function.length; with one it stops the count.
+                (pattern, initializer) => {
+                    if initializer.is_some() {
+                        counting = false;
+                    } else if counting {
+                        length += 1;
+                    }
+                    self.declare_pattern_slots(pattern, 0)?;
+                    self.emit1("LOAD_ARG", i as i64);
+                    if let Some(init) = initializer {
+                        self.apply_default(init)?;
+                    }
+                    self.destructure_binding(pattern, BindMode::Lexical)?;
                 }
             }
         }
         if let Some(rest) = &params.rest {
-            // A rest parameter binds an Array of the arguments past the plain
-            // ones. A destructured rest target declines through binding_identifier.
-            let name = binding_identifier(&rest.rest.argument)?
-                .name
-                .as_str()
-                .to_string();
-            let slot = self.add_local(&name);
-            self.emit1("DECLARE_SLOT", (slot as i64) << 2);
-            self.emit1("LOAD_ARGS_FROM", params.items.len() as i64);
-            self.emit1("INIT_SLOT", pack_addr(0, slot));
+            // A rest parameter binds the arguments past the plain ones. The rest
+            // target can itself be a pattern, so destructure the gathered array.
+            let from = params.items.len() as i64;
+            match &rest.rest.argument {
+                BindingPattern::BindingIdentifier(id) => {
+                    let slot = self.add_local(id.name.as_str());
+                    self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+                    self.emit1("LOAD_ARGS_FROM", from);
+                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+                pattern => {
+                    self.declare_pattern_slots(pattern, 0)?;
+                    self.emit1("LOAD_ARGS_FROM", from);
+                    self.destructure_binding(pattern, BindMode::Lexical)?;
+                }
+            }
         }
         Ok(length)
+    }
+
+    /// Declare a slot for every leaf of a binding pattern, so the following
+    /// `destructure_binding` can initialize them. `kind` is the DECLARE_SLOT kind
+    /// bit (0 for a mutable parameter slot, the lexical kind for a `const`/`let`
+    /// head). Shared by destructured parameters and destructured `for`/`of` and
+    /// `for`/`in` heads.
+    fn declare_pattern_slots(&mut self, pattern: &BindingPattern<'_>, kind: i64) -> R<()> {
+        let mut names = Vec::new();
+        collect_pattern_names(pattern, &mut names)?;
+        for name in &names {
+            let slot = self.add_local(name);
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+        }
+        Ok(())
     }
 
     fn add_function(&mut self, def: FunctionDef) -> usize {
@@ -1028,7 +1058,11 @@ impl Compiler {
         if decl.declarations.len() != 1 || decl.declarations[0].init.is_some() {
             return Err(Unsupported("iterated binding declaration"));
         }
-        let name = binding_identifier(&decl.declarations[0].id)?.name.as_str();
+        let head = &decl.declarations[0].id;
+        let head_ident = match head {
+            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+            _ => None,
+        };
         let lexical = match decl.kind {
             VariableDeclarationKind::Var => false,
             VariableDeclarationKind::Let | VariableDeclarationKind::Const => true,
@@ -1044,10 +1078,16 @@ impl Compiler {
         let head_scope_index = self.scopes.len() - 1;
         if lexical {
             // The RHS resolves its head binding to this uninitialized slot.
-            // Every subsequent iteration gets a separate initialized scope.
-            let slot = self.add_local(name);
-            let kind = lexical_kind(decl.kind)?;
-            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+            // Every subsequent iteration gets a separate initialized scope, so
+            // these outer slots are shadowed and never read.
+            match head_ident {
+                Some(name) => {
+                    let slot = self.add_local(name);
+                    let kind = lexical_kind(decl.kind)?;
+                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                }
+                None => self.declare_pattern_slots(head, 0)?,
+            }
         }
         let iterator = self.add_local("\0iterator");
         self.emit1("DECLARE_SLOT", (iterator as i64) << 2);
@@ -1076,13 +1116,26 @@ impl Compiler {
         });
         if lexical {
             self.open_scope();
-            let slot = self.add_local(name);
             let kind = lexical_kind(decl.kind)?;
-            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
-            self.emit1("INIT_SLOT", pack_addr(0, slot));
+            match head_ident {
+                Some(name) => {
+                    let slot = self.add_local(name);
+                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+                None => {
+                    self.declare_pattern_slots(head, kind)?;
+                    self.destructure_binding(head, BindMode::Lexical)?;
+                }
+            }
         } else {
-            self.emit_store_name(name);
-            self.emit0("POP");
+            match head_ident {
+                Some(name) => {
+                    self.emit_store_name(name);
+                    self.emit0("POP");
+                }
+                None => self.destructure_binding(head, BindMode::Var)?,
+            }
         }
 
         let caught = self.emit_jump("PUSH_HANDLER");
