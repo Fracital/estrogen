@@ -458,9 +458,10 @@ impl Compiler {
         inferred_name: Option<&str>,
         bind: Option<i64>,
     ) -> R<()> {
-        if class.heritage.is_some() || !class.decorators.is_empty() {
-            return Err(Unsupported("derived or decorated class"));
+        if !class.decorators.is_empty() {
+            return Err(Unsupported("decorated class"));
         }
+        let has_super = class.heritage.is_some();
         let name = class
             .id
             .as_ref()
@@ -517,6 +518,11 @@ impl Compiler {
                     if field.computed || !field.decorators.is_empty() {
                         return Err(Unsupported("computed or decorated class field"));
                     }
+                    // An instance field of a derived class initializes after
+                    // super() returns, which the subset does not thread yet.
+                    if has_super && !field.r#static {
+                        return Err(Unsupported("instance field in a derived class"));
+                    }
                     let key =
                         static_key(&field.key).ok_or(Unsupported("non-static class field key"))?;
                     let initializer = match &field.value {
@@ -538,8 +544,15 @@ impl Compiler {
             "ctor": constructor,
             "methods": methods,
             "fields": fields,
+            "hasSuper": has_super,
         });
         let index = self.consts.add_class(descriptor);
+        // Push the superclass value (null for a non-derived class) for
+        // BUILD_CLASS to pop.
+        match class.heritage.as_ref() {
+            Some(heritage) => self.compile_expr(&heritage.expression)?,
+            None => self.emit0("PUSH_NULL"),
+        }
         self.emit1("BUILD_CLASS", index as i64);
         Ok(())
     }
@@ -1546,13 +1559,23 @@ impl Compiler {
                 if m.optional {
                     return Err(Unsupported("optional member access"));
                 }
-                self.compile_expr(&m.object)?;
-                let i = self.consts.add_str(m.property.name.as_str());
-                self.emit1("GET_PROP", i as i64);
+                // super.prop reads off the prototype of the method's home
+                // object with `this` as the receiver.
+                if matches!(&m.object, Expression::Super(_)) {
+                    let i = self.consts.add_str(m.property.name.as_str());
+                    self.emit1("SUPER_GET", i as i64);
+                } else {
+                    self.compile_expr(&m.object)?;
+                    let i = self.consts.add_str(m.property.name.as_str());
+                    self.emit1("GET_PROP", i as i64);
+                }
             }
             Expression::ComputedMemberExpression(m) => {
                 if m.optional {
                     return Err(Unsupported("optional member access"));
+                }
+                if matches!(&m.object, Expression::Super(_)) {
+                    return Err(Unsupported("computed super member access"));
                 }
                 self.compile_expr(&m.object)?;
                 self.compile_expr(&m.expression)?;
@@ -1684,6 +1707,9 @@ impl Compiler {
                 // import.meta is read from the native module wrapper.
                 self.uses_import_meta = true;
                 self.emit0("IMPORT_META");
+            }
+            Expression::NewTarget(_) => {
+                self.emit0("LOAD_NEW_TARGET");
             }
             Expression::ImportExpression(i) => {
                 // Dynamic import() calls the native import the wrapper supplies.
@@ -2107,6 +2133,28 @@ impl Compiler {
             }
         }
         match callee {
+            // super(...args): construct the superclass and bind `this`.
+            Expression::Super(_) => {
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    return Err(Unsupported("spread in super()"));
+                }
+                self.emit1("SUPER_CALL", argc as i64);
+            }
+            // super.method(args): the receiver is `this`, but the method comes
+            // from the prototype of the method's home object.
+            Expression::StaticMemberExpression(m)
+                if !m.optional && matches!(&m.object, Expression::Super(_)) =>
+            {
+                self.emit0("PUSH_THIS");
+                let i = self.consts.add_str(m.property.name.as_str());
+                self.emit1("SUPER_GET", i as i64);
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    return Err(Unsupported("spread in a super method call"));
+                }
+                self.emit1("CALL_METHOD", argc as i64);
+            }
             Expression::StaticMemberExpression(m) if !m.optional => {
                 self.compile_expr(&m.object)?;
                 self.emit0("DUP");
@@ -2118,6 +2166,11 @@ impl Compiler {
                 } else {
                     self.emit1("CALL_METHOD", argc as i64);
                 }
+            }
+            Expression::ComputedMemberExpression(m)
+                if !m.optional && matches!(&m.object, Expression::Super(_)) =>
+            {
+                return Err(Unsupported("computed super member call"));
             }
             Expression::ComputedMemberExpression(m) if !m.optional => {
                 self.compile_expr(&m.object)?;

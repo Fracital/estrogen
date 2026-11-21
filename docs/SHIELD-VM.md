@@ -272,10 +272,18 @@ falls back. The subset:
   top-level `await` compiles its main to the same driver, so the chunk evaluates
   to a promise. `AWAIT` and `AWAIT_TOP` carry the suspend; the driver and the
   synchronous loop share one handler stack.
-- Classes: a non-derived class with a constructor, plain methods, static methods,
-  and instance or static fields. `BUILD_CLASS` creates the methods and binds the
-  class before static fields run. A class binding resolves to a slot like any
-  other name.
+- Classes: a constructor, plain methods, static methods, and instance or static
+  fields. `BUILD_CLASS` creates the methods and binds the class before static
+  fields run. A class binding resolves to a slot like any other name.
+- Derived classes: `extends` wires the instance and static prototype chains, and
+  BUILD_CLASS pops the superclass value the compiler pushes before it. `super(...)`
+  in a constructor constructs the superclass with the active `new.target` through
+  `Reflect.construct` and binds the result as `this`, which starts uninitialized
+  so using `this` before `super()` throws. `super.prop` and `super.method()` read
+  and call through the prototype of the method's home object with `this` as the
+  receiver, and `new.target` loads from the frame. The class prototype stays
+  non-writable. A derived class with an instance field declines, because a field
+  initializes after `super()` returns, which is not threaded yet.
 - Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `for`/`of`,
   `for`/`in`, `switch`, `try`/`catch`/`finally`, `throw`, and `break`/`continue`,
   both unlabeled and to a label on an enclosing loop, `switch`, or block. A
@@ -333,11 +341,12 @@ falls back. The subset:
 
 Falls back (declines, so the literal and name passes run instead):
 
-- Derived or decorated classes (`extends`/`super`), class getters and setters,
-  computed, `async`, or generator methods, private class members, static blocks,
-  and local exported declarations or export specifiers. Native static imports and
-  reexports work, but the VM's full module loader is not ported, so executable
-  exports still take the fallback.
+- A decorated class, a derived class with an instance field, class getters and
+  setters, computed, `async`, or generator methods, private class members,
+  static blocks, a computed super member, and a spread in `super()`. Native
+  static imports and reexports work, but the VM's full module loader is not
+  ported, so a local export of a value computed in the VM beyond the simple
+  cases takes the fallback.
 - A `break` or `continue` that escapes a `try` (its block, catch, or finally),
   which needs the abrupt-jump trampoline that is not emitted yet. A jump that
   targets a loop or `switch` nested inside the try stays inside it and compiles;
@@ -420,9 +429,11 @@ does, is still a large amount of further work. In rough dependency order:
    `loader-template.js` still need a full port. A real Vite graph also has
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
-4. Derived classes: `extends`/`super`, `new.target`, getters and setters, private
-   state, computed and `async` methods, and static blocks. The non-derived case
-   (`BUILD_CLASS`, plain methods, and fields) compiles.
+4. The rest of the class surface: getters and setters, private state, computed,
+   `async`, and generator methods, static blocks, an instance field in a derived
+   class, a computed super member, and a spread in `super()`. The common derived
+   case (`extends`, `super(...)`, `super.method()`/`super.prop`, `new.target`,
+   the prototype chain) compiles.
 5. The soundness fixpoint the shield computes (no native chunk may import a VM
    chunk), the emit-time guard against a chunk naming a renamed sibling file, and
    the per-chunk integrity hash and anti-tamper checks (P7), which estrogen does

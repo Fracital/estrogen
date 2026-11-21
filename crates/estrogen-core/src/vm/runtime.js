@@ -132,6 +132,9 @@
 		return scope;
 	}
 	const TDZ_READ = 'Cannot access a lexical binding before initialization';
+	// A derived-class constructor's `this` is uninitialized until super() runs.
+	// The frame holds this sentinel until SUPER_CALL constructs the instance.
+	const THIS_TDZ = {};
 	const NativeRegExp = /(?:)/.constructor;
 	// Build a real arguments object from the call arguments. Applying a strict
 	// helper with no parameters yields an unmapped arguments object, so the
@@ -193,6 +196,10 @@
 		frame.stack.push(false);
 	};
 	HANDLERS[OP_PUSH_THIS] = (frame) => {
+		if (frame.thisVal === THIS_TDZ)
+			throw new ReferenceError(
+				"Must call super constructor before accessing 'this'",
+			);
 		frame.stack.push(frame.thisVal);
 	};
 
@@ -750,7 +757,34 @@
 		doReturn,
 		buildClass,
 	) {
-		frame.stack.push(buildClass(consts[arg], frame.scope));
+		// The compiler pushes the superclass value (null for a non-derived class)
+		// right before BUILD_CLASS, so it is on top of the stack here.
+		const superClass = frame.stack.pop();
+		frame.stack.push(buildClass(consts[arg], frame.scope, superClass));
+	};
+	// `new.target` in the active frame.
+	HANDLERS[OP_LOAD_NEW_TARGET] = (frame) => {
+		frame.stack.push(frame.newTarget);
+	};
+	// `super.prop`: read a property off the prototype of the method's home
+	// object, with `this` as the receiver so an inherited getter sees the
+	// instance.
+	HANDLERS[OP_SUPER_GET] = (frame, arg, consts) => {
+		const proto = Object.getPrototypeOf(frame.home);
+		frame.stack.push(Reflect.get(proto, consts[arg], frame.thisVal));
+	};
+	// `super(...)` in a derived constructor: construct the superclass with the
+	// active new.target and bind the result as `this`.
+	HANDLERS[OP_SUPER_CALL] = (frame, arg) => {
+		const s = frame.stack;
+		const args = new Array(arg);
+		for (let i = arg - 1; i >= 0; i--) args[i] = s.pop();
+		if (frame.thisVal !== THIS_TDZ)
+			throw new ReferenceError('Super constructor may only be called once');
+		const Sup = frame.superClass === null ? Object : frame.superClass;
+		const o = Reflect.construct(Sup, args, frame.newTarget);
+		frame.thisVal = o;
+		s.push(o);
 	};
 	HANDLERS[OP_RETURN] = function (
 		frame,
@@ -1043,7 +1077,7 @@
 			arityByByte[byte] = pair[1];
 		}
 
-		function makeFrame(def, closureScope, thisVal, args) {
+		function makeFrame(def, closureScope, thisVal, args, extra) {
 			return {
 				code: def.c,
 				pc: 0,
@@ -1054,6 +1088,12 @@
 				thisVal,
 				args,
 				completion: undefined,
+				// Class support: `home` is the object a method's super looks up
+				// through, `newTarget` is the active new.target, and `superClass`
+				// is the parent a derived constructor's super() constructs.
+				home: extra ? extra.home : undefined,
+				newTarget: extra ? extra.newTarget : undefined,
+				superClass: extra ? extra.superClass : undefined,
 			};
 		}
 
@@ -1065,11 +1105,23 @@
 		function createClosure(def, ctx) {
 			'use strict';
 			const drive = def.g ? makeGenerator : def.a ? runAsync : runSync;
+			// A plain function takes its new.target and home from the call site;
+			// an arrow inherits both from the defining context.
 			const fn = def.r
 				? (...callArgs) =>
-						drive(makeFrame(def, ctx.scope, ctx.arrowThis, callArgs))
+						drive(
+							makeFrame(def, ctx.scope, ctx.arrowThis, callArgs, {
+								newTarget: ctx.newTarget,
+								home: ctx.home,
+							}),
+						)
 				: function (...callArgs) {
-						return drive(makeFrame(def, ctx.scope, this, callArgs));
+						return drive(
+							makeFrame(def, ctx.scope, this, callArgs, {
+								newTarget: new.target,
+								home: ctx.home,
+							}),
+						);
 					};
 			try {
 				Object.defineProperty(fn, 'length', {
@@ -1086,13 +1138,25 @@
 			return fn;
 		}
 
-		function buildClass(desc, classScope) {
+		function buildClass(desc, classScope, superClass) {
 			'use strict';
+			const hasSuper = !!desc.hasSuper;
+			if (hasSuper && superClass !== null && typeof superClass !== 'function') {
+				throw new TypeError(
+					'Class extends value ' +
+						String(superClass) +
+						' is not a constructor or null',
+				);
+			}
 			const defineField = (receiver, field) => {
 				const value =
 					field.fn === null
 						? undefined
-						: runSync(makeFrame(functions[field.fn], classScope, receiver, []));
+						: runSync(
+								makeFrame(functions[field.fn], classScope, receiver, [], {
+									home: proto,
+								}),
+							);
 				Object.defineProperty(receiver, field.key, {
 					value,
 					writable: true,
@@ -1101,16 +1165,54 @@
 				});
 			};
 			const Class = function (...args) {
-				if (!new.target)
+				const nt = new.target;
+				if (!nt)
 					throw new TypeError(
 						'Class constructor cannot be invoked without new',
 					);
+				if (hasSuper) {
+					// A derived class's `this` comes from super(); an implicit
+					// constructor forwards straight to the superclass.
+					if (desc.ctor === null) {
+						return Reflect.construct(
+							superClass === null ? Object : superClass,
+							args,
+							nt,
+						);
+					}
+					const f = makeFrame(
+						functions[desc.ctor],
+						classScope,
+						THIS_TDZ,
+						args,
+						{
+							home: proto,
+							newTarget: nt,
+							superClass,
+						},
+					);
+					const value = runSync(f);
+					if (
+						value !== null &&
+						(typeof value === 'object' || typeof value === 'function')
+					) {
+						return value;
+					}
+					if (f.thisVal === THIS_TDZ)
+						throw new ReferenceError(
+							'Must call super constructor in derived class before returning',
+						);
+					return f.thisVal;
+				}
 				for (const field of desc.fields) {
 					if (!field.static) defineField(this, field);
 				}
 				if (desc.ctor !== null) {
 					const value = runSync(
-						makeFrame(functions[desc.ctor], classScope, this, args),
+						makeFrame(functions[desc.ctor], classScope, this, args, {
+							home: proto,
+							newTarget: nt,
+						}),
 					);
 					if (
 						value !== null &&
@@ -1120,6 +1222,17 @@
 					}
 				}
 			};
+			const proto = Class.prototype;
+			if (hasSuper) {
+				Object.setPrototypeOf(
+					proto,
+					superClass === null ? null : superClass.prototype,
+				);
+				Object.setPrototypeOf(
+					Class,
+					superClass === null ? Function.prototype : superClass,
+				);
+			}
 			Object.defineProperty(Class, 'name', {
 				value: desc.name,
 				configurable: true,
@@ -1135,14 +1248,16 @@
 				// Concise methods have no own prototype and cannot be constructed.
 				const fn = {
 					[key](...args) {
-						return runSync(makeFrame(def, classScope, this, args));
+						return runSync(
+							makeFrame(def, classScope, this, args, { home: proto }),
+						);
 					},
 				}[key];
 				Object.defineProperty(fn, 'length', {
 					value: def.p || 0,
 					configurable: true,
 				});
-				Object.defineProperty(method.static ? Class : Class.prototype, key, {
+				Object.defineProperty(method.static ? Class : proto, key, {
 					value: fn,
 					writable: true,
 					enumerable: false,

@@ -207,6 +207,25 @@ const CLASSES: &[&str] = &[
     "const Out = class Internal { static ref = Internal; }; [Out.name, Out.ref === Out]",
     "typeof C; class C {}",
     "class C { static x = MissingName; } C.x",
+    // extends: super() sets up this, inherited method dispatch, instanceof
+    "class A { constructor(x) { this.x = x; } getX() { return this.x; } } class B extends A { constructor(x, y) { super(x); this.y = y; } sum() { return this.getX() + this.y; } } const b = new B(3, 4); [b.x, b.y, b.sum(), b.getX(), b instanceof A, b instanceof B]",
+    // super.method() resolves on the parent prototype
+    "class A { greet() { return 'A'; } } class B extends A { greet() { return 'B' + super.greet(); } } new B().greet()",
+    // super.prop read as a value, then called with this
+    "class A { m() { return this.n; } } class B extends A { constructor() { super(); this.n = 9; } test() { const f = super.m; return f.call(this); } } new B().test()",
+    // the derived prototype chain and non-writable prototype descriptor
+    "class A {} class B extends A {} const p = Object.getOwnPropertyDescriptor(B, 'prototype'); [p.writable, p.enumerable, p.configurable, Object.getPrototypeOf(B.prototype) === A.prototype, Object.getPrototypeOf(B) === A]",
+    // an implicit constructor forwards arguments to super
+    "class A { constructor(x) { this.x = x; } } class B extends A {} const b = new B(7); [b.constructor.name, b.x, b instanceof A]",
+    // new.target is the constructed class, in a plain function it is set only on new
+    "class A { constructor() { this.t = new.target.name; } } class B extends A {} [new A().t, new B().t]",
+    "function F() { this.isNew = !!new.target; } [new F().isNew, (function g() { return !!new.target; })()]",
+    // static field initialization order across a derived class
+    "let log = []; class A { static a = log.push('a'); } class B extends A { static b = log.push('b'); } B; log",
+    // using this before super() in a derived constructor throws
+    "class A {} class B extends A { constructor() { return this; } } let e; try { new B(); } catch (err) { e = err && err.constructor && err.constructor.name; } e",
+    // extends null: the prototype has no parent
+    "class A extends null { constructor() { return Object.create(new.target.prototype); } } [Object.getPrototypeOf(A.prototype), A.prototype instanceof Object]",
 ];
 
 /// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
@@ -637,8 +656,8 @@ fn unsupported_constructs_decline() {
     let unsupported = [
         "var z = 1; z",
         "import x from './y.js'; x",
-        "class C extends Array {}",
         "class C { get x() { return 1; } }",
+        "class A {} class B extends A { f = 1; }",
         "class C { set x(value) {} }",
         "class C { [Math.random()]() {} }",
         "class C { [Math.random()] = 1; }",
@@ -1041,11 +1060,11 @@ fn unsupported_chunk_still_declines_at_the_api() {
         seed: Some(b"fallback-seed".to_vec()),
         ..Options::default()
     };
-    // Derived classes need super semantics, so the VM must still decline them.
-    let declined = try_compile_chunk("class C extends Array { m() { return 1; } }\n", &opts)
+    // A class getter is still outside the subset, so the VM must decline it.
+    let declined = try_compile_chunk("class C { get x() { return 1; } }\n", &opts)
         .expect("compile should not error");
     assert!(
         declined.is_none(),
-        "a derived class chunk must decline to the fallback path"
+        "an out-of-subset class chunk must decline to the fallback path"
     );
 }
