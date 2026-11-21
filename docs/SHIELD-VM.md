@@ -377,6 +377,11 @@ falls back. The subset:
   The `...rest` of an object with a computed key before it builds its
   excluded-key set at runtime. A destructured parameter without a default counts
   toward `Function.length`; a rest parameter can itself be a pattern.
+- A `for`/`of` or `for`/`in` head that is an existing assignment target rather
+  than a fresh binding: a member (`for (obj.k of it)`), an outer variable
+  (`for (x of it)`), or a destructuring pattern over existing targets
+  (`for ([a, b] of pairs)`). Each iteration stores the yielded value into that
+  place, so no new binding is made.
 - Generators: a `function*` declaration or expression runs on the runtime's
   generator driver. Calling it returns a generator object; `next(v)` runs the
   body to the next `yield` or the end, `yield` suspends with its value and

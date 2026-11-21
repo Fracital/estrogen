@@ -1515,23 +1515,43 @@ impl Compiler {
         {
             return Err(Unsupported("return across nested iterators"));
         }
-        let ForStatementLeft::VariableDeclaration(decl) = left else {
-            return Err(Unsupported("iterated assignment target"));
+        // The loop head is either a fresh binding declaration or an existing
+        // assignment target. `for (let x of it)` declares a per-iteration
+        // binding; `for (obj.k of it)`, `for (x of it)` with an outer `x`, and a
+        // destructuring head like `for ([a, b] of pairs)` store the yielded value
+        // into a place that already exists, so no fresh binding is made.
+        let (decl, target) = match left {
+            ForStatementLeft::VariableDeclaration(decl) => (Some(decl), None),
+            _ => (
+                None,
+                Some(
+                    left.as_assignment_target()
+                        .ok_or(Unsupported("iterated head kind"))?,
+                ),
+            ),
         };
-        if decl.declarations.len() != 1 || decl.declarations[0].init.is_some() {
-            return Err(Unsupported("iterated binding declaration"));
-        }
-        let head = &decl.declarations[0].id;
-        let head_ident = match head {
-            BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
-            _ => None,
+        let (head, head_ident, lexical) = if let Some(decl) = decl {
+            if decl.declarations.len() != 1 || decl.declarations[0].init.is_some() {
+                return Err(Unsupported("iterated binding declaration"));
+            }
+            let head = &decl.declarations[0].id;
+            let head_ident = match head {
+                BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                _ => None,
+            };
+            let lexical = match decl.kind {
+                VariableDeclarationKind::Var => false,
+                VariableDeclarationKind::Let | VariableDeclarationKind::Const => true,
+                _ => return Err(Unsupported("iterated declaration kind")),
+            };
+            (Some(head), head_ident, lexical)
+        } else {
+            (None, None, false)
         };
-        let lexical = match decl.kind {
-            VariableDeclarationKind::Var => false,
-            VariableDeclarationKind::Let | VariableDeclarationKind::Const => true,
-            _ => return Err(Unsupported("iterated declaration kind")),
-        };
-        if !lexical {
+        // A top-level `var` head in a chunk of unknown script kind would expose a
+        // page global. An assignment target writes a place that already exists,
+        // so it is exempt from that rule.
+        if decl.is_some() && !lexical {
             let frame = self.fns.last().expect("frame");
             if frame.is_module_main && !frame.allow_module_var {
                 return Err(Unsupported("top-level var needs script kind"));
@@ -1543,10 +1563,11 @@ impl Compiler {
             // The RHS resolves its head binding to this uninitialized slot.
             // Every subsequent iteration gets a separate initialized scope, so
             // these outer slots are shadowed and never read.
+            let head = head.expect("lexical head");
             match head_ident {
                 Some(name) => {
                     let slot = self.add_local(name);
-                    let kind = lexical_kind(decl.kind)?;
+                    let kind = lexical_kind(decl.expect("lexical decl").kind)?;
                     self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
                 }
                 None => self.declare_pattern_slots(head, 0)?,
@@ -1579,7 +1600,8 @@ impl Compiler {
         });
         if lexical {
             self.open_scope();
-            let kind = lexical_kind(decl.kind)?;
+            let head = head.expect("lexical head");
+            let kind = lexical_kind(decl.expect("lexical decl").kind)?;
             match head_ident {
                 Some(name) => {
                     let slot = self.add_local(name);
@@ -1591,7 +1613,8 @@ impl Compiler {
                     self.destructure_binding(head, BindMode::Lexical)?;
                 }
             }
-        } else {
+        } else if let Some(head) = head {
+            // A `var` declaration head stores the yielded value by binding.
             match head_ident {
                 Some(name) => {
                     self.emit_store_name(name);
@@ -1599,6 +1622,11 @@ impl Compiler {
                 }
                 None => self.destructure_binding(head, BindMode::Var)?,
             }
+        } else {
+            // An assignment target head stores the yielded value into the place
+            // that already exists (a member, an outer binding, or a destructuring
+            // pattern over existing targets).
+            self.assign_leaf(target.expect("assignment target"))?;
         }
 
         let caught = self.emit_jump("PUSH_HANDLER");

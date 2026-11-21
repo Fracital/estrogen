@@ -475,6 +475,18 @@ const CONTROL: &[&str] = &[
     "let i = 0; let s = 0; while (i < 5) { try { i++; if (i === 3) break; s += i; } finally { s += 100; } } s",
     // a continue escaping a nested block scope and a finally keeps the binding
     "let o = []; for (let i = 0; i < 3; i++) { try { let k = i * 2; if (i === 1) continue; o.push(k); } finally { o.push(-i); } } o",
+    // a for-of whose head is a member assignment target stores each value there
+    "const o = {}; const r = []; for (o.k of [1, 2, 3]) { r.push(o.k); } [r, o.k]",
+    // a for-of whose head is an outer binding, not a fresh declaration
+    "let x; const r = []; for (x of [4, 5]) { r.push(x); } [r, x]",
+    // a for-of with a destructuring assignment head over outer bindings
+    "let a, b; const r = []; for ([a, b] of [[1, 2], [3, 4]]) { r.push(a + '-' + b); } r",
+    // a for-of with an object destructuring assignment head
+    "let p; const r = []; for ({ p } of [{ p: 1 }, { p: 2 }]) { r.push(p); } r",
+    // a for-in whose head is an outer binding assignment target
+    "const obj = { x: 1, y: 2 }; let k; const r = []; for (k in obj) { r.push(k); } r",
+    // a for-in whose head is a member assignment target
+    "const o = {}; const src = { a: 1, b: 2 }; const r = []; for (o.key in src) { r.push(o.key); } [r, o.key]",
 ];
 
 /// Expression-surface mutation: compound, logical, and update assignment to a
