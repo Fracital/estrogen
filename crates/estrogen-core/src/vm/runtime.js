@@ -35,6 +35,7 @@
 	const SIG_HALT = 1;
 	const SIG_AWAIT = 2;
 	const SIG_YIELD = 3;
+	const SIG_YIELD_STAR = 4;
 
 	// A handler on frame.handlers is a catch or a finally. A finally runs on
 	// every way its try completes; the pending completion rides frame.completions
@@ -88,7 +89,7 @@
 		OP_SUPER_CALL_APPLY = _n++, OP_GET_PRIVATE = _n++, OP_SET_PRIVATE = _n++, OP_HAS_PRIVATE = _n++,
 		OP_INIT_PRIVATE = _n++, OP_MODULE_INIT = _n++, OP_IMPORT_BINDING = _n++, OP_EXPORT_BINDING = _n++,
 		OP_DYNAMIC_IMPORT = _n++, OP_IMPORT_META = _n++, OP_AWAIT_TOP = _n++, OP_SET_COMPLETION = _n++,
-		OP_LOAD_ARGUMENTS = _n++, OP_YIELD = _n++;
+		OP_LOAD_ARGUMENTS = _n++, OP_YIELD = _n++, OP_YIELD_STAR = _n++;
 
 	// A constant pool entry may be a tagged object for a value JSON cannot carry
 	// directly. The compiler writes these; decodeConst reverses them.
@@ -593,6 +594,12 @@
 	// sent to next() back as this expression's result.
 	HANDLERS[OP_YIELD] = function (frame) {
 		return { type: SIG_YIELD, value: frame.stack.pop() };
+	};
+	// Suspend to delegate to the iterable on top of the stack. The generator
+	// driver drives its iterator, forwarding next/throw/return, and resumes the
+	// frame with the delegate's return value once it is done.
+	HANDLERS[OP_YIELD_STAR] = function (frame) {
+		return { type: SIG_YIELD_STAR, value: frame.stack.pop() };
 	};
 	// Module context handlers. moduleCtx is the tenth dispatch argument, filled
 	// from the native wrapper. IMPORT_META reads import.meta, DYNAMIC_IMPORT
@@ -1239,31 +1246,13 @@
 		function makeGenerator(frame) {
 			let done = false;
 			let started = false;
-			function resume(value, mode) {
-				if (done) {
-					if (mode === 'throw') throw value;
-					return { value: mode === 'return' ? value : undefined, done: true };
-				}
-				if (!started && mode !== 'next') {
-					// A throw or return before the body starts never runs it.
-					done = true;
-					if (mode === 'throw') throw value;
-					return { value: value, done: true };
-				}
-				if (started) {
-					if (mode === 'throw') {
-						if (!unwindFrame(frame, value)) {
-							done = true;
-							throw value;
-						}
-					} else if (mode === 'return') {
-						done = true;
-						return { value: value, done: true };
-					} else {
-						frame.stack.push(value);
-					}
-				}
-				started = true;
+			// The iterator of an active `yield*`, or null. While set, next/throw/
+			// return forward to it instead of the frame.
+			let delegate = null;
+
+			// Run the frame to the next suspend. A plain yield yields its value; a
+			// yield* starts delegating to the iterable's iterator.
+			function runStep() {
 				let sig;
 				try {
 					sig = runFrame(frame);
@@ -1272,8 +1261,106 @@
 					throw error;
 				}
 				if (sig.type === SIG_YIELD) return { value: sig.value, done: false };
+				if (sig.type === SIG_YIELD_STAR) {
+					const method = sig.value[Symbol.iterator];
+					if (typeof method !== 'function')
+						throw new TypeError('Value is not iterable');
+					delegate = Reflect.apply(method, sig.value, []);
+					if (
+						delegate == null ||
+						(typeof delegate !== 'object' && typeof delegate !== 'function')
+					)
+						throw new TypeError('Iterator method must return an object');
+					return driveDelegate(undefined, 'next');
+				}
 				done = true;
 				return { value: sig.value, done: true };
+			}
+
+			// Resume the frame body after a value lands on the stack.
+			function resumeFrame(value, mode) {
+				if (mode === 'throw') {
+					if (!unwindFrame(frame, value)) {
+						done = true;
+						throw value;
+					}
+				} else {
+					frame.stack.push(value);
+				}
+				return runStep();
+			}
+
+			// Forward one next/throw/return into the active delegate. On a normal
+			// result it yields the delegate's value; when the delegate is done it
+			// resumes the frame with the delegate's return value as the yield*
+			// result (mode next), or ends this generator (mode return).
+			function driveDelegate(value, mode) {
+				let result;
+				try {
+					if (mode === 'throw') {
+						const thrower = delegate.throw;
+						if (thrower == null) {
+							const closer = delegate.return;
+							if (closer != null) Reflect.apply(closer, delegate, []);
+							delegate = null;
+							return resumeFrame(
+								new TypeError('The iterator does not provide a throw method'),
+								'throw',
+							);
+						}
+						result = Reflect.apply(thrower, delegate, [value]);
+					} else if (mode === 'return') {
+						const closer = delegate.return;
+						if (closer == null) {
+							delegate = null;
+							done = true;
+							return { value: value, done: true };
+						}
+						result = Reflect.apply(closer, delegate, [value]);
+					} else {
+						result = Reflect.apply(delegate.next, delegate, [value]);
+					}
+				} catch (error) {
+					delegate = null;
+					return resumeFrame(error, 'throw');
+				}
+				if (
+					result == null ||
+					(typeof result !== 'object' && typeof result !== 'function')
+				)
+					throw new TypeError('Iterator result must be an object');
+				if (result.done) {
+					delegate = null;
+					if (mode === 'return') {
+						done = true;
+						return { value: result.value, done: true };
+					}
+					return resumeFrame(result.value, 'next');
+				}
+				return { value: result.value, done: false };
+			}
+
+			function resume(value, mode) {
+				if (done) {
+					if (mode === 'throw') throw value;
+					return { value: mode === 'return' ? value : undefined, done: true };
+				}
+				if (delegate) return driveDelegate(value, mode);
+				if (!started && mode !== 'next') {
+					// A throw or return before the body starts never runs it.
+					done = true;
+					if (mode === 'throw') throw value;
+					return { value: value, done: true };
+				}
+				if (!started) {
+					started = true;
+					return runStep();
+				}
+				if (mode === 'return') {
+					done = true;
+					return { value: value, done: true };
+				}
+				return resumeFrame(value, mode);
 			}
 			const gen = {
 				next: function (value) {

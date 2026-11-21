@@ -472,6 +472,16 @@ const GENERATORS: &[&str] = &[
     "function* g() { yield 1; yield 2; yield 3; } const r = []; for (const x of g()) { r.push(x); if (x === 2) break; } r",
     "const make = function* named(n) { yield n; yield n + 1; }; [...make(7)]",
     "function* g() { yield; yield 5; } const it = g(); [it.next().value, it.next().value]",
+    // yield* delegation: over an array, a string, and another generator
+    "function* g() { yield* [10, 20, 30]; } [...g()]",
+    "function* g() { yield 0; yield* 'ab'; yield 1; } [...g()]",
+    "function* inner() { yield 1; yield 2; } function* outer() { yield 0; yield* inner(); yield 3; } [...outer()]",
+    // yield* result is the delegate's return value
+    "function* inner() { yield 1; return 99; } function* outer() { const r = yield* inner(); yield r; } [...outer()]",
+    // nested yield* chains
+    "function* a() { yield 1; } function* b() { yield* a(); yield 2; } function* c() { yield* b(); yield 3; } [...c()]",
+    // a value sent through yield* reaches the delegate's yield
+    "function* inner() { const x = yield 1; return x * 10; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); [it.next().value, it.next(5).value]",
 ];
 
 /// Tagged templates, object method shorthand, accessors, and spread in `new`.
@@ -639,10 +649,9 @@ fn unsupported_constructs_decline() {
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
         // generators decline when their own frame would hold a handler across a
-        // yield (try, for-of, for-in), plus yield* and async generators
+        // yield (try, for-of, for-in), plus async generators
         "function* g() { try { yield 1; } finally {} }",
         "function* g() { for (const x of [1, 2]) yield x; }",
-        "function* g() { yield* [1, 2]; }",
         "async function* g() { yield 1; }",
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",

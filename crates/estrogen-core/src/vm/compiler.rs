@@ -1668,18 +1668,16 @@ impl Compiler {
             }
             Expression::YieldExpression(y) => {
                 // The parser only accepts yield inside a generator, so the frame
-                // is a generator. `yield*` delegation is not ported. Push the
-                // yielded value (undefined with no argument) and suspend; the
-                // runtime driver pushes the value sent to the next `next` call as
-                // this expression's result.
-                if y.delegate {
-                    return Err(Unsupported("yield* delegation"));
-                }
+                // is a generator. `yield arg` suspends with the value; the driver
+                // pushes the value sent to the next `next` call as this
+                // expression's result. `yield* arg` pushes the iterable and
+                // delegates: the driver drives its iterator, forwarding
+                // next/throw/return, and leaves the delegate's return value here.
                 match &y.argument {
                     Some(arg) => self.compile_expr(arg)?,
                     None => self.emit0("PUSH_UNDEF"),
                 }
-                self.emit0("YIELD");
+                self.emit0(if y.delegate { "YIELD_STAR" } else { "YIELD" });
             }
             Expression::TaggedTemplateExpression(tagged) => self.compile_tagged_template(tagged)?,
             Expression::ImportMeta(_) => {
@@ -3107,7 +3105,9 @@ fn contains_return_stmt(stmts: &[Statement<'_>]) -> bool {
 /// sit outside the list and the VM does not route a labeled jump across a
 /// `finally` yet.
 fn escaping_jump_in(stmts: &[Statement<'_>]) -> bool {
-    stmts.iter().any(|stmt| escaping_jump_stmt(stmt, false, false))
+    stmts
+        .iter()
+        .any(|stmt| escaping_jump_stmt(stmt, false, false))
 }
 
 fn escaping_jump_stmt(stmt: &Statement<'_>, break_bound: bool, continue_bound: bool) -> bool {
