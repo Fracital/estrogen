@@ -416,11 +416,12 @@ Falls back (declines, so the literal and name passes run instead):
   one `for`/`of` iterator at once.
 - A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
   inside an async generator; and a `for await` loop.
-- A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
-  binding where native makes one per iteration, so it declines rather than
-  observe the difference wrongly. The closure check is conservative, so a
-  `for (let ...)` whose body contains a `for`/`of`, `for`/`in`, `try`, or labeled
-  statement also declines for now.
+- A `for (let ...)` whose update makes a closure. A test or body closure compiles:
+  each iteration opens a fresh scope, the loop bindings are copied in, the test
+  and body run there so a closure captures that iteration's value, any mutation is
+  copied back, and the update runs in the canonical scope. The update itself runs
+  in that canonical scope, not the per-iteration one, so a closure in the update
+  would capture a different environment and declines instead.
 - Root `var` when the caller cannot prove ES module scope, `using`, a BigInt
   operand of `++`/`--`, method object keys, tagged templates, and `yield`.
 
@@ -438,8 +439,8 @@ reading `this`, and postfix update); and control flow (if/else, while, do/while,
 a C-style for summing an array, break, continue, switch with break, default, and
 fall-through, and nested loops with inner break/continue and a block-scoped
 local, which proves jump backpatching and scope unwinding). A second test asserts
-that each out-of-subset construct declines, including a `for (let ...)` captured
-by a closure, so the fallback classification is checked too. A third test proves
+that each out-of-subset construct declines, including a `for (let ...)` whose
+update makes a closure, so the fallback classification is checked too. A third test proves
 the embedded runtime has no comments, is one minified line, and still loads in
 node. A fourth compiles a function chunk whose string value, local name, and
 function name are all canaries and asserts none survives in the clear. A fifth,
