@@ -340,6 +340,16 @@ impl Obfuscator {
         // Its map points at the pre-obfuscation source and must never ship. A VM
         // chunk is replaced wholesale, so there is nothing to strip (and a strip
         // edit would overlap the whole-file replacement).
+        //
+        // The `.map` it named holds the original source, so it is deleted from the
+        // dist too once the chunk is written (see `local_map_to_delete`). A VM
+        // chunk drops the comment with the rest of the original text, so its map
+        // is orphaned the same way and goes as well.
+        let orphan_map = if kind == FileKind::Js {
+            local_map_to_delete(&source, path, root)
+        } else {
+            None
+        };
         if kind == FileKind::Js && !vm_replaced {
             if let Some(edit) = sourcemap_strip_edit(&source) {
                 // The comment is deleted, so drop any earlier edit inside it (a
@@ -406,6 +416,10 @@ impl Obfuscator {
 
         if !self.options.check {
             write_preserving_bom(path, &source, output)?;
+            // A missing file is fine: another chunk may have named the same map.
+            if let Some(map) = &orphan_map {
+                let _ = fs::remove_file(map);
+            }
             // The private map traces edits against the source text. A VM chunk is
             // a whole-file replacement, an optimized SVG was reshaped before the
             // cloak pass edited it, and a minified chunk was reprinted, so in all
@@ -589,6 +603,15 @@ impl Obfuscator {
 /// match that is not the last content in the file is left alone, matching the
 /// reference's end-of-file anchor.
 fn sourcemap_strip_edit(source: &str) -> Option<Edit> {
+    let (del_start, _, line_end) = locate_sourcemap_comment(source)?;
+    Some(Edit::replace(del_start, line_end, String::new()))
+}
+
+/// Find a trailing `sourceMappingURL` comment. Returns the byte offset to start
+/// deleting from (one preceding newline included), the offset of the comment
+/// itself, and the offset of the end of its line. `None` when there is no such
+/// comment or code follows it.
+fn locate_sourcemap_comment(source: &str) -> Option<(usize, usize, usize)> {
     let start = ["//# sourceMappingURL=", "//@ sourceMappingURL="]
         .iter()
         .filter_map(|m| source.rfind(m))
@@ -605,7 +628,70 @@ fn sourcemap_strip_edit(source: &str) -> Option<Edit> {
     } else {
         start
     };
-    Some(Edit::replace(del_start, line_end, String::new()))
+    Some((del_start, start, line_end))
+}
+
+/// The local `.map` file a trailing `sourceMappingURL` comment names, when it
+/// resolves to a path inside `root`. `js_path` is the chunk the comment was in;
+/// a relative URL resolves against its directory.
+///
+/// Conservative on purpose: a remote or absolute URL, a `data:` URI, a rooted
+/// path, a non-`.map` name, a path that climbs out of `root` (lexically or
+/// through a symlink) and a target that is not a regular file all give `None`.
+fn local_map_to_delete(source: &str, js_path: &Path, root: &Path) -> Option<PathBuf> {
+    let (_, start, line_end) = locate_sourcemap_comment(source)?;
+    let comment = &source[start..line_end];
+    let url = comment[comment.find('=')? + 1..].trim();
+    let url = url.split(['?', '#']).next().unwrap_or(url);
+    if url.is_empty() || url.contains(':') || url.starts_with('/') || url.starts_with('\\') {
+        return None;
+    }
+    let rel = percent_decode(url)?;
+    let rel = Path::new(&rel);
+    if rel.extension().and_then(|e| e.to_str()) != Some("map") {
+        return None;
+    }
+    let mut target = js_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(n) => target.push(n),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                target.pop();
+            }
+            _ => return None,
+        }
+    }
+    // Resolve symlinks on both sides so a link inside the dist cannot lead out.
+    let real_root = root.canonicalize().ok()?;
+    let real_target = target.canonicalize().ok()?;
+    if !real_target.starts_with(&real_root) || !real_target.is_file() {
+        return None;
+    }
+    Some(target)
+}
+
+/// Decode `%XX` escapes in a URL path. `None` when the result is not UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 3 <= b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Write `rewritten` to `path`, keeping a UTF-8 byte-order mark if the original
@@ -783,6 +869,101 @@ mod tests {
             !out.contains("sourceMappingURL"),
             "map link survived: {out}"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn quiet() -> Obfuscator {
+        Obfuscator::new(Options {
+            seed: Some(b"seed".to_vec()),
+            ..Options::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_stripped_local_map_is_deleted_with_the_comment() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(
+            dir.join("app.js"),
+            "const a = 'x';\n//# sourceMappingURL=app.js.map\n",
+        )
+        .unwrap();
+        fs::write(dir.join("app.js.map"), "{\"sourcesContent\":[\"secret\"]}").unwrap();
+        // A sibling dir reference, and a map whose chunk never links it.
+        fs::write(
+            dir.join("sub/b.js"),
+            "const b = 'y';\n//# sourceMappingURL=../b.js.map\n",
+        )
+        .unwrap();
+        fs::write(dir.join("b.js.map"), "{}").unwrap();
+        fs::write(dir.join("unlinked.js.map"), "{}").unwrap();
+
+        quiet().obfuscate_dir(&dir).unwrap();
+
+        assert!(!fs::read_to_string(dir.join("app.js"))
+            .unwrap()
+            .contains("sourceMappingURL"));
+        assert!(!dir.join("app.js.map").exists(), "linked map survived");
+        assert!(
+            !dir.join("b.js.map").exists(),
+            "../ map inside dist survived"
+        );
+        assert!(dir.join("unlinked.js.map").exists(), "unlinked map deleted");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_remote_or_outside_map_is_left_alone() {
+        let outer = tmp_dir();
+        let dir = outer.join("dist");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(outer.join("out.js.map"), "{}").unwrap();
+        fs::write(dir.join("remote.js.map"), "{}").unwrap();
+        fs::write(dir.join("data.js.map"), "{}").unwrap();
+        let cases = [
+            ("a.js", "../out.js.map"),
+            ("b.js", "https://cdn.example/remote.js.map"),
+            ("c.js", "/remote.js.map"),
+            ("d.js", "data:application/json;base64,e30="),
+            ("e.js", "missing.js.map"),
+        ];
+        for (name, url) in cases {
+            fs::write(
+                dir.join(name),
+                format!("const a = 'x';\n//# sourceMappingURL={url}\n"),
+            )
+            .unwrap();
+        }
+
+        quiet().obfuscate_dir(&dir).unwrap();
+
+        assert!(
+            outer.join("out.js.map").exists(),
+            "map outside dist deleted"
+        );
+        assert!(dir.join("remote.js.map").exists(), "absolute URL followed");
+        assert!(dir.join("data.js.map").exists());
+        fs::remove_dir_all(&outer).ok();
+    }
+
+    #[test]
+    fn a_map_is_kept_in_check_mode() {
+        let dir = tmp_dir();
+        fs::write(
+            dir.join("app.js"),
+            "const a = 'x';\n//# sourceMappingURL=app.js.map\n",
+        )
+        .unwrap();
+        fs::write(dir.join("app.js.map"), "{}").unwrap();
+        let obf = Obfuscator::new(Options {
+            seed: Some(b"seed".to_vec()),
+            check: true,
+            ..Options::default()
+        })
+        .unwrap();
+        obf.obfuscate_dir(&dir).unwrap();
+        assert!(dir.join("app.js.map").exists());
         fs::remove_dir_all(&dir).ok();
     }
 
