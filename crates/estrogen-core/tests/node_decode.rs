@@ -62,6 +62,84 @@ fn run_node(code: &str, tag: &str) -> String {
         .to_string()
 }
 
+fn compare_values_in_node(source: &str, tag: &str) -> String {
+    let transformed = obfuscate(source);
+    let original = run_node(
+        &format!("{source}\nconsole.log(JSON.stringify(globalThis.__out));"),
+        &format!("{tag}-original"),
+    );
+    let rewritten = run_node(
+        &format!("{transformed}\nconsole.log(JSON.stringify(globalThis.__out));"),
+        &format!("{tag}-transformed"),
+    );
+    assert_eq!(rewritten, original, "runtime values differ for {tag}");
+    transformed
+}
+
+#[test]
+fn property_lookups_and_keys_keep_runtime_behavior() {
+    if !node_available("property_lookups_and_keys_keep_runtime_behavior") {
+        return;
+    }
+    let source = r#"
+        const base = { fromPrototype: 19 };
+        const object = {
+            __proto__: base,
+            publicPropertyName: 7,
+            method() { return this.publicPropertyName; },
+            ['computedField']: 11
+        };
+        const missing = null;
+        const { publicPropertyName: extracted } = object;
+        let assigned;
+        ({ publicPropertyName: assigned } = object);
+        globalThis.__out = [
+            object.publicPropertyName,
+            object.method(),
+            object?.publicPropertyName,
+            missing?.publicPropertyName,
+            object /* leading */ . /* trailing */ publicPropertyName,
+            object.fromPrototype,
+            object['computedField'],
+            extracted, assigned
+        ];
+    "#;
+    let out = compare_values_in_node(source, "public-properties");
+    assert!(
+        !out.contains(".publicPropertyName"),
+        "dot spelling survived: {out}"
+    );
+    assert!(
+        !out.contains("publicPropertyName:"),
+        "plain key survived: {out}"
+    );
+    assert!(out.contains("__proto__"), "prototype setter changed: {out}");
+}
+
+#[test]
+fn numeric_members_and_class_fields_preserve_syntax_and_values() {
+    if !node_available("numeric_members_and_class_fields_preserve_syntax_and_values") {
+        return;
+    }
+    let source = r#"
+        class Box {
+            firstField = 8
+            secondField = 5
+            'thirdField' = 2
+            constructor() { this.offset = 4; }
+            getTotal() { return this.firstField + this.secondField + this.thirdField + this.offset; }
+        }
+        const box = new Box();
+        globalThis.__out = [box.getTotal(), 1..toString(), (2).toString(), box?.secondField];
+    "#;
+    let out = compare_values_in_node(source, "class-fields");
+    assert!(!out.contains("firstField ="), "plain field survived: {out}");
+    assert!(
+        !out.contains("secondField ="),
+        "plain field survived: {out}"
+    );
+}
+
 #[test]
 fn emitted_decoder_round_trips_values_in_node() {
     if !node_available("emitted_decoder_round_trips_values_in_node") {

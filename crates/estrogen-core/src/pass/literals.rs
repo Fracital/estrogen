@@ -8,7 +8,9 @@
 //! memoized `NAME(idx)` decode call. The positions that stay static are listed
 //! in that file's header: directive prologues, import and export module
 //! specifiers and names, import attributes, a `constructor` method key, a
-//! `__proto__` proto key, and tagged template quasis.
+//! `__proto__` proto key, and tagged template quasis. App chunks also pool
+//! public dot-access names and explicit identifier keys. A computed access or
+//! key decodes to the original spelling, so no runtime property is renamed.
 //!
 //! App chunks also shorten local bindings. Both passes collect edits against
 //! the original source. Vendor chunks take the separate proxy-name path.
@@ -18,7 +20,10 @@
 //! above it on the stack is its parent, which is what the skip and computed-key
 //! rules read. estrogen edits the source by byte range; it does not reprint the AST.
 
-use oxc_ast::ast::{Expression, PropertyKind, StringLiteral, TemplateLiteral};
+use oxc_ast::ast::{
+    ClassBody, ClassElement, Expression, PropertyKey, PropertyKind, StaticMemberExpression,
+    StringLiteral, TemplateLiteral,
+};
 use oxc_ast::AstKind;
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
@@ -52,6 +57,7 @@ impl Pass for LiteralsPass {
                 pool,
                 edits: EditSet::new(),
                 stack: Vec::new(),
+                restricted_depth: 0,
                 error: None,
             };
             visitor.visit_program(program);
@@ -74,6 +80,7 @@ struct LiteralVisitor<'a> {
     pool: PoolBuilder,
     edits: EditSet,
     stack: Vec<AstKind<'a>>,
+    restricted_depth: usize,
     error: Option<Error>,
 }
 
@@ -103,6 +110,95 @@ impl<'a> LiteralVisitor<'a> {
             format!(" {call}")
         } else {
             call
+        }
+    }
+
+    fn handle_static_member(&mut self, member: &StaticMemberExpression<'a>) {
+        let object_end = member.object.span().end as usize;
+        let property = &member.property;
+        let start = property.span.start as usize;
+        let Some(gap) = self.source.get(object_end..start) else {
+            return;
+        };
+        // The receiver can itself end with a dot (`1..toString()`). Find the
+        // member operator between the AST spans, not inside an intervening comment.
+        let operator = if member.optional { "?." } else { "." };
+        let with_operator = skip_trivia(gap);
+        let Some(after_operator) = with_operator.strip_prefix(operator) else {
+            return;
+        };
+        if !skip_trivia(after_operator).is_empty() {
+            return;
+        }
+        let dot = start - with_operator.len();
+        let Some(idx) = self.push(property.name.as_str()) else {
+            return;
+        };
+        if !member.optional {
+            self.edits.push(Edit::replace(dot, dot + 1, ""));
+        }
+        self.edits.push(Edit::replace(
+            start,
+            property.span.end as usize,
+            format!("[{}({idx})]", self.name),
+        ));
+    }
+
+    fn handle_static_key(&mut self, key: &PropertyKey<'a>, keep_proto: bool) {
+        let PropertyKey::StaticIdentifier(id) = key else {
+            return;
+        };
+        let value = id.name.as_str();
+        if !keep_proto || value != "__proto__" {
+            self.pool_key(id.span, value);
+        }
+    }
+
+    fn pool_key(&mut self, span: oxc_span::Span, value: &str) {
+        if let Some(idx) = self.push(value) {
+            self.edits.push(Edit::replace(
+                span.start as usize,
+                span.end as usize,
+                format!("[{}({idx})]", self.name),
+            ));
+        }
+    }
+
+    fn handle_class_keys(&mut self, body: &ClassBody<'a>) {
+        let mut previous_field = None;
+        for element in &body.body {
+            let (key, computed, decorators) = match element {
+                ClassElement::MethodDefinition(m) => (&m.key, m.computed, &m.decorators),
+                ClassElement::PropertyDefinition(p) => (&p.key, p.computed, &p.decorators),
+                ClassElement::AccessorProperty(p) => (&p.key, p.computed, &p.decorators),
+                _ => {
+                    previous_field = None;
+                    continue;
+                }
+            };
+            if !computed && decorators.is_empty() {
+                let name = match key {
+                    PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                    PropertyKey::StringLiteral(lit) => lit.value.as_str(),
+                    _ => None,
+                };
+                if let Some(name) = name.filter(|name| *name != "constructor") {
+                    if let Some(end) = previous_field {
+                        // `x = 1\ny = 2` uses ASI. Without an explicit separator,
+                        // `x = 1\n[decode(i)] = 2` changes x's initializer instead.
+                        if self.source.as_bytes().get(end - 1) != Some(&b';') {
+                            self.edits.push(Edit::insert(end, ";"));
+                        }
+                    }
+                    self.pool_key(key.span(), name);
+                }
+            }
+            previous_field = match element {
+                ClassElement::PropertyDefinition(_) | ClassElement::AccessorProperty(_) => {
+                    Some(element.span().end as usize)
+                }
+                _ => None,
+            };
         }
     }
 
@@ -187,17 +283,11 @@ impl<'a> LiteralVisitor<'a> {
                     computed_key = true;
                 }
             }
-            AstKind::MethodDefinition(m) => {
-                if is_key(&m.key, span) && !m.computed {
-                    if value == "constructor" {
-                        return; // constructor must stay a plain method key
-                    }
-                    computed_key = true;
-                }
-            }
-            AstKind::PropertyDefinition(p) if is_key(&p.key, span) && !p.computed => {
-                computed_key = true;
-            }
+            // Handle plain class keys together in handle_class_keys so a new
+            // computed key cannot join the previous field's initializer.
+            AstKind::MethodDefinition(m) if !m.computed && is_key(&m.key, span) => return,
+            AstKind::PropertyDefinition(p) if !p.computed && is_key(&p.key, span) => return,
+            AstKind::AccessorProperty(p) if !p.computed && is_key(&p.key, span) => return,
             _ => {}
         }
 
@@ -292,18 +382,60 @@ impl<'a> LiteralVisitor<'a> {
 
 impl<'a> Visit<'a> for LiteralVisitor<'a> {
     fn enter_node(&mut self, kind: AstKind<'a>) {
+        if restricted_property_syntax(kind) {
+            self.restricted_depth += 1;
+        }
         if self.error.is_none() {
             match kind {
                 AstKind::StringLiteral(lit) => self.handle_string(lit),
                 AstKind::TemplateLiteral(tpl) => self.handle_template(tpl),
+                _ if self.restricted_depth != 0 => {}
+                AstKind::StaticMemberExpression(m) => self.handle_static_member(m),
+                AstKind::ObjectProperty(p) if !p.computed && !p.shorthand => {
+                    self.handle_static_key(&p.key, p.kind == PropertyKind::Init && !p.method);
+                }
+                AstKind::BindingProperty(p) if !p.computed && !p.shorthand => {
+                    self.handle_static_key(&p.key, true);
+                }
+                AstKind::AssignmentTargetPropertyProperty(p) if !p.computed => {
+                    self.handle_static_key(&p.name, true);
+                }
+                AstKind::ClassBody(body) => self.handle_class_keys(body),
                 _ => {}
             }
         }
         self.stack.push(kind);
     }
 
-    fn leave_node(&mut self, _kind: AstKind<'a>) {
+    fn leave_node(&mut self, kind: AstKind<'a>) {
         self.stack.pop();
+        if restricted_property_syntax(kind) {
+            self.restricted_depth -= 1;
+        }
+    }
+}
+
+fn restricted_property_syntax(kind: AstKind<'_>) -> bool {
+    // A `with` object could intercept the decoder lookup. A bare decorator
+    // expression accepts a dotted path but not a computed member expression.
+    matches!(kind, AstKind::WithStatement(_) | AstKind::Decorator(_))
+}
+
+fn skip_trivia(mut source: &str) -> &str {
+    loop {
+        source = source.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        if let Some(comment) = source.strip_prefix("/*") {
+            let Some((_, rest)) = comment.split_once("*/") else {
+                return source;
+            };
+            source = rest;
+        } else if let Some(comment) = source.strip_prefix("//") {
+            source = comment
+                .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .map_or("", |end| &comment[end..]);
+        } else {
+            return source;
+        }
     }
 }
 

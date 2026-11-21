@@ -16,11 +16,12 @@
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
-    BindingIdentifier, BindingPattern, Declaration, Expression, ModuleExportName, Program,
+    BindingIdentifier, BindingPattern, ClassElement, Declaration, Expression, ModuleExportName,
+    Program, Statement,
 };
 use oxc_ast::AstKind;
 use oxc_mangler::{MangleOptions, MangleOptionsKeepNames, Mangler};
-use oxc_semantic::{SemanticBuilder, SymbolId};
+use oxc_semantic::{AstNodes, Scoping, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, Span};
 
 use crate::edit::{Edit, EditSet};
@@ -50,6 +51,43 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     );
 
     let scoping = semantic.scoping();
+    let nodes = semantic.nodes();
+    let root = scoping.root_scope_id();
+    // OXC propagates direct eval to the ancestor scopes. The fresh-name pass
+    // below must honor it too, even for declarations OXC leaves unchanged.
+    if scoping.scope_flags(root).contains_direct_eval() {
+        return Ok(EditSet::new());
+    }
+    let has_module_syntax = program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+        )
+    });
+    let explicitly_strict = program
+        .directives
+        .iter()
+        .any(|d| d.directive == "use strict");
+    // An indirect read such as instance.constructor.name, or a destructure of
+    // a constructor's name, need not reference the declaration it observes, so
+    // the scan stays broad. The one `name` identifier that observes nothing is
+    // an object-literal key: `{ name: value }` and the shorthand `{ name }` set
+    // a property, they do not read a callable's `.name`. Those keys are common
+    // in bundled code, and counting them kept the whole file from renaming, so
+    // they are excluded here while every other `name` identifier still counts.
+    let reads_callable_names = nodes.iter().any(|node| match node.kind() {
+        AstKind::IdentifierName(name) if name.name == "name" => {
+            !matches!(nodes.parent_kind(node.id()), AstKind::ObjectProperty(_))
+        }
+        AstKind::StringLiteral(name) => name.value.as_str() == Some("name"),
+        AstKind::NewTarget(_) => true,
+        _ => false,
+    });
     let mut occurrences: HashMap<SymbolId, Occurrences<'_>> = HashMap::new();
     let mut shorthand = HashSet::new();
     // Export-specifier locals that are shorthand (`export { x }`, where the local
@@ -60,14 +98,12 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     // for the inline-export rename, since oxc does not rename a specifier local
     // (it is a plain reference), so a fresh rename would break the specifier.
     let mut exported_by_specifier: HashSet<SymbolId> = HashSet::new();
-    // `export const/let/var NAME = value` bindings oxc keeps, which the pass may
-    // rename itself and re-expose under the old public name.
+    // OXC keeps inline exports and callable names. Eligible private callable
+    // declarations can use a fresh binding because only direct calls remain.
+    let mut fresh_renames = Vec::new();
     let mut inline_exports: Vec<InlineExport<'_>> = Vec::new();
-    // Whether the file has module syntax, which proves it is a module and makes
-    // top-level renaming safe.
-    let mut has_module_syntax = false;
 
-    for node in semantic.nodes().iter() {
+    for node in nodes.iter() {
         match node.kind() {
             // A with object can intercept a lookup that appears to be lexical.
             AstKind::WithStatement(_) => return Ok(EditSet::new()),
@@ -122,24 +158,51 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
             AstKind::AssignmentPattern(pattern) => {
                 keep_inferred_name(&pattern.left, &pattern.right, &mut options);
             }
-            // A named declaration can share a symbol with a prior `var` or
-            // create a sloppy-mode outer binding (Annex B). Keep the spelling
-            // across both bindings, not only the one on the declaration node.
-            AstKind::Function(function) => reserve_binding(function.id.as_ref(), &mut options),
-            AstKind::Class(class) => reserve_binding(class.id.as_ref(), &mut options),
-            // Module syntax proves the file is a module, so its top-level
-            // bindings are module-scoped, not global.
-            AstKind::ImportDeclaration(_) => {
-                has_module_syntax = true;
-            }
-            AstKind::ExportNamedDeclaration(_)
-            | AstKind::ExportDefaultDeclaration(_)
-            | AstKind::ExportAllDeclaration(_)
-            | AstKind::ExportFromDeclaration(_) => {
-                has_module_syntax = true;
+            AstKind::Function(_) | AstKind::Class(_) => {
+                let (id, eligible, constructor_only) = match node.kind() {
+                    AstKind::Function(function) => (
+                        function.id.as_ref(),
+                        function.is_declaration(),
+                        false,
+                    ),
+                    AstKind::Class(class) => (
+                        class.id.as_ref(),
+                        class.is_declaration()
+                            && class.heritage.is_none()
+                            && class.decorators.is_empty()
+                            && !class.body.body.iter().any(|element| {
+                                matches!(element, ClassElement::StaticBlock(_))
+                                    || matches!(element, ClassElement::PropertyDefinition(p) if p.r#static)
+                                    || matches!(element, ClassElement::AccessorProperty(p) if p.r#static)
+                            }),
+                        true,
+                    ),
+                    _ => unreachable!(),
+                };
+                let Some(id) = id else { continue };
+                // OXC must not reuse an original callable name for a different
+                // symbol, including while allocating the fresh short name.
+                reserve_binding(Some(id), &mut options);
+                let symbol = id.symbol_id.get().filter(|symbol| {
+                    eligible
+                        && !reads_callable_names
+                        // An exported callable's `.name` can be read by its importer.
+                        && !matches!(
+                            nodes.parent_kind(node.id()),
+                            AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
+                        )
+                        // A sloppy block function may also declare a var binding.
+                        && (has_module_syntax
+                            || (explicitly_strict && scoping.symbol_scope_id(*symbol) != root))
+                        && scoping.symbol_declaration(*symbol) == node.id()
+                        && scoping.symbol_redeclarations(*symbol).is_empty()
+                        && uses_are_direct(nodes, scoping, *symbol, constructor_only)
+                });
+                if let Some(symbol) = symbol {
+                    fresh_renames.push((symbol, id.name.as_str()));
+                }
             }
             AstKind::ExportDeclaration(decl) => {
-                has_module_syntax = true;
                 if let Some(inline) = inline_export(decl.span, &decl.declaration) {
                     inline_exports.push(inline);
                 }
@@ -147,15 +210,12 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
             // Never rename an import binding: the imported name is the other
             // module's contract, and the pass does not rewrite import specifiers.
             AstKind::ImportSpecifier(spec) => {
-                has_module_syntax = true;
                 options.reserved.insert(spec.local.name.as_str().into());
             }
             AstKind::ImportDefaultSpecifier(spec) => {
-                has_module_syntax = true;
                 options.reserved.insert(spec.local.name.as_str().into());
             }
             AstKind::ImportNamespaceSpecifier(spec) => {
-                has_module_syntax = true;
                 options.reserved.insert(spec.local.name.as_str().into());
             }
             AstKind::ExportSpecifier(spec) => {
@@ -190,7 +250,7 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     }
     // A snapshot of the reserved names, read back after the mangler takes the
     // options by value, to keep a fresh name clear of them.
-    let reserved_snapshot: Vec<String> = options
+    let reserved_snapshot: HashSet<String> = options
         .reserved
         .iter()
         .map(|name| name.as_str().to_string())
@@ -242,7 +302,7 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
     }
 
     let mut inline_rewrites: Vec<InlineRewrite> = Vec::new();
-    if has_module_syntax && !inline_exports.is_empty() {
+    if !inline_exports.is_empty() || !fresh_renames.is_empty() {
         let mut forbidden: HashSet<String> = HashSet::new();
         forbidden.extend(scoping.symbol_names().map(str::to_string));
         forbidden.extend(
@@ -277,6 +337,20 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
                 fresh,
                 public: inline.name.to_string(),
             });
+        }
+        for (symbol, name) in fresh_renames {
+            if exported_by_specifier.contains(&symbol)
+                || final_names.contains_key(&symbol)
+                || blocked.contains(name)
+                || scoping.symbol_name(symbol) != name
+            {
+                continue;
+            }
+            let Some(fresh) = fresh_name(&forbidden, name.len()) else {
+                continue;
+            };
+            forbidden.insert(fresh.clone());
+            final_names.insert(symbol, fresh);
         }
     }
 
@@ -355,6 +429,32 @@ fn occurrence<'a>(
         })
         .spans
         .push(span);
+}
+
+/// Rename a callable only when every use is an immediate call or construction.
+/// Passing it as a value could let other code observe its original name.
+fn uses_are_direct(
+    nodes: &AstNodes<'_>,
+    scoping: &Scoping,
+    symbol: SymbolId,
+    constructor_only: bool,
+) -> bool {
+    scoping.get_resolved_references(symbol).all(|reference| {
+        if reference.is_write() {
+            return false;
+        }
+        let id = reference.node_id();
+        let AstKind::IdentifierReference(name) = nodes.kind(id) else {
+            return false;
+        };
+        match nodes.parent_kind(id) {
+            AstKind::CallExpression(call) if !constructor_only => {
+                !call.optional && call.callee.span() == name.span
+            }
+            AstKind::NewExpression(new) => new.callee.span() == name.span,
+            _ => false,
+        }
+    })
 }
 
 fn reserve_binding(id: Option<&BindingIdentifier<'_>>, options: &mut MangleOptions) {

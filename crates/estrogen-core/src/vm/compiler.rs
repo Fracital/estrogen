@@ -9,7 +9,8 @@
 //! The subset:
 //!
 //! - A module body of expression statements, `let`/`const` declarations with
-//!   plain identifier bindings, and function declarations.
+//!   plain identifier bindings, and function declarations. Static imports and
+//!   reexports use a native wrapper for ES module linking.
 //! - Functions: declarations, anonymous function expressions, and arrow
 //!   functions (expression or block body), with plain identifier parameters,
 //!   `return`, recursion, nested functions, and lexical closure capture. `this`
@@ -17,17 +18,17 @@
 //!   an arrow.
 //! - Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `switch`,
 //!   and unlabeled `break`/`continue`.
-//! - Expressions over literals, identifiers (locals resolve to slots, free names
-//!   to globals), member access, calls and method calls, `new`, unary and binary
-//!   operators, logical and conditional operators, assignment (plain, compound,
-//!   and logical to an identifier; plain to a member), update (`++`/`--` on an
-//!   identifier), array and object literals, and sequence expressions.
+//! - Expressions over literals and interpolated templates, identifiers, optional
+//!   member access and calls, spread arguments and collections, `new`, unary
+//!   and binary operators, conditional and logical operators, assignments, update
+//!   to identifiers, array holes, object literals, and sequence expressions.
+//! - Function-local `var` declarations, including block and loop hoisting.
+//!   Module-root `var` is compiled only if module syntax proves ES module scope.
 //!
-//! Anything else (classes, `import`/`export`, `var`, generators, `async`,
+//! Anything else (classes, locally declared exports, generators, `async`,
 //! destructuring, default/rest parameters, named function expressions,
 //! `arguments`, labeled break/continue, `try`/`catch`/`finally`, for-of/for-in,
-//! optional chaining, spread, templates with substitutions, and update on a
-//! member) falls back.
+//! top-level `var` without known module syntax, and update on a member) falls back.
 //!
 //! Locals are slot-based exactly as the runtime expects. A frame has one base
 //! scope (its parameters and body-level lexicals); a lexical block pushes a
@@ -38,14 +39,17 @@
 
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, BinaryOperator, BindingPattern, Expression, ForStatement, ForStatementInit,
-    FormalParameters, Function, IfStatement, LogicalOperator, MemberExpression, ObjectPropertyKind,
-    Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, SwitchStatement,
+    AssignmentTarget, BinaryOperator, BindingPattern, ChainElement, ChainExpression, Class,
+    ClassElement, ComputedMemberExpression, Expression, ForStatement, ForStatementInit,
+    ForStatementLeft, FormalParameters, Function, IfStatement, LabeledStatement, LogicalOperator,
+    MemberExpression, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+    SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, TryStatement,
     UnaryOperator, UpdateOperator, VariableDeclarationKind,
 };
 
 use super::layout::Layout;
 use super::program::{ConstPool, FunctionDef, Program as VmProgram};
+use serde_json::json;
 
 /// A construct estrogen's VM cannot compile yet. The caller treats it as a signal
 /// to fall back, not as a build failure.
@@ -64,7 +68,7 @@ enum FnBody<'a> {
 
 /// Compile a parsed module into a VM program, or report the first construct
 /// outside the subset. `seed` keys the opcode layout.
-pub fn compile_program(program: &Program<'_>, seed: &str) -> R<VmProgram> {
+pub fn compile_program(program: &Program<'_>, seed: &str, known_module: bool) -> R<VmProgram> {
     let mut c = Compiler {
         layout: Layout::build(seed),
         consts: ConstPool::default(),
@@ -72,7 +76,7 @@ pub fn compile_program(program: &Program<'_>, seed: &str) -> R<VmProgram> {
         scopes: Vec::new(),
         fns: Vec::new(),
     };
-    let main_index = c.compile_main(program)?;
+    let main_index = c.compile_main(program, known_module)?;
     Ok(VmProgram {
         layout: c.layout,
         consts: c.consts,
@@ -95,6 +99,15 @@ struct FnState {
     code: Vec<i64>,
     loops: Vec<LoopState>,
     is_module_main: bool,
+    allow_module_var: bool,
+    allow_root_class: bool,
+    base_scope_index: usize,
+    var_slots: Vec<(String, usize)>,
+    /// The frame runs as an async function: the runtime wraps it in the async
+    /// driver and returns a promise. Set from the source `async` keyword, and
+    /// also raised by a top-level `await` in a module main so top-level await
+    /// drives the module as a promise.
+    is_async: bool,
 }
 
 /// One open loop or `switch`. Collects the jump operand indices to patch once the
@@ -106,6 +119,19 @@ struct LoopState {
     break_depth: usize,
     continue_depth: usize,
     is_switch: bool,
+    iterator: Option<IteratorLoop>,
+    // The source label on the construct, if it was written `label: for (...)`.
+    // `break label`/`continue label` resolve to the matching entry; `is_switch`
+    // (true for a `switch` and for a labeled non-loop block) marks an entry that
+    // `continue` cannot target.
+    label: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct IteratorLoop {
+    slot: usize,
+    head_scope_index: usize,
+    handler_active: bool,
 }
 
 struct Compiler {
@@ -122,13 +148,35 @@ struct Compiler {
 impl Compiler {
     // ---- function compilation ----
 
-    fn compile_main(&mut self, program: &Program<'_>) -> R<usize> {
+    fn compile_main(&mut self, program: &Program<'_>, known_module: bool) -> R<usize> {
+        // Static import/reexport syntax proves a native ESM environment.
+        // Root var bindings in that environment are module-local. With no
+        // module syntax, a classic script may expose them on globalThis, so
+        // retain the fallback until the caller supplies script kind.
+        let allow_module_var = program.body.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::ImportDeclaration(_)
+                    | Statement::ExportAllDeclaration(_)
+                    | Statement::ExportFromDeclaration(_)
+                    | Statement::ExportNamedDeclaration(_)
+                    | Statement::ExportDefaultDeclaration(_)
+            )
+        });
         self.fns.push(FnState {
             code: Vec::new(),
             loops: Vec::new(),
             is_module_main: true,
+            allow_module_var,
+            allow_root_class: known_module || allow_module_var,
+            base_scope_index: self.scopes.len(),
+            var_slots: Vec::new(),
+            is_async: false,
         });
         self.scopes.push(Scope::default());
+        if allow_module_var {
+            self.predeclare_vars(&program.body)?;
+        }
         self.compile_scope_body(&program.body, true)?;
         self.emit0("HALT");
         self.scopes.pop();
@@ -136,7 +184,7 @@ impl Compiler {
         Ok(self.add_function(FunctionDef {
             code: st.code,
             name: None,
-            is_async: false,
+            is_async: st.is_async,
             is_arrow: false,
             num_params: 0,
         }))
@@ -149,6 +197,7 @@ impl Compiler {
         body: FnBody<'_>,
         name: Option<String>,
         is_arrow: bool,
+        is_async: bool,
     ) -> R<usize> {
         let param_names = parse_params(params)?;
         let num_params = param_names.len();
@@ -156,11 +205,19 @@ impl Compiler {
             code: Vec::new(),
             loops: Vec::new(),
             is_module_main: false,
+            allow_module_var: false,
+            allow_root_class: false,
+            base_scope_index: self.scopes.len(),
+            var_slots: Vec::new(),
+            is_async,
         });
         self.scopes.push(Scope::default());
         for (arg_index, pn) in param_names.iter().enumerate() {
             let slot = self.add_local(pn);
             self.emit1("BIND_PARAM", ((slot as i64) << 8) | (arg_index as i64));
+        }
+        if let FnBody::Block(stmts) = &body {
+            self.predeclare_vars(stmts)?;
         }
         match body {
             FnBody::Block(stmts) => {
@@ -177,7 +234,7 @@ impl Compiler {
         Ok(self.add_function(FunctionDef {
             code: st.code,
             name,
-            is_async: false,
+            is_async: st.is_async,
             is_arrow,
             num_params,
         }))
@@ -187,6 +244,193 @@ impl Compiler {
         let idx = self.functions.len();
         self.functions.push(def);
         idx
+    }
+
+    /// A directly initialized binding or field gives an anonymous function,
+    /// arrow, or class its own name. Other expressions retain their own names.
+    fn compile_named_expr(&mut self, value: &Expression<'_>, name: &str) -> R<()> {
+        match value {
+            Expression::ClassExpression(class) if class.id.is_none() => {
+                self.compile_class(class, Some(name), None)
+            }
+            Expression::FunctionExpression(func) if func.id.is_none() && !func.generator => {
+                let body = func.body.as_ref().ok_or(Unsupported("function body"))?;
+                let index = self.compile_function(
+                    &func.params,
+                    FnBody::Block(&body.statements),
+                    Some(name.to_string()),
+                    false,
+                    func.r#async,
+                )?;
+                self.emit1("MAKE_FUNC", index as i64);
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                let body = match &arrow.body {
+                    ArrowFunctionBody::FunctionBody(body) => FnBody::Block(&body.statements),
+                    _ => FnBody::Expr(arrow.get_expression().ok_or(Unsupported("arrow body"))?),
+                };
+                let index = self.compile_function(
+                    &arrow.params,
+                    body,
+                    Some(name.to_string()),
+                    true,
+                    arrow.r#async,
+                )?;
+                self.emit1("MAKE_FUNC", index as i64);
+                Ok(())
+            }
+            _ => self.compile_expr(value),
+        }
+    }
+
+    /// A field initializer is run with its receiver as `this` when the class is
+    /// defined (static) or when an instance is allocated. Compiling it as its
+    /// own function preserves closure capture, evaluation order and early TDZ.
+    fn compile_field_initializer(&mut self, value: &Expression<'_>, name: &str) -> R<usize> {
+        self.fns.push(FnState {
+            code: Vec::new(),
+            loops: Vec::new(),
+            is_module_main: false,
+            allow_module_var: false,
+            allow_root_class: false,
+            base_scope_index: self.scopes.len(),
+            var_slots: Vec::new(),
+            is_async: false,
+        });
+        self.scopes.push(Scope::default());
+        self.compile_named_expr(value, name)?;
+        self.emit0("RETURN");
+        self.scopes.pop();
+        let state = self.fns.pop().expect("field frame");
+        Ok(self.add_function(FunctionDef {
+            code: state.code,
+            name: None,
+            is_async: false,
+            is_arrow: false,
+            num_params: 0,
+        }))
+    }
+
+    /// Only public, non-derived classes enter the VM. The class descriptor
+    /// holds function indices rather than values; BUILD_CLASS creates all
+    /// methods and initializes the class binding before evaluating static fields.
+    fn compile_class(
+        &mut self,
+        class: &Class<'_>,
+        inferred_name: Option<&str>,
+        bind: Option<i64>,
+    ) -> R<()> {
+        if class.heritage.is_some() || !class.decorators.is_empty() {
+            return Err(Unsupported("derived or decorated class"));
+        }
+        let name = class
+            .id
+            .as_ref()
+            .map_or(inferred_name.unwrap_or(""), |id| id.name.as_str());
+        let mut constructor = None;
+        let mut methods = Vec::new();
+        let mut fields = Vec::new();
+        for element in &class.body.body {
+            match element {
+                ClassElement::MethodDefinition(method) => {
+                    if method.computed || !method.decorators.is_empty() {
+                        return Err(Unsupported("computed or decorated class method"));
+                    }
+                    if method.value.r#async || method.value.generator {
+                        return Err(Unsupported("async or generator class method"));
+                    }
+                    let body = method
+                        .value
+                        .body
+                        .as_ref()
+                        .ok_or(Unsupported("class method body"))?;
+                    match method.kind {
+                        MethodDefinitionKind::Constructor => {
+                            if constructor.is_some() || method.r#static {
+                                return Err(Unsupported("class constructor kind"));
+                            }
+                            constructor = Some(self.compile_function(
+                                &method.value.params,
+                                FnBody::Block(&body.statements),
+                                None,
+                                false,
+                                false,
+                            )?);
+                        }
+                        MethodDefinitionKind::Method => {
+                            let key = static_key(&method.key)
+                                .ok_or(Unsupported("non-static class method key"))?;
+                            let index = self.compile_function(
+                                &method.value.params,
+                                FnBody::Block(&body.statements),
+                                None,
+                                false,
+                                false,
+                            )?;
+                            methods
+                                .push(json!({"key": key, "static": method.r#static, "fn": index}));
+                        }
+                        _ => return Err(Unsupported("class getter or setter")),
+                    }
+                }
+                ClassElement::PropertyDefinition(field) => {
+                    if field.computed || !field.decorators.is_empty() {
+                        return Err(Unsupported("computed or decorated class field"));
+                    }
+                    let key =
+                        static_key(&field.key).ok_or(Unsupported("non-static class field key"))?;
+                    let initializer = match &field.value {
+                        Some(value) => Some(self.compile_field_initializer(value, &key)?),
+                        None => None,
+                    };
+                    fields.push(json!({"key": key, "static": field.r#static, "fn": initializer}));
+                }
+                _ => {
+                    return Err(Unsupported(
+                        "class static block, accessor or private member",
+                    ))
+                }
+            }
+        }
+        let descriptor = json!({
+            "name": name,
+            "bind": bind,
+            "ctor": constructor,
+            "methods": methods,
+            "fields": fields,
+        });
+        let index = self.consts.add_class(descriptor);
+        self.emit1("BUILD_CLASS", index as i64);
+        Ok(())
+    }
+
+    fn predeclare_vars(&mut self, stmts: &[Statement<'_>]) -> R<()> {
+        let mut var_names = Vec::new();
+        collect_function_vars(stmts, &mut var_names)?;
+        for name in var_names {
+            let existing = self
+                .scopes
+                .last()
+                .expect("base scope")
+                .names
+                .iter()
+                .position(|n| n == &name);
+            let slot = match existing {
+                Some(slot) => slot,
+                None => {
+                    let slot = self.add_local(&name);
+                    self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+                    slot
+                }
+            };
+            self.fns
+                .last_mut()
+                .expect("frame")
+                .var_slots
+                .push((name, slot));
+        }
+        Ok(())
     }
 
     /// Compile a statement list in the current scope: declare its lexical slots
@@ -199,6 +443,11 @@ impl Compiler {
         for stmt in stmts {
             match stmt {
                 Statement::VariableDeclaration(decl) => {
+                    if decl.kind == VariableDeclarationKind::Var {
+                        // Var bindings live in the function base scope and
+                        // were instantiated before the body is evaluated.
+                        continue;
+                    }
                     let kind = lexical_kind(decl.kind)?;
                     for d in &decl.declarations {
                         let id = binding_identifier(&d.id)?;
@@ -207,8 +456,8 @@ impl Compiler {
                     }
                 }
                 Statement::FunctionDeclaration(func) => {
-                    if func.r#async || func.generator {
-                        return Err(Unsupported("async/generator function"));
+                    if func.generator {
+                        return Err(Unsupported("generator function"));
                     }
                     let name = func
                         .id
@@ -217,10 +466,27 @@ impl Compiler {
                         .name
                         .as_str()
                         .to_string();
-                    let slot = self.add_local(&name);
+                    let slot = self
+                        .scopes
+                        .last()
+                        .expect("scope")
+                        .names
+                        .iter()
+                        .position(|existing| existing == &name)
+                        .unwrap_or_else(|| self.add_local(&name));
                     hoisted.push((slot, func));
                 }
-                Statement::ClassDeclaration(_) => return Err(Unsupported("class declaration")),
+                Statement::ClassDeclaration(class) => {
+                    if self.root_class_needs_module_mode() {
+                        return Err(Unsupported("top-level class needs module kind"));
+                    }
+                    let name = class
+                        .id
+                        .as_ref()
+                        .ok_or(Unsupported("anonymous class declaration"))?;
+                    let slot = self.add_local(name.name.as_str());
+                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
+                }
                 _ => {}
             }
         }
@@ -232,8 +498,13 @@ impl Compiler {
                 .body
                 .as_ref()
                 .ok_or(Unsupported("function without a body"))?;
-            let idx =
-                self.compile_function(&func.params, FnBody::Block(&fb.statements), name, false)?;
+            let idx = self.compile_function(
+                &func.params,
+                FnBody::Block(&fb.statements),
+                name,
+                false,
+                func.r#async,
+            )?;
             self.emit1("MAKE_FUNC", idx as i64);
             self.emit1("DEF_FUNC_SLOT", slot as i64);
         }
@@ -251,6 +522,13 @@ impl Compiler {
 
     fn compile_statement(&mut self, stmt: &Statement<'_>, top_level: bool) -> R<()> {
         match stmt {
+            // The native ESM wrapper keeps static imports and supplies their
+            // live bindings to this VM frame as read-only globals.
+            Statement::ImportDeclaration(_) if top_level => Ok(()),
+            // Reexports have no local bindings or executable body. Native ESM
+            // linking remains responsible for their live export bindings.
+            Statement::ExportAllDeclaration(_) if top_level => Ok(()),
+            Statement::ExportFromDeclaration(_) if top_level => Ok(()),
             Statement::EmptyStatement(_) => Ok(()),
             Statement::ExpressionStatement(s) => {
                 self.compile_expr(&s.expression)?;
@@ -264,15 +542,35 @@ impl Compiler {
                 Ok(())
             }
             Statement::VariableDeclaration(decl) => {
+                if decl.kind == VariableDeclarationKind::Var {
+                    let frame = self.fns.last().expect("frame");
+                    if frame.is_module_main && !frame.allow_module_var {
+                        return Err(Unsupported("top-level var needs a script kind"));
+                    }
+                    for d in &decl.declarations {
+                        let id = binding_identifier(&d.id)?;
+                        if let Some(init) = &d.init {
+                            self.compile_var_init(id.name.as_str(), init)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 lexical_kind(decl.kind)?;
                 for d in &decl.declarations {
                     let id = binding_identifier(&d.id)?;
+                    if d.init
+                        .as_ref()
+                        .is_some_and(|expr| matches!(expr, Expression::ClassExpression(_)))
+                        && self.root_class_needs_module_mode()
+                    {
+                        return Err(Unsupported("top-level class initializer needs module kind"));
+                    }
                     let (depth, slot) = self
                         .resolve(id.name.as_str())
                         .ok_or(Unsupported("binding not declared in its scope"))?;
                     debug_assert_eq!(depth, 0, "a declaration initializes a current-scope slot");
                     match &d.init {
-                        Some(init) => self.compile_expr(init)?,
+                        Some(init) => self.compile_named_expr(init, id.name.as_str())?,
                         None => self.emit0("PUSH_UNDEF"),
                     }
                     self.emit1("INIT_SLOT", pack_addr(0, slot));
@@ -280,36 +578,56 @@ impl Compiler {
                 Ok(())
             }
             Statement::BlockStatement(b) => self.compile_block(&b.body),
+            Statement::ClassDeclaration(class) => {
+                let name = class
+                    .id
+                    .as_ref()
+                    .ok_or(Unsupported("anonymous class declaration"))?;
+                let (depth, slot) = self
+                    .resolve(name.name.as_str())
+                    .ok_or(Unsupported("class binding"))?;
+                self.compile_class(class, None, Some(pack_addr(depth, slot)))?;
+                self.emit0("POP");
+                Ok(())
+            }
             Statement::IfStatement(s) => self.compile_if(s),
-            Statement::WhileStatement(s) => self.compile_while(&s.test, &s.body),
-            Statement::DoWhileStatement(s) => self.compile_do_while(&s.body, &s.test),
-            Statement::ForStatement(s) => self.compile_for(s),
-            Statement::SwitchStatement(s) => self.compile_switch(s),
+            Statement::WhileStatement(s) => self.compile_while(&s.test, &s.body, None),
+            Statement::DoWhileStatement(s) => self.compile_do_while(&s.body, &s.test, None),
+            Statement::ForStatement(s) => self.compile_for(s, None),
+            Statement::ForOfStatement(s) if !s.r#await => {
+                self.compile_iterated(&s.left, &s.right, &s.body, false, None)
+            }
+            Statement::ForInStatement(s) => {
+                self.compile_iterated(&s.left, &s.right, &s.body, true, None)
+            }
+            Statement::SwitchStatement(s) => self.compile_switch(s, None),
+            Statement::LabeledStatement(s) => self.compile_labeled(s),
+            Statement::TryStatement(s) => self.compile_try(s),
+            Statement::ThrowStatement(s) => {
+                self.compile_expr(&s.argument)?;
+                self.emit0("THROW");
+                Ok(())
+            }
             Statement::ReturnStatement(s) => {
                 if self.fns.last().expect("frame").is_module_main {
                     return Err(Unsupported("return at the top level"));
                 }
                 match &s.argument {
-                    Some(arg) => {
-                        self.compile_expr(arg)?;
-                        self.emit0("RETURN");
-                    }
-                    None => self.emit0("RETURN_UNDEF"),
+                    Some(arg) => self.compile_expr(arg)?,
+                    None => self.emit0("PUSH_UNDEF"),
                 }
+                self.close_iterators_for_return()?;
+                self.emit0("RETURN");
                 Ok(())
             }
-            Statement::BreakStatement(s) => {
-                if s.label.is_some() {
-                    return Err(Unsupported("labeled break"));
-                }
-                self.emit_break()
-            }
-            Statement::ContinueStatement(s) => {
-                if s.label.is_some() {
-                    return Err(Unsupported("labeled continue"));
-                }
-                self.emit_continue()
-            }
+            Statement::BreakStatement(s) => match &s.label {
+                Some(l) => self.emit_break_label(l.name.as_str()),
+                None => self.emit_break(),
+            },
+            Statement::ContinueStatement(s) => match &s.label {
+                Some(l) => self.emit_continue_label(l.name.as_str()),
+                None => self.emit_continue(),
+            },
             Statement::FunctionDeclaration(_) => Err(Unsupported(
                 "function declaration outside a statement-list top",
             )),
@@ -329,6 +647,57 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_try(&mut self, stmt: &TryStatement<'_>) -> R<()> {
+        if stmt.finalizer.is_some() {
+            return Err(Unsupported("try/finally"));
+        }
+        if contains_return_stmt(&stmt.block.body)
+            && self
+                .fns
+                .last()
+                .expect("frame")
+                .loops
+                .iter()
+                .any(|loop_state| {
+                    loop_state
+                        .iterator
+                        .is_some_and(|iterator| iterator.handler_active)
+                })
+        {
+            return Err(Unsupported("return inside try in iterated loop"));
+        }
+        let catch = stmt
+            .handler
+            .as_ref()
+            .ok_or(Unsupported("try without catch"))?;
+        // A break or continue that exits this try needs a matching POP_HANDLER.
+        // Restrict this first slice to abrupt exits via return and throw.
+        if contains_loop_jump(&stmt.block.body) {
+            return Err(Unsupported("break or continue across try/catch"));
+        }
+        let catch_target = self.emit_jump("PUSH_HANDLER");
+        self.compile_block(&stmt.block.body)?;
+        self.emit0("POP_HANDLER");
+        let after_catch = self.emit_jump("JMP");
+        self.patch_here(catch_target);
+
+        // The handler enters after unwinding the try block. An exception is
+        // left on the stack, ready to initialize the optional catch binding.
+        self.open_scope();
+        if let Some(parameter) = &catch.param {
+            let name = binding_identifier(&parameter.pattern)?;
+            let slot = self.add_local(name.name.as_str());
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
+            self.emit1("INIT_SLOT", pack_addr(0, slot));
+        } else {
+            self.emit0("POP");
+        }
+        self.compile_scope_body(&catch.body.body, false)?;
+        self.close_scope();
+        self.patch_here(after_catch);
+        Ok(())
+    }
+
     fn compile_if(&mut self, s: &IfStatement<'_>) -> R<()> {
         self.compile_expr(&s.test)?;
         let to_else = self.emit_jump("JMP_IF_FALSE");
@@ -344,10 +713,15 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_while(&mut self, test: &Expression<'_>, body: &Statement<'_>) -> R<()> {
+    fn compile_while(
+        &mut self,
+        test: &Expression<'_>,
+        body: &Statement<'_>,
+        label: Option<&str>,
+    ) -> R<()> {
         let l_top = self.code_len();
         let depth = self.scopes.len();
-        self.push_loop(depth, depth, false);
+        self.push_loop(depth, depth, false, label);
         self.compile_expr(test)?;
         let exit = self.emit_jump("JMP_IF_FALSE");
         self.compile_statement(body, false)?;
@@ -360,10 +734,15 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_do_while(&mut self, body: &Statement<'_>, test: &Expression<'_>) -> R<()> {
+    fn compile_do_while(
+        &mut self,
+        body: &Statement<'_>,
+        test: &Expression<'_>,
+        label: Option<&str>,
+    ) -> R<()> {
         let l_top = self.code_len();
         let depth = self.scopes.len();
-        self.push_loop(depth, depth, false);
+        self.push_loop(depth, depth, false, label);
         self.compile_statement(body, false)?;
         let l_cont = self.code_len();
         self.compile_expr(test)?;
@@ -375,7 +754,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, s: &ForStatement<'_>) -> R<()> {
+    fn compile_for(&mut self, s: &ForStatement<'_>, label: Option<&str>) -> R<()> {
         let lexical_head = s
             .init
             .as_ref()
@@ -400,20 +779,33 @@ impl Compiler {
         match &s.init {
             None => {}
             Some(ForStatementInit::VariableDeclaration(decl)) => {
-                let kind = lexical_kind(decl.kind)?;
-                let mut slots = Vec::with_capacity(decl.declarations.len());
-                for d in &decl.declarations {
-                    let id = binding_identifier(&d.id)?;
-                    let slot = self.add_local(id.name.as_str());
-                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
-                    slots.push((slot, d.init.as_ref()));
-                }
-                for (slot, init) in slots {
-                    match init {
-                        Some(e) => self.compile_expr(e)?,
-                        None => self.emit0("PUSH_UNDEF"),
+                if decl.kind == VariableDeclarationKind::Var {
+                    let frame = self.fns.last().expect("frame");
+                    if frame.is_module_main && !frame.allow_module_var {
+                        return Err(Unsupported("top-level var needs a script kind"));
                     }
-                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                    for d in &decl.declarations {
+                        let id = binding_identifier(&d.id)?;
+                        if let Some(init) = &d.init {
+                            self.compile_var_init(id.name.as_str(), init)?;
+                        }
+                    }
+                } else {
+                    let kind = lexical_kind(decl.kind)?;
+                    let mut slots = Vec::with_capacity(decl.declarations.len());
+                    for d in &decl.declarations {
+                        let id = binding_identifier(&d.id)?;
+                        let slot = self.add_local(id.name.as_str());
+                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                        slots.push((slot, d.init.as_ref()));
+                    }
+                    for (slot, init) in slots {
+                        match init {
+                            Some(e) => self.compile_expr(e)?,
+                            None => self.emit0("PUSH_UNDEF"),
+                        }
+                        self.emit1("INIT_SLOT", pack_addr(0, slot));
+                    }
                 }
             }
             Some(other) => {
@@ -427,7 +819,7 @@ impl Compiler {
 
         let l_test = self.code_len();
         let continue_depth = self.scopes.len();
-        self.push_loop(break_depth, continue_depth, false);
+        self.push_loop(break_depth, continue_depth, false, label);
         let exit = match &s.test {
             Some(t) => {
                 self.compile_expr(t)?;
@@ -455,7 +847,146 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_switch(&mut self, s: &SwitchStatement<'_>) -> R<()> {
+    fn compile_iterated(
+        &mut self,
+        left: &ForStatementLeft<'_>,
+        right: &Expression<'_>,
+        body: &Statement<'_>,
+        for_in: bool,
+        label: Option<&str>,
+    ) -> R<()> {
+        // A nested for-of with an early return can throw from its IteratorClose
+        // while the outer iterator still needs closing. Defer that case until
+        // abrupt completion unwinding handles multiple iterators atomically.
+        if contains_return_stmt(std::slice::from_ref(body))
+            && self
+                .fns
+                .last()
+                .expect("frame")
+                .loops
+                .iter()
+                .any(|loop_state| loop_state.iterator.is_some())
+        {
+            return Err(Unsupported("return across nested iterators"));
+        }
+        let ForStatementLeft::VariableDeclaration(decl) = left else {
+            return Err(Unsupported("iterated assignment target"));
+        };
+        if decl.declarations.len() != 1 || decl.declarations[0].init.is_some() {
+            return Err(Unsupported("iterated binding declaration"));
+        }
+        let name = binding_identifier(&decl.declarations[0].id)?.name.as_str();
+        let lexical = match decl.kind {
+            VariableDeclarationKind::Var => false,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Const => true,
+            _ => return Err(Unsupported("iterated declaration kind")),
+        };
+        if !lexical {
+            let frame = self.fns.last().expect("frame");
+            if frame.is_module_main && !frame.allow_module_var {
+                return Err(Unsupported("top-level var needs script kind"));
+            }
+        }
+        self.open_scope();
+        let head_scope_index = self.scopes.len() - 1;
+        if lexical {
+            // The RHS resolves its head binding to this uninitialized slot.
+            // Every subsequent iteration gets a separate initialized scope.
+            let slot = self.add_local(name);
+            let kind = lexical_kind(decl.kind)?;
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+        }
+        let iterator = self.add_local("\0iterator");
+        self.emit1("DECLARE_SLOT", (iterator as i64) << 2);
+        self.compile_expr(right)?;
+        if for_in {
+            self.emit0("FOR_IN_KEYS");
+        }
+        self.emit0("GET_ITERATOR");
+        self.emit1("INIT_SLOT", pack_addr(0, iterator));
+
+        let top = self.code_len();
+        self.emit1("LOAD_SLOT", pack_addr(0, iterator));
+        let normal_end = self.emit_jump("FOR_ITER");
+        let depth = self.scopes.len();
+        self.push_loop(depth - 1, depth, false, label);
+        self.fns
+            .last_mut()
+            .expect("frame")
+            .loops
+            .last_mut()
+            .expect("loop")
+            .iterator = Some(IteratorLoop {
+            slot: iterator,
+            head_scope_index,
+            handler_active: false,
+        });
+        if lexical {
+            self.open_scope();
+            let slot = self.add_local(name);
+            let kind = lexical_kind(decl.kind)?;
+            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+            self.emit1("INIT_SLOT", pack_addr(0, slot));
+        } else {
+            self.emit_store_name(name);
+            self.emit0("POP");
+        }
+
+        let caught = self.emit_jump("PUSH_HANDLER");
+        self.fns
+            .last_mut()
+            .expect("frame")
+            .loops
+            .last_mut()
+            .expect("loop")
+            .iterator
+            .as_mut()
+            .expect("iterator")
+            .handler_active = true;
+        self.compile_statement(body, false)?;
+        self.fns
+            .last_mut()
+            .expect("frame")
+            .loops
+            .last_mut()
+            .expect("loop")
+            .iterator
+            .as_mut()
+            .expect("iterator")
+            .handler_active = false;
+        self.emit0("POP_HANDLER");
+        let after_catch = self.emit_jump("JMP");
+        self.patch_here(caught);
+        let error_slot = self.add_local("\0iteration-error");
+        self.emit1("DECLARE_SLOT", (error_slot as i64) << 2);
+        self.emit1("INIT_SLOT", pack_addr(0, error_slot));
+        let iter_depth = self.scopes.len() - depth;
+        self.emit1("LOAD_SLOT", pack_addr(iter_depth, iterator));
+        self.emit0("DUP");
+        let close = self.consts.add_str("close");
+        self.emit1("GET_PROP", close as i64);
+        self.emit1("LOAD_SLOT", pack_addr(0, error_slot));
+        self.emit0("PUSH_TRUE");
+        self.emit1("CALL_METHOD", 2);
+        self.emit0("POP");
+        self.emit1("LOAD_SLOT", pack_addr(0, error_slot));
+        self.emit0("THROW");
+        self.patch_here(after_catch);
+        if lexical {
+            self.close_scope();
+        }
+        self.emit1("JMP", top as i64);
+        let normal_exit = self.code_len();
+        self.patch_to(normal_end, normal_exit);
+        self.close_scope();
+        let break_exit = self.code_len();
+        let loop_state = self.pop_loop();
+        self.patch_all(&loop_state.break_sites, break_exit);
+        self.patch_all(&loop_state.continue_sites, top);
+        Ok(())
+    }
+
+    fn compile_switch(&mut self, s: &SwitchStatement<'_>, label: Option<&str>) -> R<()> {
         // A lexical declaration in a case needs the switch block-scope model,
         // which is not ported yet; decline such switches.
         for case in &s.cases {
@@ -488,7 +1019,7 @@ impl Compiler {
         let to_default = self.emit_jump("JMP");
 
         let depth = self.scopes.len();
-        self.push_loop(depth, depth, true);
+        self.push_loop(depth, depth, true, label);
         let mut body_pos = vec![0usize; s.cases.len()];
         for (ci, case) in s.cases.iter().enumerate() {
             body_pos[ci] = self.code_len();
@@ -508,6 +1039,40 @@ impl Compiler {
         self.patch_all(&lp.break_sites, l_end);
         self.close_scope();
         Ok(())
+    }
+
+    /// Compile `label: <statement>`. When the body is a loop or `switch`, the
+    /// label rides on that construct's loop entry, so `break label` and (for a
+    /// loop) `continue label` resolve to it. When the body is anything else, the
+    /// label names a breakable block: `break label` jumps past the statement, and
+    /// `continue label` is a syntax error the parser already rejects.
+    fn compile_labeled(&mut self, s: &LabeledStatement<'_>) -> R<()> {
+        let label = s.label.name.as_str();
+        match &s.body {
+            Statement::WhileStatement(w) => self.compile_while(&w.test, &w.body, Some(label)),
+            Statement::DoWhileStatement(w) => self.compile_do_while(&w.body, &w.test, Some(label)),
+            Statement::ForStatement(f) => self.compile_for(f, Some(label)),
+            Statement::ForOfStatement(f) if !f.r#await => {
+                self.compile_iterated(&f.left, &f.right, &f.body, false, Some(label))
+            }
+            Statement::ForInStatement(f) => {
+                self.compile_iterated(&f.left, &f.right, &f.body, true, Some(label))
+            }
+            Statement::SwitchStatement(sw) => self.compile_switch(sw, Some(label)),
+            other => {
+                let depth = self.scopes.len();
+                self.push_loop(depth, depth, true, Some(label));
+                self.compile_statement(other, false)?;
+                let lp = self.pop_loop();
+                let l_end = self.code_len();
+                self.patch_all(&lp.break_sites, l_end);
+                debug_assert!(
+                    lp.continue_sites.is_empty(),
+                    "continue cannot target a non-loop label",
+                );
+                Ok(())
+            }
+        }
     }
 
     // ---- expressions ----
@@ -530,6 +1095,13 @@ impl Compiler {
                 self.emit0(if lit.value { "PUSH_TRUE" } else { "PUSH_FALSE" });
             }
             Expression::NullLiteral(_) => self.emit0("PUSH_NULL"),
+            Expression::RegExpLiteral(lit) => {
+                let index = self.consts.add_regexp(
+                    lit.regex.pattern.text.as_str(),
+                    &lit.regex.flags.to_string(),
+                );
+                self.emit1("PUSH_CONST", index as i64);
+            }
             Expression::BigIntLiteral(lit) => {
                 let raw = lit.raw.as_ref().map_or("", |a| a.as_str());
                 let digits = raw.trim_end_matches('n').replace('_', "");
@@ -542,6 +1114,7 @@ impl Compiler {
             Expression::Identifier(id) => self.emit_load_name(id.name.as_str())?,
             Expression::ThisExpression(_) => self.emit0("PUSH_THIS"),
             Expression::ParenthesizedExpression(p) => self.compile_expr(&p.expression)?,
+            Expression::ChainExpression(chain) => self.compile_chain(chain)?,
             Expression::SequenceExpression(seq) => {
                 let n = seq.expressions.len();
                 for (i, e) in seq.expressions.iter().enumerate() {
@@ -552,16 +1125,31 @@ impl Compiler {
                 }
             }
             Expression::TemplateLiteral(tpl) => {
-                if !tpl.expressions.is_empty() || tpl.quasis.len() != 1 {
-                    return Err(Unsupported("template literal with substitutions"));
+                if tpl.quasis.len() != tpl.expressions.len() + 1 {
+                    return Err(Unsupported("template quasi count"));
                 }
-                let cooked = tpl.quasis[0]
-                    .value
-                    .cooked
-                    .and_then(|c| c.as_str())
-                    .ok_or(Unsupported("template with no cooked value"))?;
-                let i = self.consts.add_str(cooked);
-                self.emit1("PUSH_CONST", i as i64);
+                for (index, quasi) in tpl.quasis.iter().enumerate() {
+                    if index != 0 {
+                        // The internal helper converts with string hint and
+                        // rejects Symbol values, as template substitution
+                        // does. JS addition alone uses the default hint.
+                        let helper = self.consts.add_str("\0t");
+                        self.emit1("LOAD_GLOBAL", helper as i64);
+                        self.compile_expr(&tpl.expressions[index - 1])?;
+                        self.emit1("CALL", 1);
+                        self.emit0("ADD");
+                    }
+                    let cooked = quasi
+                        .value
+                        .cooked
+                        .and_then(|c| c.as_str())
+                        .ok_or(Unsupported("template with no cooked value"))?;
+                    let i = self.consts.add_str(cooked);
+                    self.emit1("PUSH_CONST", i as i64);
+                    if index != 0 {
+                        self.emit0("ADD");
+                    }
+                }
             }
             Expression::UnaryExpression(u) => self.compile_unary(u)?,
             Expression::BinaryExpression(b) => {
@@ -582,8 +1170,8 @@ impl Compiler {
             Expression::AssignmentExpression(a) => self.compile_assign(a)?,
             Expression::UpdateExpression(u) => self.compile_update(u)?,
             Expression::FunctionExpression(func) => {
-                if func.r#async || func.generator {
-                    return Err(Unsupported("async/generator function expression"));
+                if func.generator {
+                    return Err(Unsupported("generator function expression"));
                 }
                 if func.id.is_some() {
                     return Err(Unsupported("named function expression"));
@@ -597,23 +1185,42 @@ impl Compiler {
                     FnBody::Block(&fb.statements),
                     None,
                     false,
+                    func.r#async,
                 )?;
                 self.emit1("MAKE_FUNC", idx as i64);
             }
-            Expression::ArrowFunctionExpression(arrow) => {
-                if arrow.r#async {
-                    return Err(Unsupported("async arrow function"));
+            Expression::ClassExpression(class) => {
+                if let Some(name) = &class.id {
+                    self.open_scope();
+                    let slot = self.add_local(name.name.as_str());
+                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 2);
+                    self.compile_class(class, None, Some(pack_addr(0, slot)))?;
+                    self.close_scope();
+                } else {
+                    // Assignment and object-property forms infer names that
+                    // require their parent's syntax. The variable declarator
+                    // cases call compile_class with that inferred name.
+                    return Err(Unsupported("anonymous class name inference"));
                 }
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
                 let idx = match &arrow.body {
                     ArrowFunctionBody::FunctionBody(fb) => self.compile_function(
                         &arrow.params,
                         FnBody::Block(&fb.statements),
                         None,
                         true,
+                        arrow.r#async,
                     )?,
                     _ => {
                         let e = arrow.get_expression().ok_or(Unsupported("arrow body"))?;
-                        self.compile_function(&arrow.params, FnBody::Expr(e), None, true)?
+                        self.compile_function(
+                            &arrow.params,
+                            FnBody::Expr(e),
+                            None,
+                            true,
+                            arrow.r#async,
+                        )?
                     }
                 };
                 self.emit1("MAKE_FUNC", idx as i64);
@@ -637,18 +1244,34 @@ impl Compiler {
             Expression::CallExpression(call) => self.compile_call(call)?,
             Expression::NewExpression(new) => {
                 self.compile_expr(&new.callee)?;
-                let argc = self.compile_args(&new.arguments)?;
-                self.emit1("NEW", argc as i64);
+                let (argc, spread) = self.compile_args(&new.arguments)?;
+                if spread {
+                    self.emit0("NEW_APPLY");
+                } else {
+                    self.emit1("NEW", argc as i64);
+                }
             }
             Expression::ArrayExpression(arr) => {
                 self.emit0("ARR_EMPTY");
                 for el in &arr.elements {
                     match el {
                         ArrayExpressionElement::Elision(_) => {
-                            return Err(Unsupported("array hole"))
+                            // Increasing an array's length creates a hole.
+                            // Pushing undefined would instead create an own
+                            // element and change property-existence checks.
+                            self.emit0("DUP");
+                            self.emit0("DUP");
+                            let length = self.consts.add_str("length");
+                            self.emit1("GET_PROP", length as i64);
+                            let one = self.consts.add_num(1.0);
+                            self.emit1("PUSH_CONST", one as i64);
+                            self.emit0("ADD");
+                            self.emit1("SET_PROP", length as i64);
+                            self.emit0("POP");
                         }
-                        ArrayExpressionElement::SpreadElement(_) => {
-                            return Err(Unsupported("array spread"))
+                        ArrayExpressionElement::SpreadElement(spread) => {
+                            self.compile_expr(&spread.argument)?;
+                            self.emit0("ARR_SPREAD");
                         }
                         other => {
                             let e = other.as_expression().ok_or(Unsupported("array element"))?;
@@ -663,18 +1286,53 @@ impl Compiler {
                 for prop in &obj.properties {
                     let p = match prop {
                         ObjectPropertyKind::ObjectProperty(p) => p,
-                        ObjectPropertyKind::SpreadProperty(_) => {
-                            return Err(Unsupported("object spread"))
+                        ObjectPropertyKind::SpreadProperty(spread) => {
+                            self.compile_expr(&spread.argument)?;
+                            self.emit0("OBJ_SPREAD");
+                            continue;
                         }
                     };
-                    if p.computed || p.method || p.kind != PropertyKind::Init {
-                        return Err(Unsupported("computed/method/accessor property"));
+                    if p.method || p.kind != PropertyKind::Init {
+                        return Err(Unsupported("method/accessor property"));
                     }
-                    let key = static_key(&p.key).ok_or(Unsupported("non-static object key"))?;
+                    let static_key = if p.computed { None } else { static_key(&p.key) };
+                    let computed_key = static_key.is_none()
+                        || (p.shorthand && static_key.as_deref() == Some("__proto__"));
+                    if computed_key {
+                        if p.computed || static_key.is_none() {
+                            let key = p
+                                .key
+                                .as_expression()
+                                .ok_or(Unsupported("object property expression"))?;
+                            self.compile_expr(key)?;
+                        } else {
+                            let key = static_key.as_deref().expect("shorthand proto");
+                            let i = self.consts.add_str(key);
+                            self.emit1("PUSH_CONST", i as i64);
+                        }
+                    }
                     self.compile_expr(&p.value)?;
-                    let i = self.consts.add_str(&key);
-                    self.emit1("OBJ_SET", i as i64);
+                    if computed_key {
+                        self.emit0("OBJ_SET_DYN");
+                    } else {
+                        let i = self
+                            .consts
+                            .add_str(static_key.as_deref().expect("static key"));
+                        self.emit1("OBJ_SET", i as i64);
+                    }
                 }
+            }
+            Expression::AwaitExpression(a) => {
+                self.compile_expr(&a.argument)?;
+                // The parser only accepts await inside an async function or a
+                // module top level, so the enclosing frame runs async. Raise the
+                // flag (already set for a source `async` function; this is what
+                // turns a module main with top-level await into a promise) and
+                // suspend. AWAIT_TOP is the module-root form; both suspend the
+                // same way in the runtime.
+                let top = self.fns.last().expect("frame").is_module_main;
+                self.fns.last_mut().expect("frame").is_async = true;
+                self.emit0(if top { "AWAIT_TOP" } else { "AWAIT" });
             }
             _ => return Err(Unsupported("expression outside the subset")),
         }
@@ -712,7 +1370,133 @@ impl Compiler {
                 self.emit0("POP");
                 self.emit0("PUSH_UNDEF");
             }
-            UnaryOperator::Delete => return Err(Unsupported("delete")),
+            UnaryOperator::Delete => match &u.argument {
+                Expression::StaticMemberExpression(m) if !m.optional => {
+                    self.compile_expr(&m.object)?;
+                    let i = self.consts.add_str(m.property.name.as_str());
+                    self.emit1("DELETE_PROP", i as i64);
+                }
+                Expression::ComputedMemberExpression(m) if !m.optional => {
+                    self.compile_expr(&m.object)?;
+                    self.compile_expr(&m.expression)?;
+                    self.emit0("DELETE_PROP_DYN");
+                }
+                // `delete x` on a plain binding is a strict-mode syntax error,
+                // and an optional or private member delete is out of the subset.
+                _ => return Err(Unsupported("delete of this target")),
+            },
+        }
+        Ok(())
+    }
+
+    /// Compile `obj.key <op>= rhs` and `obj[key] <op>= rhs` (plain compound) by
+    /// evaluating the object (and computed key) once, reading the current value,
+    /// combining, and writing back. The result is the stored value.
+    fn compile_member_compound(
+        &mut self,
+        me: &MemberExpression<'_>,
+        bin: &'static str,
+        rhs: &Expression<'_>,
+    ) -> R<()> {
+        match me {
+            MemberExpression::StaticMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional assignment target"));
+                }
+                let key = self.consts.add_str(m.property.name.as_str());
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                self.emit1("GET_PROP", key as i64);
+                self.compile_expr(rhs)?;
+                self.emit0(bin);
+                self.emit1("SET_PROP", key as i64);
+            }
+            MemberExpression::ComputedMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional assignment target"));
+                }
+                let t_o = self.declare_temp();
+                let t_k = self.declare_temp();
+                let t_v = self.declare_temp();
+                self.compile_expr(&m.object)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_o));
+                self.compile_expr(&m.expression)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_k));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                self.emit0("GET_PROP_DYN");
+                self.compile_expr(rhs)?;
+                self.emit0(bin);
+                self.emit1("INIT_SLOT", pack_addr(0, t_v));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_v));
+                self.emit0("SET_PROP_DYN");
+            }
+            MemberExpression::PrivateFieldExpression(_) => {
+                return Err(Unsupported("private field assignment"))
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile `obj.key <op>= rhs` for the logical operators (`&&=`, `||=`,
+    /// `??=`), which read the current value and assign `rhs` only when the
+    /// short-circuit condition fails. `keep_jump` is the KEEP jump that skips the
+    /// assignment: truthy for `||=`, falsy for `&&=`, non-nullish for `??=`. The
+    /// object (and computed key) is evaluated once; `rhs` only when it runs.
+    fn compile_member_logical(
+        &mut self,
+        me: &MemberExpression<'_>,
+        keep_jump: &'static str,
+        rhs: &Expression<'_>,
+    ) -> R<()> {
+        match me {
+            MemberExpression::StaticMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional assignment target"));
+                }
+                let key = self.consts.add_str(m.property.name.as_str());
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                self.emit1("GET_PROP", key as i64);
+                let keep = self.emit_jump(keep_jump);
+                self.compile_expr(rhs)?;
+                self.emit1("SET_PROP", key as i64);
+                let to_end = self.emit_jump("JMP");
+                self.patch_here(keep);
+                self.emit0("SWAP");
+                self.emit0("POP");
+                self.patch_here(to_end);
+            }
+            MemberExpression::ComputedMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional assignment target"));
+                }
+                let t_o = self.declare_temp();
+                let t_k = self.declare_temp();
+                self.compile_expr(&m.object)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_o));
+                self.compile_expr(&m.expression)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_k));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                self.emit0("GET_PROP_DYN");
+                let keep = self.emit_jump(keep_jump);
+                let t_v = self.declare_temp();
+                self.compile_expr(rhs)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_v));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_v));
+                self.emit0("SET_PROP_DYN");
+                let to_end = self.emit_jump("JMP");
+                self.patch_here(keep);
+                self.patch_here(to_end);
+            }
+            MemberExpression::PrivateFieldExpression(_) => {
+                return Err(Unsupported("private field assignment"))
+            }
         }
         Ok(())
     }
@@ -769,47 +1553,64 @@ impl Compiler {
             AssignmentOperator::LogicalAnd
             | AssignmentOperator::LogicalOr
             | AssignmentOperator::LogicalNullish => {
-                let id = match &node.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(id) => id,
-                    _ => return Err(Unsupported("logical assignment to this target")),
-                };
                 let short = match node.operator {
                     AssignmentOperator::LogicalAnd => "JMP_IF_FALSY_KEEP",
                     AssignmentOperator::LogicalOr => "JMP_IF_TRUTHY_KEEP",
                     _ => "JMP_IF_NOT_NULLISH_KEEP",
                 };
-                self.emit_load_name(id.name.as_str())?;
-                let to_end = self.emit_jump(short);
-                self.emit0("POP");
-                self.compile_expr(&node.right)?;
-                self.emit_store_name(id.name.as_str());
-                self.patch_here(to_end);
+                match &node.left {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        self.emit_load_name(id.name.as_str())?;
+                        let to_end = self.emit_jump(short);
+                        self.emit0("POP");
+                        self.compile_expr(&node.right)?;
+                        self.emit_store_name(id.name.as_str());
+                        self.patch_here(to_end);
+                    }
+                    left => {
+                        let me = left
+                            .as_member_expression()
+                            .ok_or(Unsupported("logical assignment to this target"))?;
+                        self.compile_member_logical(me, short, &node.right)?;
+                    }
+                }
             }
             other => {
                 let bin = compound_binary_op(other)?;
-                let id = match &node.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(id) => id,
-                    _ => return Err(Unsupported("compound assignment to this target")),
-                };
-                self.emit_load_name(id.name.as_str())?;
-                self.compile_expr(&node.right)?;
-                self.emit0(bin);
-                self.emit_store_name(id.name.as_str());
+                match &node.left {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        self.emit_load_name(id.name.as_str())?;
+                        self.compile_expr(&node.right)?;
+                        self.emit0(bin);
+                        self.emit_store_name(id.name.as_str());
+                    }
+                    left => {
+                        let me = left
+                            .as_member_expression()
+                            .ok_or(Unsupported("compound assignment to this target"))?;
+                        self.compile_member_compound(me, bin, &node.right)?;
+                    }
+                }
             }
         }
         Ok(())
     }
 
     fn compile_update(&mut self, node: &oxc_ast::ast::UpdateExpression<'_>) -> R<()> {
-        let id = match &node.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => id,
-            _ => return Err(Unsupported("update on a member target")),
-        };
-        let name = id.name.as_str().to_string();
         let delta = match node.operator {
             UpdateOperator::Increment => 1.0,
             UpdateOperator::Decrement => -1.0,
         };
+        let id = match &node.argument {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => id,
+            other => {
+                let me = other
+                    .as_member_expression()
+                    .ok_or(Unsupported("update on this target"))?;
+                return self.compile_member_update(me, delta, node.prefix);
+            }
+        };
+        let name = id.name.as_str().to_string();
         // Mirror the shield: coerce to a number with POS, then add +/-1. This is
         // correct for number and string operands; a BigInt operand differs (as in
         // the shield), which is the one documented limitation.
@@ -831,54 +1632,320 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile `obj.key++`, `--obj[key]`, and friends. The object (and computed
+    /// key) is evaluated once. Like the identifier form, the operand is coerced
+    /// with `POS` before adding +/-1, so a number or string operand is correct
+    /// and a BigInt operand differs (the same documented limitation). A prefix
+    /// update yields the new value, a postfix update the old.
+    fn compile_member_update(
+        &mut self,
+        me: &MemberExpression<'_>,
+        delta: f64,
+        prefix: bool,
+    ) -> R<()> {
+        match me {
+            MemberExpression::StaticMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional update target"));
+                }
+                let key = self.consts.add_str(m.property.name.as_str());
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                self.emit1("GET_PROP", key as i64);
+                self.emit0("POS");
+                if prefix {
+                    let i = self.consts.add_num(delta);
+                    self.emit1("PUSH_CONST", i as i64);
+                    self.emit0("ADD");
+                    self.emit1("SET_PROP", key as i64);
+                } else {
+                    let t_old = self.declare_temp();
+                    self.emit1("INIT_SLOT", pack_addr(0, t_old));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_old));
+                    let i = self.consts.add_num(delta);
+                    self.emit1("PUSH_CONST", i as i64);
+                    self.emit0("ADD");
+                    self.emit1("SET_PROP", key as i64);
+                    self.emit0("POP");
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_old));
+                }
+            }
+            MemberExpression::ComputedMemberExpression(m) => {
+                if m.optional {
+                    return Err(Unsupported("optional update target"));
+                }
+                let t_o = self.declare_temp();
+                let t_k = self.declare_temp();
+                self.compile_expr(&m.object)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_o));
+                self.compile_expr(&m.expression)?;
+                self.emit1("INIT_SLOT", pack_addr(0, t_k));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                self.emit0("GET_PROP_DYN");
+                self.emit0("POS");
+                let old = self.consts.add_num(delta);
+                if prefix {
+                    self.emit1("PUSH_CONST", old as i64);
+                    self.emit0("ADD");
+                    let t_v = self.declare_temp();
+                    self.emit1("INIT_SLOT", pack_addr(0, t_v));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_v));
+                    self.emit0("SET_PROP_DYN");
+                } else {
+                    let t_old = self.declare_temp();
+                    self.emit1("INIT_SLOT", pack_addr(0, t_old));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_old));
+                    self.emit1("PUSH_CONST", old as i64);
+                    self.emit0("ADD");
+                    let t_v = self.declare_temp();
+                    self.emit1("INIT_SLOT", pack_addr(0, t_v));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_o));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_k));
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_v));
+                    self.emit0("SET_PROP_DYN");
+                    self.emit0("POP");
+                    self.emit1("LOAD_SLOT", pack_addr(0, t_old));
+                }
+            }
+            MemberExpression::PrivateFieldExpression(_) => {
+                return Err(Unsupported("private field update"))
+            }
+        }
+        Ok(())
+    }
+
     fn compile_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> R<()> {
         if call.optional {
             return Err(Unsupported("optional call"));
         }
-        match &call.callee {
+        // Parentheses preserve the receiver of a method reference. A comma
+        // expression drops the receiver, so leave that expression intact.
+        let mut callee = &call.callee;
+        while let Expression::ParenthesizedExpression(parenthesized) = callee {
+            callee = &parenthesized.expression;
+        }
+        if matches!(callee, Expression::ChainExpression(_)) {
+            return Err(Unsupported("call of parenthesized optional chain"));
+        }
+        // Direct eval observes its caller's lexical bindings. An indirect
+        // global call from the VM would give a different environment.
+        if let Expression::Identifier(id) = callee {
+            if id.name == "eval" {
+                return Err(Unsupported("direct eval"));
+            }
+        }
+        match callee {
             Expression::StaticMemberExpression(m) if !m.optional => {
                 self.compile_expr(&m.object)?;
                 self.emit0("DUP");
                 let i = self.consts.add_str(m.property.name.as_str());
                 self.emit1("GET_PROP", i as i64);
-                let argc = self.compile_args(&call.arguments)?;
-                self.emit1("CALL_METHOD", argc as i64);
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    self.emit0("CALL_METHOD_APPLY");
+                } else {
+                    self.emit1("CALL_METHOD", argc as i64);
+                }
             }
             Expression::ComputedMemberExpression(m) if !m.optional => {
                 self.compile_expr(&m.object)?;
                 self.emit0("DUP");
                 self.compile_expr(&m.expression)?;
                 self.emit0("GET_PROP_DYN");
-                let argc = self.compile_args(&call.arguments)?;
-                self.emit1("CALL_METHOD", argc as i64);
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    self.emit0("CALL_METHOD_APPLY");
+                } else {
+                    self.emit1("CALL_METHOD", argc as i64);
+                }
             }
             callee => {
                 self.compile_expr(callee)?;
-                let argc = self.compile_args(&call.arguments)?;
-                self.emit1("CALL", argc as i64);
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    self.emit0("CALL_APPLY");
+                } else {
+                    self.emit1("CALL", argc as i64);
+                }
             }
         }
         Ok(())
     }
 
-    fn compile_args(&mut self, args: &[Argument<'_>]) -> R<usize> {
-        for a in args {
-            if let Argument::SpreadElement(_) = a {
-                return Err(Unsupported("call spread argument"));
+    // A chain maintains [receiver, value] as its stack pair. The receiver is
+    // preserved across a method lookup and consumed only when a call occurs.
+    // Every optional step jumps to the same final result on nullish input, so
+    // subsequent computed keys and arguments are never evaluated.
+    fn compile_chain(&mut self, chain: &ChainExpression<'_>) -> R<()> {
+        let mut early_exits = Vec::new();
+        match &chain.expression {
+            ChainElement::StaticMemberExpression(member) => {
+                self.compile_chain_static(member, &mut early_exits)?;
             }
-            let e = a.as_expression().ok_or(Unsupported("call argument"))?;
-            self.compile_expr(e)?;
+            ChainElement::ComputedMemberExpression(member) => {
+                self.compile_chain_computed(member, &mut early_exits)?;
+            }
+            ChainElement::CallExpression(call) => {
+                self.compile_chain_call(call, &mut early_exits)?;
+            }
+            _ => return Err(Unsupported("unsupported chain element")),
         }
-        Ok(args.len())
+        self.emit0("SWAP");
+        self.emit0("POP");
+        for exit in early_exits {
+            self.patch_here(exit);
+        }
+        Ok(())
+    }
+
+    fn compile_chain_inner(&mut self, expr: &Expression<'_>, exits: &mut Vec<usize>) -> R<()> {
+        match expr {
+            Expression::StaticMemberExpression(member) => self.compile_chain_static(member, exits),
+            Expression::ComputedMemberExpression(member) => {
+                self.compile_chain_computed(member, exits)
+            }
+            Expression::CallExpression(call) => self.compile_chain_call(call, exits),
+            base => {
+                self.emit0("PUSH_UNDEF");
+                self.compile_expr(base)
+            }
+        }
+    }
+
+    fn optional_chain_guard(&mut self, exits: &mut Vec<usize>) {
+        self.emit0("DUP");
+        let present = self.emit_jump("JMP_IF_NOT_NULLISH_KEEP");
+        // On nullish input the jump opcode discarded the duplicate. Discard
+        // the receiver and value, then push the chain's undefined result.
+        self.emit0("POP");
+        self.emit0("POP");
+        self.emit0("PUSH_UNDEF");
+        exits.push(self.emit_jump("JMP"));
+        self.patch_here(present);
+        self.emit0("POP");
+    }
+
+    fn compile_chain_static(
+        &mut self,
+        member: &StaticMemberExpression<'_>,
+        exits: &mut Vec<usize>,
+    ) -> R<()> {
+        self.compile_chain_inner(&member.object, exits)?;
+        if member.optional {
+            self.optional_chain_guard(exits);
+        }
+        self.emit0("SWAP");
+        self.emit0("POP");
+        self.emit0("DUP");
+        let index = self.consts.add_str(member.property.name.as_str());
+        self.emit1("GET_PROP", index as i64);
+        Ok(())
+    }
+
+    fn compile_chain_computed(
+        &mut self,
+        member: &ComputedMemberExpression<'_>,
+        exits: &mut Vec<usize>,
+    ) -> R<()> {
+        self.compile_chain_inner(&member.object, exits)?;
+        if member.optional {
+            self.optional_chain_guard(exits);
+        }
+        self.emit0("SWAP");
+        self.emit0("POP");
+        self.emit0("DUP");
+        self.compile_expr(&member.expression)?;
+        self.emit0("GET_PROP_DYN");
+        Ok(())
+    }
+
+    fn compile_chain_call(
+        &mut self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        exits: &mut Vec<usize>,
+    ) -> R<()> {
+        self.compile_chain_inner(&call.callee, exits)?;
+        if call.optional {
+            self.optional_chain_guard(exits);
+        }
+        let (count, spread) = self.compile_args(&call.arguments)?;
+        if spread {
+            self.emit0("CALL_METHOD_APPLY");
+        } else {
+            self.emit1("CALL_METHOD", count as i64);
+        }
+        self.emit0("PUSH_UNDEF");
+        self.emit0("SWAP");
+        Ok(())
+    }
+
+    fn compile_args(&mut self, args: &[Argument<'_>]) -> R<(usize, bool)> {
+        let spread = args
+            .iter()
+            .any(|arg| matches!(arg, Argument::SpreadElement(_)));
+        if spread {
+            self.emit0("ARR_EMPTY");
+        }
+        for arg in args {
+            match arg {
+                Argument::SpreadElement(element) => {
+                    self.compile_expr(&element.argument)?;
+                    self.emit0("ARR_SPREAD");
+                }
+                other => {
+                    let expression = other.as_expression().ok_or(Unsupported("call argument"))?;
+                    self.compile_expr(expression)?;
+                    if spread {
+                        self.emit0("ARR_APPEND");
+                    }
+                }
+            }
+        }
+        Ok((args.len(), spread))
     }
 
     // ---- name resolution ----
+
+    fn root_class_needs_module_mode(&self) -> bool {
+        let frame = self.fns.last().expect("frame");
+        frame.is_module_main
+            && !frame.allow_root_class
+            && self.scopes.len() - 1 == frame.base_scope_index
+    }
 
     fn add_local(&mut self, name: &str) -> usize {
         let scope = self.scopes.last_mut().expect("a scope is open");
         let idx = scope.names.len();
         scope.names.push(name.to_string());
         idx
+    }
+
+    /// Reserve a throwaway slot in the current scope for an intermediate value,
+    /// declared as a plain (var-kind) cell so it can be initialized and read
+    /// freely. Used to hold the object, key, and new value while rewriting a
+    /// member compound assignment or update, so each is evaluated once.
+    fn declare_temp(&mut self) -> usize {
+        let slot = self.add_local("*tmp*");
+        self.emit1("DECLARE_SLOT", (slot as i64) << 2);
+        slot
+    }
+
+    fn compile_var_init(&mut self, name: &str, init: &Expression<'_>) -> R<()> {
+        let frame = self.fns.last().expect("frame");
+        let slot = frame
+            .var_slots
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, slot)| *slot)
+            .ok_or(Unsupported("var not hoisted in the function"))?;
+        let depth = self.scopes.len() - 1 - frame.base_scope_index;
+        self.compile_named_expr(init, name)?;
+        self.emit1("STORE_SLOT", pack_addr(depth, slot));
+        self.emit0("POP");
+        Ok(())
     }
 
     /// Resolve a name to a packed slot address `(depth, index)`, or `None` for a
@@ -952,14 +2019,52 @@ impl Compiler {
 
     // ---- loops ----
 
-    fn push_loop(&mut self, break_depth: usize, continue_depth: usize, is_switch: bool) {
+    fn push_loop(
+        &mut self,
+        break_depth: usize,
+        continue_depth: usize,
+        is_switch: bool,
+        label: Option<&str>,
+    ) {
         self.fns.last_mut().expect("frame").loops.push(LoopState {
             break_sites: Vec::new(),
             continue_sites: Vec::new(),
             break_depth,
             continue_depth,
             is_switch,
+            iterator: None,
+            label: label.map(str::to_string),
         });
+    }
+
+    fn emit_close_iterator(&mut self, iterator: IteratorLoop) {
+        let depth = self.scopes.len() - 1 - iterator.head_scope_index;
+        self.emit1("LOAD_SLOT", pack_addr(depth, iterator.slot));
+        self.emit0("DUP");
+        let close = self.consts.add_str("close");
+        self.emit1("GET_PROP", close as i64);
+        self.emit1("CALL_METHOD", 0);
+        self.emit0("POP");
+    }
+
+    fn close_iterators_for_return(&mut self) -> R<()> {
+        let iterators: Vec<_> = self
+            .fns
+            .last()
+            .expect("frame")
+            .loops
+            .iter()
+            .filter_map(|loop_state| loop_state.iterator)
+            .filter(|iterator| iterator.handler_active)
+            .collect();
+        if iterators.len() > 1 {
+            return Err(Unsupported("return across nested iterators"));
+        }
+        for iterator in iterators.into_iter().rev() {
+            self.emit0("POP_HANDLER");
+            self.emit_close_iterator(iterator);
+        }
+        Ok(())
     }
 
     fn pop_loop(&mut self) -> LoopState {
@@ -978,6 +2083,11 @@ impl Compiler {
             .checked_sub(1)
             .ok_or(Unsupported("break outside a loop or switch"))?;
         let target = loops[idx].break_depth;
+        let iterator = loops[idx].iterator;
+        if let Some(iterator) = iterator.filter(|i| i.handler_active) {
+            self.emit0("POP_HANDLER");
+            self.emit_close_iterator(iterator);
+        }
         self.unwind_scopes(target);
         let site = self.emit_jump("JMP");
         self.fns.last_mut().expect("frame").loops[idx]
@@ -993,6 +2103,88 @@ impl Compiler {
             .rposition(|l| !l.is_switch)
             .ok_or(Unsupported("continue outside a loop"))?;
         let target = loops[idx].continue_depth;
+        let iterator = loops[idx].iterator;
+        if iterator.is_some_and(|i| i.handler_active) {
+            self.emit0("POP_HANDLER");
+        }
+        self.unwind_scopes(target);
+        let site = self.emit_jump("JMP");
+        self.fns.last_mut().expect("frame").loops[idx]
+            .continue_sites
+            .push(site);
+        Ok(())
+    }
+
+    fn emit_break_label(&mut self, label: &str) -> R<()> {
+        let idx = self
+            .fns
+            .last()
+            .expect("frame")
+            .loops
+            .iter()
+            .rposition(|l| l.label.as_deref() == Some(label))
+            .ok_or(Unsupported("labeled break target not found"))?;
+        // Close every active iterator of a loop this break fully exits, innermost
+        // first. More than one would need atomic multi-iterator unwinding, the
+        // same hazard `return across nested iterators` declines, so decline that.
+        let to_close: Vec<IteratorLoop> = self.fns.last().expect("frame").loops[idx..]
+            .iter()
+            .rev()
+            .filter_map(|l| l.iterator.filter(|i| i.handler_active))
+            .collect();
+        if to_close.len() > 1 {
+            return Err(Unsupported("labeled break across nested iterators"));
+        }
+        for iterator in to_close {
+            self.emit0("POP_HANDLER");
+            self.emit_close_iterator(iterator);
+        }
+        let target = self.fns.last().expect("frame").loops[idx].break_depth;
+        self.unwind_scopes(target);
+        let site = self.emit_jump("JMP");
+        self.fns.last_mut().expect("frame").loops[idx]
+            .break_sites
+            .push(site);
+        Ok(())
+    }
+
+    fn emit_continue_label(&mut self, label: &str) -> R<()> {
+        let idx = self
+            .fns
+            .last()
+            .expect("frame")
+            .loops
+            .iter()
+            .rposition(|l| l.label.as_deref() == Some(label))
+            .ok_or(Unsupported("labeled continue target not found"))?;
+        if self.fns.last().expect("frame").loops[idx].is_switch {
+            // `continue` to a `switch` or a labeled block is a syntax error the
+            // parser rejects; decline rather than emit a bad jump if it reaches
+            // here.
+            return Err(Unsupported("continue to a non-loop label"));
+        }
+        // Inner loops this continue fully exits have their iterators closed; the
+        // target loop keeps iterating, so its handler is only popped (the loop
+        // top re-pushes it). Crossing more than one handler would need atomic
+        // multi-iterator unwinding, so decline that, matching the break case.
+        let loops = &self.fns.last().expect("frame").loops;
+        let inner_close: Vec<IteratorLoop> = loops[idx + 1..]
+            .iter()
+            .rev()
+            .filter_map(|l| l.iterator.filter(|i| i.handler_active))
+            .collect();
+        let target_pop = loops[idx].iterator.is_some_and(|i| i.handler_active);
+        if inner_close.len() + usize::from(target_pop) > 1 {
+            return Err(Unsupported("labeled continue across nested iterators"));
+        }
+        for iterator in inner_close {
+            self.emit0("POP_HANDLER");
+            self.emit_close_iterator(iterator);
+        }
+        if target_pop {
+            self.emit0("POP_HANDLER");
+        }
+        let target = self.fns.last().expect("frame").loops[idx].continue_depth;
         self.unwind_scopes(target);
         let site = self.emit_jump("JMP");
         self.fns.last_mut().expect("frame").loops[idx]
@@ -1058,6 +2250,146 @@ impl Compiler {
 }
 
 /// Pack a slot address the way the runtime unpacks it: `depth << 16 | index`.
+fn collect_var_decl(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    names: &mut Vec<String>,
+) -> R<()> {
+    if decl.kind != VariableDeclarationKind::Var {
+        return Ok(());
+    }
+    for d in &decl.declarations {
+        let name = binding_identifier(&d.id)?.name.as_str();
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn collect_function_vars(stmts: &[Statement<'_>], names: &mut Vec<String>) -> R<()> {
+    for statement in stmts {
+        collect_function_var_stmt(statement, names)?;
+    }
+    Ok(())
+}
+
+fn collect_function_var_stmt(stmt: &Statement<'_>, names: &mut Vec<String>) -> R<()> {
+    match stmt {
+        Statement::VariableDeclaration(decl) => collect_var_decl(decl, names)?,
+        Statement::BlockStatement(block) => collect_function_vars(&block.body, names)?,
+        Statement::IfStatement(branch) => {
+            collect_function_var_stmt(&branch.consequent, names)?;
+            if let Some(else_branch) = &branch.alternate {
+                collect_function_var_stmt(else_branch, names)?;
+            }
+        }
+        Statement::WhileStatement(loop_stmt) => {
+            collect_function_var_stmt(&loop_stmt.body, names)?;
+        }
+        Statement::DoWhileStatement(loop_stmt) => {
+            collect_function_var_stmt(&loop_stmt.body, names)?;
+        }
+        Statement::ForStatement(loop_stmt) => {
+            if let Some(ForStatementInit::VariableDeclaration(decl)) = &loop_stmt.init {
+                collect_var_decl(decl, names)?;
+            }
+            collect_function_var_stmt(&loop_stmt.body, names)?;
+        }
+        Statement::ForOfStatement(loop_stmt) => {
+            if let ForStatementLeft::VariableDeclaration(decl) = &loop_stmt.left {
+                collect_var_decl(decl, names)?;
+            }
+            collect_function_var_stmt(&loop_stmt.body, names)?;
+        }
+        Statement::ForInStatement(loop_stmt) => {
+            if let ForStatementLeft::VariableDeclaration(decl) = &loop_stmt.left {
+                collect_var_decl(decl, names)?;
+            }
+            collect_function_var_stmt(&loop_stmt.body, names)?;
+        }
+        Statement::SwitchStatement(switch_stmt) => {
+            for case in &switch_stmt.cases {
+                collect_function_vars(&case.consequent, names)?;
+            }
+        }
+        Statement::TryStatement(try_stmt) => {
+            collect_function_vars(&try_stmt.block.body, names)?;
+            if let Some(catch) = &try_stmt.handler {
+                collect_function_vars(&catch.body.body, names)?;
+            }
+            if let Some(finalizer) = &try_stmt.finalizer {
+                collect_function_vars(&finalizer.body, names)?;
+            }
+        }
+        // Nested functions and classes have separate var environments. Other
+        // unrecognized statements are rejected by the actual compiler.
+        _ => {}
+    }
+    Ok(())
+}
+
+fn contains_return_stmt(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Statement::ReturnStatement(_) => true,
+        Statement::BlockStatement(block) => contains_return_stmt(&block.body),
+        Statement::IfStatement(s) => {
+            contains_return_stmt(std::slice::from_ref(&s.consequent))
+                || s.alternate
+                    .as_ref()
+                    .is_some_and(|alt| contains_return_stmt(std::slice::from_ref(alt)))
+        }
+        Statement::WhileStatement(s) => contains_return_stmt(std::slice::from_ref(&s.body)),
+        Statement::DoWhileStatement(s) => contains_return_stmt(std::slice::from_ref(&s.body)),
+        Statement::ForStatement(s) => contains_return_stmt(std::slice::from_ref(&s.body)),
+        Statement::ForOfStatement(s) => contains_return_stmt(std::slice::from_ref(&s.body)),
+        Statement::ForInStatement(s) => contains_return_stmt(std::slice::from_ref(&s.body)),
+        Statement::SwitchStatement(s) => s
+            .cases
+            .iter()
+            .any(|case| contains_return_stmt(&case.consequent)),
+        Statement::TryStatement(s) => {
+            contains_return_stmt(&s.block.body)
+                || s.handler
+                    .as_ref()
+                    .is_some_and(|h| contains_return_stmt(&h.body.body))
+                || s.finalizer
+                    .as_ref()
+                    .is_some_and(|b| contains_return_stmt(&b.body))
+        }
+        _ => false,
+    })
+}
+
+fn contains_loop_jump(stmts: &[Statement<'_>]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Statement::BreakStatement(_) | Statement::ContinueStatement(_) => true,
+        Statement::BlockStatement(block) => contains_loop_jump(&block.body),
+        Statement::IfStatement(s) => {
+            contains_loop_jump(std::slice::from_ref(&s.consequent))
+                || s.alternate
+                    .as_ref()
+                    .is_some_and(|s| contains_loop_jump(std::slice::from_ref(s)))
+        }
+        Statement::WhileStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
+        Statement::DoWhileStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
+        Statement::ForStatement(s) => contains_loop_jump(std::slice::from_ref(&s.body)),
+        Statement::SwitchStatement(s) => s
+            .cases
+            .iter()
+            .any(|case| contains_loop_jump(&case.consequent)),
+        Statement::TryStatement(s) => {
+            contains_loop_jump(&s.block.body)
+                || s.handler
+                    .as_ref()
+                    .is_some_and(|h| contains_loop_jump(&h.body.body))
+                || s.finalizer
+                    .as_ref()
+                    .is_some_and(|b| contains_loop_jump(&b.body))
+        }
+        _ => false,
+    })
+}
+
 fn pack_addr(depth: usize, index: usize) -> i64 {
     ((depth as i64) << 16) | (index as i64)
 }

@@ -81,7 +81,11 @@ fn shadowed_locals_shorten_without_a_pool_and_keep_their_closures() {
         return [scores[0], scores[1], scores[2](), scores[2](), readOuter()];
     }"#;
     let output = transform(source);
-    assert!(!output.contains("=(function(){"), "unexpected decoder");
+    assert!(
+        output.contains("=(function(){"),
+        "property access should use the decoder"
+    );
+    assert!(!output.contains(".push("), "method name survived: {output}");
     compare_module(source, &output, "api.collectScores(3)");
 
     // Find each binding by its initializer, not by the minifier's choice of name.
@@ -158,6 +162,88 @@ fn direct_eval_can_read_its_argument_and_outer_bindings() {
         })(9);
     }"#;
     compare_module(source, &transform(source), "api.measuredTotal(4)");
+}
+
+#[test]
+fn private_function_and_class_declarations_shorten_when_called_directly() {
+    let source = r#"export function calculate() {
+        function calculateInternalPrivateValue(amount) { return amount + 4; }
+        class InternalPrivateBox {
+            constructor(amount) { this.amount = amount; }
+            read() { return this.amount; }
+        }
+        return calculateInternalPrivateValue(new InternalPrivateBox(9).read());
+    }"#;
+    let output = splice(source);
+    assert!(
+        !output.contains("function calculateInternalPrivateValue"),
+        "private function binding was left visible: {output}"
+    );
+    assert!(
+        !output.contains("class InternalPrivateBox"),
+        "private class binding was left visible: {output}"
+    );
+    compare_module(source, &output, "api.calculate()");
+}
+
+#[test]
+fn public_and_observable_callable_names_are_preserved() {
+    let source = r#"export function PublishedPublicFunction() {
+        function PrivateNamedFunction() {}
+        class PrivateNamedClass {}
+        return [PrivateNamedFunction.name, new PrivateNamedClass().constructor.name];
+    }
+    export class PublishedPublicClass {}"#;
+    let output = splice(source);
+    assert!(
+        output.contains("function PublishedPublicFunction"),
+        "{output}"
+    );
+    assert!(output.contains("class PublishedPublicClass"), "{output}");
+    assert!(output.contains("PrivateNamedFunction"), "{output}");
+    assert!(output.contains("PrivateNamedClass"), "{output}");
+    compare_module(
+        source,
+        &output,
+        "[api.PublishedPublicFunction.name, api.PublishedPublicClass.name, api.PublishedPublicFunction()]",
+    );
+}
+
+#[test]
+fn object_name_keys_do_not_block_private_name_renaming() {
+    // `{ name: value }` sets a property, it does not read a callable's `.name`,
+    // so a private, directly-called function is still renamed around it.
+    let source = r#"function baseComponent(tag) { return { name: tag, kind: 'widget' }; }
+    function describe(id) { return baseComponent(id).kind; }
+    export function build(id) { return describe(id) + ':' + describe(id); }"#;
+    let output = splice(source);
+    assert!(
+        !output.contains("baseComponent"),
+        "an object `name:` key kept a private function readable: {output}"
+    );
+    assert!(
+        !output.contains("describe"),
+        "a private function was kept: {output}"
+    );
+    assert!(
+        output.contains("build"),
+        "the exported name must stay public"
+    );
+    compare_module(source, &output, "api.build('x')");
+}
+
+#[test]
+fn a_destructured_name_read_still_keeps_private_names() {
+    // `const { name } = fn` reads the function's `.name`, so the scan still
+    // treats that as an observation and keeps every private name.
+    let source = r#"function widgetMaker() { return 1; }
+    export function nameOf() { const { name } = widgetMaker; return name; }"#;
+    let output = splice(source);
+    assert!(
+        output.contains("widgetMaker"),
+        "a destructured name read must keep the private name: {output}"
+    );
+    compare_module(source, &output, "api.nameOf()");
 }
 
 #[test]

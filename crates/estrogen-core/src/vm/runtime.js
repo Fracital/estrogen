@@ -29,9 +29,11 @@
 (function () {
 	// A frame signal is { type, value }. The type is numeric so no readable
 	// opcode-like word ships: a return leaves the frame with the returned value,
-	// a halt returns the main completion value.
+	// a halt returns the main completion value, and an await suspends the frame
+	// so the async driver can resume it when the awaited value settles.
 	const SIG_RETURN = 0;
 	const SIG_HALT = 1;
+	const SIG_AWAIT = 2;
 
 	// Stable opcode indices, in the exact order of estrogen-core's opcodes.rs
 	// OP_NAMES. The counter assigns each name its position, so a handler stored at
@@ -86,7 +88,7 @@
 				if (entry.v === '-Inf') return -Infinity;
 				if (entry.v === '-0') return -0;
 			}
-			if (entry.$ === 're') return new RegExp(entry.s, entry.f);
+			if (entry.$ === 're') return new NativeRegExp(entry.s, entry.f);
 			if (entry.$ === 'bi') return BigInt(entry.v);
 		}
 		return entry;
@@ -107,6 +109,7 @@
 		return scope;
 	}
 	const TDZ_READ = 'Cannot access a lexical binding before initialization';
+	const NativeRegExp = /(?:)/.constructor;
 
 	// Opcode handlers, indexed by stable opcode index. Each receives
 	// (frame, arg, consts, functions, globals, createClosure, callValue, doReturn)
@@ -127,12 +130,23 @@
 		const s = frame.stack;
 		s.push(s[s.length - 1]);
 	};
+	HANDLERS[OP_SWAP] = function (frame) {
+		const s = frame.stack;
+		const a = s.pop();
+		const b = s.pop();
+		s.push(a, b);
+	};
 	HANDLERS[OP_SET_COMPLETION] = function (frame) {
 		frame.completion = frame.stack.pop();
 	};
 
 	HANDLERS[OP_PUSH_CONST] = function (frame, arg, consts) {
-		frame.stack.push(consts[arg]);
+		const value = consts[arg];
+		frame.stack.push(
+			value instanceof NativeRegExp
+				? new NativeRegExp(value.source, value.flags)
+				: value,
+		);
 	};
 	HANDLERS[OP_PUSH_UNDEF] = function (frame) {
 		frame.stack.push(undefined);
@@ -205,6 +219,10 @@
 
 	HANDLERS[OP_LOAD_GLOBAL] = function (frame, arg, consts, functions, globals) {
 		const name = consts[arg];
+		if (name === '\0t') {
+			frame.stack.push((value) => `${value}`);
+			return;
+		}
 		if (name in globals) {
 			frame.stack.push(globals[name]);
 			return;
@@ -417,6 +435,26 @@
 		o[k] = v;
 		s.push(v);
 	};
+	// `delete` over a member target. estrogen compiles strict ES modules, where a
+	// delete that returns false is a TypeError; a sloppy-mode `delete` returns
+	// false instead. Raising on a false result replays the strict behavior no
+	// matter which mode this runtime itself runs in.
+	HANDLERS[OP_DELETE_PROP] = function (frame, arg, consts) {
+		const s = frame.stack;
+		const o = s.pop();
+		const key = consts[arg];
+		if (!delete o[key])
+			throw new TypeError("Cannot delete property '" + key + "' of " + o);
+		s.push(true);
+	};
+	HANDLERS[OP_DELETE_PROP_DYN] = function (frame) {
+		const s = frame.stack;
+		const k = s.pop();
+		const o = s.pop();
+		if (!delete o[k])
+			throw new TypeError("Cannot delete property '" + String(k) + "' of " + o);
+		s.push(true);
+	};
 
 	HANDLERS[OP_JMP] = function (frame, arg) {
 		frame.pc = arg;
@@ -441,6 +479,29 @@
 		const s = frame.stack;
 		if (s[s.length - 1] != null) frame.pc = arg;
 		else s.pop();
+	};
+	HANDLERS[OP_THROW] = function (frame) {
+		throw frame.stack.pop();
+	};
+	HANDLERS[OP_PUSH_HANDLER] = function (frame, target) {
+		frame.handlers.push({
+			pc: target,
+			scope: frame.scope,
+			stackLength: frame.stack.length,
+		});
+	};
+	HANDLERS[OP_POP_HANDLER] = function (frame) {
+		frame.handlers.pop();
+	};
+	// Suspend the frame with the value on top of the stack. The async driver
+	// resumes the frame after the value settles, pushing the resolved value
+	// back (or routing a rejection through the handler stack). AWAIT_TOP is the
+	// module-root form a top-level await compiles to; it suspends the same way.
+	HANDLERS[OP_AWAIT] = function (frame) {
+		return { type: SIG_AWAIT, value: frame.stack.pop() };
+	};
+	HANDLERS[OP_AWAIT_TOP] = function (frame) {
+		return { type: SIG_AWAIT, value: frame.stack.pop() };
 	};
 
 	HANDLERS[OP_CALL] = function (
@@ -474,10 +535,47 @@
 		const recv = s.pop();
 		s.push(callValue(fn, recv, args));
 	};
+	HANDLERS[OP_CALL_APPLY] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+	) {
+		const s = frame.stack;
+		const args = s.pop();
+		const fn = s.pop();
+		s.push(callValue(fn, undefined, args));
+	};
+	HANDLERS[OP_CALL_METHOD_APPLY] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+	) {
+		const s = frame.stack;
+		const args = s.pop();
+		const fn = s.pop();
+		const recv = s.pop();
+		s.push(callValue(fn, recv, args));
+	};
 	HANDLERS[OP_NEW] = function (frame, arg) {
 		const s = frame.stack;
 		const args = new Array(arg);
 		for (let i = arg - 1; i >= 0; i--) args[i] = s.pop();
+		const ctor = s.pop();
+		if (typeof ctor !== 'function')
+			throw new TypeError(String(ctor) + ' is not a constructor');
+		s.push(Reflect.construct(ctor, args));
+	};
+	HANDLERS[OP_NEW_APPLY] = function (frame) {
+		const s = frame.stack;
+		const args = s.pop();
 		const ctor = s.pop();
 		if (typeof ctor !== 'function')
 			throw new TypeError(String(ctor) + ' is not a constructor');
@@ -495,6 +593,19 @@
 		frame.stack.push(
 			createClosure(def, { scope: frame.scope, arrowThis: frame.thisVal }),
 		);
+	};
+	HANDLERS[OP_BUILD_CLASS] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+		buildClass,
+	) {
+		frame.stack.push(buildClass(consts[arg], frame.scope));
 	};
 	HANDLERS[OP_RETURN] = function (
 		frame,
@@ -527,7 +638,26 @@
 	HANDLERS[OP_ARR_APPEND] = function (frame) {
 		const s = frame.stack;
 		const v = s.pop();
-		s[s.length - 1].push(v);
+		const arr = s[s.length - 1];
+		Object.defineProperty(arr, arr.length, {
+			value: v,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	HANDLERS[OP_ARR_SPREAD] = function (frame) {
+		const s = frame.stack;
+		const values = s.pop();
+		const arr = s[s.length - 1];
+		for (const value of values) {
+			Object.defineProperty(arr, arr.length, {
+				value,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
 	};
 	HANDLERS[OP_OBJ_EMPTY] = function (frame) {
 		frame.stack.push({});
@@ -535,7 +665,108 @@
 	HANDLERS[OP_OBJ_SET] = function (frame, arg, consts) {
 		const s = frame.stack;
 		const v = s.pop();
-		s[s.length - 1][consts[arg]] = v;
+		const obj = s[s.length - 1];
+		const key = consts[arg];
+		if (key === '__proto__') {
+			if (v === null || typeof v === 'object' || typeof v === 'function') {
+				Object.setPrototypeOf(obj, v);
+			}
+		} else {
+			Object.defineProperty(obj, key, {
+				value: v,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
+	};
+	HANDLERS[OP_OBJ_SET_DYN] = function (frame) {
+		const s = frame.stack;
+		const v = s.pop();
+		const key = s.pop();
+		const obj = s[s.length - 1];
+		Object.defineProperty(obj, key, {
+			value: v,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	};
+	HANDLERS[OP_OBJ_SPREAD] = function (frame) {
+		const s = frame.stack;
+		const source = s.pop();
+		const obj = s[s.length - 1];
+		if (source == null) return;
+		for (const key of Reflect.ownKeys(Object(source))) {
+			const desc = Object.getOwnPropertyDescriptor(source, key);
+			if (desc && desc.enumerable) {
+				Object.defineProperty(obj, key, {
+					value: source[key],
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				});
+			}
+		}
+	};
+	// Iterator records cache the next method once, as GetIterator does. Their
+	// close method implements IteratorClose for exceptional loop completion.
+	HANDLERS[OP_GET_ITERATOR] = function (frame) {
+		const value = frame.stack.pop();
+		const iteratorMethod = value[Symbol.iterator];
+		if (typeof iteratorMethod !== 'function')
+			throw new TypeError('Value is not iterable');
+		const iterator = Reflect.apply(iteratorMethod, value, []);
+		if (
+			iterator == null ||
+			(typeof iterator !== 'object' && typeof iterator !== 'function')
+		)
+			throw new TypeError('Iterator method must return an object');
+		const next = iterator.next;
+		frame.stack.push({
+			nextStep() {
+				const item = Reflect.apply(next, iterator, []);
+				if (
+					item == null ||
+					(typeof item !== 'object' && typeof item !== 'function')
+				)
+					throw new TypeError('Iterator result must be an object');
+				return item;
+			},
+			close(originalError, isThrow) {
+				try {
+					const method = iterator.return;
+					if (method == null) return;
+					const result = Reflect.apply(method, iterator, []);
+					if (
+						result == null ||
+						(typeof result !== 'object' && typeof result !== 'function')
+					)
+						throw new TypeError('Iterator return must return an object');
+				} catch (error) {
+					if (!isThrow) throw error;
+				}
+			},
+		});
+	};
+	HANDLERS[OP_FOR_ITER] = function (frame, target) {
+		const iterator = frame.stack.pop();
+		const item = iterator.nextStep();
+		if (item.done) {
+			frame.pc = target;
+		} else {
+			frame.stack.push(item.value);
+		}
+	};
+	HANDLERS[OP_FOR_IN_KEYS] = function (frame) {
+		const value = frame.stack.pop();
+		frame.stack.push(
+			(function* () {
+				for (const key in value) {
+					yield key;
+				}
+			})(),
+		);
 	};
 
 	// Build a runnable VM over a decoded program, and return its entry function.
@@ -579,6 +810,7 @@
 				code: def.code,
 				pc: 0,
 				stack: [],
+				handlers: [],
 				scope: { parent: closureScope, slots: [] },
 				thisVal,
 				args,
@@ -592,25 +824,103 @@
 		// Calling the closure makes a fresh frame whose base scope's parent is the
 		// captured scope, so slot addresses resolve across the closure boundary.
 		function createClosure(def, ctx) {
-			const fn = function (...callArgs) {
-				const thisVal = def.isArrow ? ctx.arrowThis : this;
-				return runSync(makeFrame(def, ctx.scope, thisVal, callArgs));
-			};
+			'use strict';
+			const drive = def.isAsync ? runAsync : runSync;
+			const fn = def.isArrow
+				? (...callArgs) =>
+						drive(makeFrame(def, ctx.scope, ctx.arrowThis, callArgs))
+				: function (...callArgs) {
+						return drive(makeFrame(def, ctx.scope, this, callArgs));
+					};
 			try {
 				Object.defineProperty(fn, 'length', {
 					value: def.numParams,
 					configurable: true,
 				});
 			} catch (e) {}
-			if (def.name) {
-				try {
-					Object.defineProperty(fn, 'name', {
-						value: def.name,
-						configurable: true,
-					});
-				} catch (e) {}
-			}
+			try {
+				Object.defineProperty(fn, 'name', {
+					value: def.name || '',
+					configurable: true,
+				});
+			} catch (e) {}
 			return fn;
+		}
+
+		function buildClass(desc, classScope) {
+			'use strict';
+			const defineField = (receiver, field) => {
+				const value =
+					field.fn === null
+						? undefined
+						: runSync(makeFrame(functions[field.fn], classScope, receiver, []));
+				Object.defineProperty(receiver, field.key, {
+					value,
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				});
+			};
+			const Class = function (...args) {
+				if (!new.target)
+					throw new TypeError(
+						'Class constructor cannot be invoked without new',
+					);
+				for (const field of desc.fields) {
+					if (!field.static) defineField(this, field);
+				}
+				if (desc.ctor !== null) {
+					const value = runSync(
+						makeFrame(functions[desc.ctor], classScope, this, args),
+					);
+					if (
+						value !== null &&
+						(typeof value === 'object' || typeof value === 'function')
+					) {
+						return value;
+					}
+				}
+			};
+			Object.defineProperty(Class, 'name', {
+				value: desc.name,
+				configurable: true,
+			});
+			Object.defineProperty(Class, 'length', {
+				value: desc.ctor === null ? 0 : functions[desc.ctor].numParams,
+				configurable: true,
+			});
+			Object.defineProperty(Class, 'prototype', { writable: false });
+			for (const method of desc.methods) {
+				const key = method.key;
+				const def = functions[method.fn];
+				// Concise methods have no own prototype and cannot be constructed.
+				const fn = {
+					[key](...args) {
+						return runSync(makeFrame(def, classScope, this, args));
+					},
+				}[key];
+				Object.defineProperty(fn, 'length', {
+					value: def.numParams,
+					configurable: true,
+				});
+				Object.defineProperty(method.static ? Class : Class.prototype, key, {
+					value: fn,
+					writable: true,
+					enumerable: false,
+					configurable: true,
+				});
+			}
+			if (desc.bind !== null) {
+				const slot = scopeAt(classScope, desc.bind >>> 16).slots[
+					desc.bind & 0xffff
+				];
+				slot.v = Class;
+				slot.init = true;
+			}
+			for (const field of desc.fields) {
+				if (field.static) defineField(Class, field);
+			}
+			return Class;
 		}
 
 		function callValue(fn, thisArg, args) {
@@ -619,15 +929,31 @@
 			return Reflect.apply(fn, thisArg, args);
 		}
 
-		// Perform a return. estrogen does not emit the try/catch/finally handler
-		// stack yet, so a return leaves the frame directly with a return signal.
+		// Perform a return. A return leaves the frame directly with a return
+		// signal; the driver and runSync turn that into the function result.
 		function doReturn(frame, value) {
 			return { type: SIG_RETURN, value };
 		}
 
-		// The one interpreter loop. Returns a frame signal { type, value }. The
-		// subset has no in-frame handlers, so a thrown error propagates straight
-		// out.
+		// Route a thrown value into the frame's nearest catch handler. Pops one
+		// handler, restores its scope and stack height, pushes the error, and
+		// jumps to its pc. Returns true when a handler took over, false when the
+		// value should propagate out of the frame. Shared by the synchronous
+		// dispatch loop and the async driver's rejection path.
+		function unwindFrame(frame, error) {
+			const handler = frame.handlers.pop();
+			if (!handler) return false;
+			frame.scope = handler.scope;
+			frame.stack.length = handler.stackLength;
+			frame.stack.push(error);
+			frame.pc = handler.pc;
+			return true;
+		}
+
+		// The one interpreter loop. Returns a frame signal { type, value }: a
+		// return or halt ends the frame, an await suspends it. A thrown error is
+		// routed into the frame's handler stack; with no handler it propagates
+		// out as a real throw.
 		function runFrame(frame) {
 			const code = frame.code;
 			while (true) {
@@ -636,16 +962,23 @@
 				const arity = arityByByte[op];
 				const arg = arity ? code[frame.pc + 1] : 0;
 				frame.pc += 1 + arity;
-				const sig = handlers[op](
-					frame,
-					arg,
-					consts,
-					functions,
-					globals,
-					createClosure,
-					callValue,
-					doReturn,
-				);
+				let sig;
+				try {
+					sig = handlers[op](
+						frame,
+						arg,
+						consts,
+						functions,
+						globals,
+						createClosure,
+						callValue,
+						doReturn,
+						buildClass,
+					);
+				} catch (error) {
+					if (!unwindFrame(frame, error)) throw error;
+					continue;
+				}
 				if (sig) return sig;
 			}
 		}
@@ -657,15 +990,55 @@
 
 		function runSync(frame) {
 			const sig = runFrame(frame);
-			if (sig.type === SIG_RETURN || sig.type === SIG_HALT) return sig.value;
-			throw sig.value;
+			if (sig.type === SIG_AWAIT)
+				throw new TypeError('await is only valid in async functions');
+			return sig.value;
+		}
+
+		// Drive an async frame to a promise. Each burst runs the frame until it
+		// returns, halts, or awaits. On await, the value is resolved and the
+		// frame resumed with the result pushed, or the rejection routed through
+		// its handler stack. A frame that returns or halts settles the promise.
+		function runAsync(frame) {
+			return new Promise(function (resolve, reject) {
+				function settle(sig) {
+					if (sig.type === SIG_AWAIT) {
+						Promise.resolve(sig.value).then(
+							function (value) {
+								frame.stack.push(value);
+								step();
+							},
+							function (error) {
+								if (!unwindFrame(frame, error)) {
+									reject(error);
+									return;
+								}
+								step();
+							},
+						);
+						return;
+					}
+					resolve(sig.value);
+				}
+				function step() {
+					let sig;
+					try {
+						sig = runFrame(frame);
+					} catch (error) {
+						reject(error);
+						return;
+					}
+					settle(sig);
+				}
+				step();
+			});
 		}
 
 		function run(args) {
 			steps = 0;
 			const def = functions[program.mainIndex];
 			const frame = makeFrame(def, null, undefined, args || []);
-			return runSync(frame);
+			return def.isAsync ? runAsync(frame) : runSync(frame);
 		}
 
 		return run;

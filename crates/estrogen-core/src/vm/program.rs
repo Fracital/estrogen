@@ -60,6 +60,13 @@ pub struct ConstPool {
 }
 
 impl ConstPool {
+    /// Store a class descriptor among the VM constants. It contains function
+    /// indices and plain property names, and is consumed only by BUILD_CLASS.
+    pub fn add_class(&mut self, descriptor: Value) -> usize {
+        let key = format!("class:{descriptor}");
+        self.intern(key, || descriptor)
+    }
+
     /// Intern a string constant and return its pool index.
     pub fn add_str(&mut self, s: &str) -> usize {
         self.intern(format!("s:{s}"), || Value::from(s.to_string()))
@@ -81,6 +88,18 @@ impl ConstPool {
             let mut obj = Map::new();
             obj.insert("$".to_string(), Value::from("bi"));
             obj.insert("v".to_string(), Value::from(digits.to_string()));
+            Value::Object(obj)
+        })
+    }
+
+    /// Intern a regexp's pattern and flags. The runtime constructs a fresh
+    /// RegExp on each PUSH_CONST, matching literal evaluation semantics.
+    pub fn add_regexp(&mut self, pattern: &str, flags: &str) -> usize {
+        self.intern(format!("re:{pattern}/{flags}"), || {
+            let mut obj = Map::new();
+            obj.insert("$".to_string(), Value::from("re"));
+            obj.insert("s".to_string(), Value::from(pattern.to_string()));
+            obj.insert("f".to_string(), Value::from(flags.to_string()));
             Value::Object(obj)
         })
     }

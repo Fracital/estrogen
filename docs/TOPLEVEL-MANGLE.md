@@ -94,8 +94,9 @@ does not make the name any less visible.
 ## What the pass does, by export form
 
 The pass runs `oxc_mangler` with `top_level` set to whether the file has module
-syntax, keeps function and class names (`keep_names`), then emits byte-range
-edits. It never reprints the AST.
+syntax. It keeps function and class names through OXC's `keep_names` option,
+then assigns fresh short names to eligible private callable declarations. All
+renames use byte-range edits. It never reprints the AST.
 
 | Source                                             | Output                             | How                                                                                                                                                                                                       |
 | -------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -135,6 +136,49 @@ the output longer. Only a single-declarator, single-identifier `const`/`let`/
 `var` export whose value is not a function or class qualifies, and only when the
 same binding is not also named by a separate `export { x }` specifier. Every
 other inline export falls back to unchanged.
+
+## Private function and class names
+
+The pass can shorten a private function declaration when every reference is a
+direct call. A private class declaration qualifies when every reference uses
+`new`. Neither qualifies if its binding is reassigned or redeclared, if it is
+exported, or if the file observes a callable name. Those name checks apply to the
+whole file.
+
+The name check counts a `.name` read, a `{ name }` destructure, a
+`.constructor.name`, a string literal `"name"` (which can key a computed read or
+a reflect call), and `new.target`. It does not count an object-literal key:
+`{ name: value }` and the shorthand `{ name }` set a property, they do not read
+any callable's `.name`. Bundled code uses those keys often, and an earlier
+version counted them, so a single `{ name: ... }` kept the whole file from
+renaming. Excluding the keys lets a chunk that only sets `name` properties still
+shorten its private callables. A name reached through a dynamically assembled
+property string may still be observable, so the pass does not promise to preserve
+every form of reflection.
+
+A private callable whose value is used directly (only called, or only
+constructed) never escapes, so no other chunk can read its `.name`. A callable
+passed, stored, or returned as a value does escape, so the pass keeps its name
+rather than change a `.name` an importer might read. Shortening those escaping
+names too would protect more of the file, at the cost of that cross-chunk
+reflection; it is a deliberate choice left off by default.
+
+The fresh-name allocator keeps the generated name away from existing bindings,
+imports, unresolved globals, and the pool decoder. It also leaves named
+expressions and inferred names unchanged. A script without module syntax may
+rename private declarations only inside nested scopes when the script has an
+explicit `"use strict"` directive. In a classic script, top-level callable names
+remain unchanged.
+
+Class names are observable through an instance's `constructor.name`, even when
+the source does not read that property. Renaming an eligible class changes that
+reported name if the instance leaves the file. Keep a class's name public, or
+disable mangling for the chunk, when external callers depend on that reflection.
+An exported function or class keeps its original `.name`.
+
+The integration tests in `crates/estrogen-core/tests/mangle_node.rs` run private
+callables, observable names, and public exports under Node and compare their
+outputs with the source.
 
 ## The guard
 

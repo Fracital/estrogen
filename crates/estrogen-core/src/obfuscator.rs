@@ -29,7 +29,9 @@ use crate::pass::{FileContext, Pass};
 use crate::proxy::ProxyEngine;
 use crate::report::{FileReport, Report};
 use crate::vendor::{self, VendorFile};
-use crate::walk::{eligibility, walk_files, Eligibility, FileKind, SkipReason};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::walk::SkipReason;
+use crate::walk::{eligibility, walk_files, Eligibility, FileKind};
 
 /// The obfuscator. Build it with [`Obfuscator::new`] from a set of options, then
 /// call [`Obfuscator::obfuscate_dir`] on each built directory.
@@ -886,7 +888,7 @@ mod tests {
         let dir = tmp_dir();
         let maps = tmp_dir();
         let js = dir.join("app.js");
-        let src = "const a = 'hello';\nconst b = `t${a}`;\n";
+        let src = "const a = 'hello';\nexport const b = `t${a}`;\n";
         fs::write(&js, src).unwrap();
         // The private map traces the edits against the source. A minified chunk is
         // reprinted and so carries no edit-based map (see

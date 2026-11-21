@@ -195,15 +195,18 @@ mod tests {
 
     #[test]
     fn a_chunk_off_the_vm_subset_falls_back_with_a_map() {
-        // An import is outside the VM subset, so the chunk falls back to the
-        // edit-and-splice path, which pools the string and (with minify off)
-        // carries a map.
+        // A local export declaration is outside the VM subset. An import
+        // alone is now supported by the native-linking wrapper.
         let opts = Options {
             seed: Some(b"vm".to_vec()),
             minify: false,
             ..Options::default()
         };
-        let out = obfuscate_js("import x from 'm'; const s = 'hello world'; x(s);", &opts).unwrap();
+        let out = obfuscate_js(
+            "import x from 'm'; export const s = 'hello world'; x(s);",
+            &opts,
+        )
+        .unwrap();
         assert!(!out.code.contains("JSON.parse("), "should have fallen back");
         assert!(!out.code.contains("hello world"));
         assert!(out.map.is_some());

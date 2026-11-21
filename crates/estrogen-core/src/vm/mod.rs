@@ -14,7 +14,7 @@
 //! # Falling back
 //!
 //! The compiler handles a sound subset and returns [`compiler::Unsupported`] for
-//! anything else (functions, classes, control flow, `import`/`export`, `var`,
+//! anything else (classes, async, locally declared exports, exception handling,
 //! and the rest). [`try_compile_chunk`] turns that into `Ok(None)`, and the
 //! obfuscator falls back to the literal-pool and name passes for that chunk,
 //! the same way abulxt's shield degrades a chunk to `@no-vm`. Nothing breaks; a
@@ -25,13 +25,18 @@ mod layout;
 pub mod opcodes;
 mod program;
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    ImportDeclarationSpecifier, ImportOrExportKind, Program as AstProgram, Statement,
+};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_diagnostics::Severity;
 use oxc_mangler::{MangleOptions, Mangler, ManglerReturn};
 use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use sha2::{Digest, Sha256};
 
@@ -47,6 +52,25 @@ pub use compiler::Unsupported;
 /// it before it ships, so the shipped runtime carries no readable names.
 const RUNTIME_JS: &str = include_str!("runtime.js");
 
+/// Every free identifier that the embedded runtime can read. A native import
+/// is lexical across the whole module, including the VM helper emitted after
+/// it. Importing a name the helper uses would silently capture that binding.
+fn runtime_free_names() -> &'static HashSet<String> {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, RUNTIME_JS, SourceType::mjs()).parse();
+        let built = SemanticBuilder::new().build(&parsed.program);
+        built
+            .semantic
+            .scoping()
+            .root_unresolved_references()
+            .keys()
+            .map(|name| name.as_str().to_string())
+            .collect()
+    })
+}
+
 /// Compile `source` to a VM program and return the JSON the runtime runs, or
 /// `None` if the chunk is already processed, does not parse, or uses a construct
 /// outside the subset. Used by the end-to-end tests, which run the JSON through
@@ -61,7 +85,20 @@ pub fn compile_module_json(source: &str, seed: &str) -> Option<String> {
     {
         return None;
     }
-    match compiler::compile_program(&ret.program, seed) {
+    // Standalone JSON has no native import declarations or live binding
+    // getters. Import-bearing modules use try_compile_chunk instead.
+    if ret.program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+        )
+    }) {
+        return None;
+    }
+    match compiler::compile_program(&ret.program, seed, true) {
         Ok(program) => Some(program.into_json_string()),
         Err(_) => None,
     }
@@ -88,41 +125,173 @@ pub fn try_compile_chunk(source: &str, options: &Options) -> Result<Option<Strin
         // than deciding here; the VM just declines the chunk.
         return Ok(None);
     }
+    let Some(imports) = NativeImports::collect(&ret.program, source) else {
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("ESTROGEN_VM_TRACE").is_some() {
+            eprintln!(
+                "estrogen VM fallback ({} bytes): native import/export wrapper declined",
+                source.len()
+            );
+        }
+        return Ok(None);
+    };
     let seed = layout_seed(options, source);
-    let program = match compiler::compile_program(&ret.program, &seed) {
+    let program = match compiler::compile_program(&ret.program, &seed, false) {
         Ok(p) => p,
-        Err(_) => return Ok(None),
+        Err(reason) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            if std::env::var_os("ESTROGEN_VM_TRACE").is_some() {
+                eprintln!(
+                    "estrogen VM fallback ({} bytes): {}",
+                    source.len(),
+                    reason.0
+                );
+            }
+            return Ok(None);
+        }
     };
     let json = program.into_json_string();
-    Ok(Some(emit_chunk(&json, source, options)?))
+    Ok(Some(emit_chunk(&json, source, options, &imports)?))
+}
+
+#[derive(Default)]
+struct NativeImports {
+    statements: String,
+    bindings: Vec<String>,
+}
+
+impl NativeImports {
+    fn collect(program: &AstProgram<'_>, source: &str) -> Option<Self> {
+        let mut out = Self::default();
+        for statement in &program.body {
+            let span = match statement {
+                Statement::ImportDeclaration(decl) => {
+                    if decl.phase.is_some() || decl.import_kind != ImportOrExportKind::Value {
+                        return None;
+                    }
+                    for specifier in decl.specifiers.iter().flatten() {
+                        let name = match specifier {
+                            ImportDeclarationSpecifier::ImportSpecifier(spec) => {
+                                if spec.import_kind != ImportOrExportKind::Value {
+                                    return None;
+                                }
+                                spec.local.name.as_str()
+                            }
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
+                                spec.local.name.as_str()
+                            }
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => {
+                                spec.local.name.as_str()
+                            }
+                        };
+                        // The wrapper and the runtime use these builtins, so
+                        // imported bindings must not shadow their names.
+                        if runtime_free_names().contains(name)
+                            || matches!(
+                                name,
+                                "Object"
+                                    | "Proxy"
+                                    | "globalThis"
+                                    | "JSON"
+                                    | "RegExp"
+                                    | "Reflect"
+                                    | "TypeError"
+                                    | "Uint8Array"
+                                    | "Uint32Array"
+                                    | "TextDecoder"
+                                    | "atob"
+                                    | "Math"
+                            )
+                        {
+                            return None;
+                        }
+                        out.bindings.push(name.to_string());
+                    }
+                    decl.span
+                }
+                Statement::ExportAllDeclaration(decl)
+                    if decl.export_kind == ImportOrExportKind::Value =>
+                {
+                    decl.span
+                }
+                Statement::ExportFromDeclaration(decl)
+                    if decl.export_kind == ImportOrExportKind::Value
+                        && decl
+                            .specifiers
+                            .iter()
+                            .all(|spec| spec.export_kind == ImportOrExportKind::Value) =>
+                {
+                    decl.span
+                }
+                _ => continue,
+            };
+            let text = source.get(span.start as usize..span.end as usize)?;
+            out.statements.push_str(text);
+            out.statements.push('\n');
+        }
+        Some(out)
+    }
 }
 
 /// Assemble the replacement chunk: the marker, the runtime, the encrypted
 /// program as an estrogen ChaCha20 pool of one entry, and the call that decodes
 /// and runs it.
-fn emit_chunk(program_json: &str, source: &str, options: &Options) -> Result<String> {
+fn emit_chunk(
+    program_json: &str,
+    source: &str,
+    options: &Options,
+    imports: &NativeImports,
+) -> Result<String> {
     let mut keys = FileKeys::new(options, source.as_bytes())?;
     // The short generated name the chunk binds the runtime to, drawn from the
     // same key material and in the same `$XXXX` shape as the pool decoder name
     // (mirroring [`FileKeys::decoder_name`]). The chunk is a full replacement, so
     // the only other top-level name is the pool decoder; draw the helper name
     // first, then the pool, and guard against the astronomically unlikely clash.
-    let vm_name = keys.decoder_name();
+    let mut vm_name = keys.decoder_name();
     let mut pool = PoolBuilder::new(keys)?;
     pool.push(program_json)?;
-    let pool_name = pool.name().to_string();
-    let vm_name = if vm_name == pool_name {
-        format!("{vm_name}_")
-    } else {
-        vm_name
-    };
+    let mut pool_name = pool.name().to_string();
+    while source.contains(&vm_name) || vm_name == pool_name {
+        vm_name.push('_');
+    }
+    while source.contains(&pool_name) || vm_name == pool_name {
+        pool_name.push('_');
+    }
     let decoder = pool.into_pool().emit_decoder(&pool_name);
+    let mut setup = String::new();
+    let mut argument = String::new();
+    if !imports.bindings.is_empty() {
+        let mut globals_name = format!("{vm_name}_g");
+        while source.contains(&globals_name) || globals_name == pool_name {
+            globals_name.push('_');
+        }
+        let mut bindings_name = format!("{globals_name}_i");
+        while source.contains(&bindings_name) || bindings_name == pool_name {
+            bindings_name.push('_');
+        }
+        setup.push_str(&format!("const {bindings_name}=Object.create(null);"));
+        for local in &imports.bindings {
+            let literal = serde_json::to_string(local).expect("identifier JSON");
+            setup.push_str(&format!(
+                "Object.defineProperty({bindings_name},{literal},{{get:()=>{local},set:()=>{{throw new TypeError('Assignment to import binding')}}}});"
+            ));
+        }
+        // An ordinary prototype chain would copy a free global assignment
+        // onto the wrapper rather than write back to globalThis. Proxy the real
+        // global object and overlay only the read-only imported bindings.
+        setup.push_str(&format!(
+            "const {globals_name}=new Proxy(globalThis,{{get:(target,key)=>Object.hasOwn({bindings_name},key)?{bindings_name}[key]:Reflect.get(target,key,target),set:(target,key,value)=>Object.hasOwn({bindings_name},key)?({bindings_name}[key]=value,true):Reflect.set(target,key,value,target),has:(target,key)=>Object.hasOwn({bindings_name},key)||Reflect.has(target,key)}});"
+        ));
+        argument = format!(",{{globals:{globals_name}}}");
+    }
     // The runtime IIFE evaluates to the factory; calling it with the decoded
     // program returns the entry function, which the trailing `()` runs. No part
     // of this spells the runtime's purpose: the names are generated and the
     // runtime body is mangled.
     Ok(format!(
-        "/* {MARKER} */const {vm_name}={runtime};{decoder}{vm_name}(JSON.parse({pool_name}(0)))();",
+        "/* {MARKER} */{imports}const {vm_name}={runtime};{decoder}{setup}{vm_name}(JSON.parse({pool_name}(0)){argument})();",
+        imports = imports.statements,
         runtime = runtime_iife(),
     ))
 }
