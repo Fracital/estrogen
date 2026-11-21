@@ -12,9 +12,9 @@
 //! ships in the (encrypted) program and the runtime rebuilds its dispatch table
 //! from it.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-use super::opcodes::{arity, OP_NAMES};
+use super::opcodes::OP_NAMES;
 
 const TABLE_SIZE: usize = 256;
 
@@ -22,13 +22,16 @@ const TABLE_SIZE: usize = 256;
 pub struct Layout {
     /// Opcode name to its byte in the code stream.
     byte_of: std::collections::HashMap<&'static str, u8>,
+    /// The hashed seed the runtime rebuilds the assignment from.
+    seed_hash: u32,
 }
 
 impl Layout {
     /// Build the layout for `seed`. The seed is hashed, so any string works;
     /// estrogen passes a per-file string derived from its seed or key material.
     pub fn build(seed: &str) -> Layout {
-        let mut rng = Mulberry32::new(hash_seed(seed));
+        let seed_hash = hash_seed(seed);
+        let mut rng = Mulberry32::new(seed_hash);
         let mut slots: Vec<usize> = (0..TABLE_SIZE).collect();
         // Fisher-Yates, matching the shield's loop bounds and index math.
         for i in (1..slots.len()).rev() {
@@ -39,7 +42,7 @@ impl Layout {
         for (idx, name) in OP_NAMES.iter().enumerate() {
             byte_of.insert(*name, slots[idx] as u8);
         }
-        Layout { byte_of }
+        Layout { byte_of, seed_hash }
     }
 
     /// The byte assigned to `name`. Panics on an unknown name, which is a
@@ -51,28 +54,22 @@ impl Layout {
             .unwrap_or_else(|| panic!("estrogen vm: opcode {name} is not in the layout"))
     }
 
-    /// The layout as the JSON object the runtime reads: `{ version, tableSize,
-    /// ops }`, where `ops` maps each per-build opcode byte (as a string key) to a
-    /// two-element array `[stableIndex, arity]`. `stableIndex` is the opcode's
-    /// position in [`OP_NAMES`], which is the index the runtime looks a handler up
-    /// by; `arity` is how many operand numbers follow the byte in the code stream.
-    /// No opcode name is serialized, so the runtime dispatches numerically and
-    /// carries no opcode vocabulary.
+    /// The layout as the single number the runtime reads: the hashed seed. The
+    /// runtime rebuilds the whole byte assignment from it with the same
+    /// `mulberry32` and Fisher-Yates, and reads each opcode's arity from its own
+    /// per-stable-index table, so the per-build `ops` map (one entry per opcode)
+    /// never ships. No opcode name or index is serialized, so the runtime
+    /// dispatches numerically and carries no opcode vocabulary.
     pub fn to_json(&self) -> Value {
-        let mut ops = Map::new();
-        for (index, name) in OP_NAMES.iter().enumerate() {
-            let byte = self.byte_of(name);
-            let op_arity = arity(name) as u64;
-            ops.insert(
-                byte.to_string(),
-                Value::Array(vec![Value::from(index as u64), Value::from(op_arity)]),
-            );
-        }
-        let mut obj = Map::new();
-        obj.insert("version".to_string(), Value::from(1u32));
-        obj.insert("tableSize".to_string(), Value::from(TABLE_SIZE as u64));
-        obj.insert("ops".to_string(), Value::Object(ops));
-        Value::Object(obj)
+        Value::from(self.seed_hash)
+    }
+
+    /// The byte assigned to each opcode, in `OP_NAMES` order. The runtime must
+    /// rebuild this exact vector from [`to_json`]'s seed hash, so a test checks
+    /// the JS port against it.
+    #[cfg(test)]
+    pub fn bytes_in_order(&self) -> Vec<u8> {
+        OP_NAMES.iter().map(|name| self.byte_of(name)).collect()
     }
 }
 
@@ -138,6 +135,29 @@ mod tests {
         for name in OP_NAMES {
             assert_eq!(a.byte_of(name), b.byte_of(name));
         }
+    }
+
+    #[test]
+    fn runtime_arity_string_matches_opcodes() {
+        use super::super::opcodes::arity;
+        let expected: String = OP_NAMES
+            .iter()
+            .map(|name| if arity(name) == 1 { '1' } else { '0' })
+            .collect();
+        let runtime = include_str!("runtime.js");
+        let marker = runtime
+            .find("const ARITY =")
+            .expect("runtime.js defines ARITY");
+        let after = &runtime[marker..];
+        let open = after.find('\'').expect("ARITY opens a string");
+        let body = &after[open + 1..];
+        let close = body.find('\'').expect("ARITY closes a string");
+        assert_eq!(
+            &body[..close],
+            expected,
+            "runtime.js ARITY is out of sync with opcodes.rs; update the embedded \
+             string so each opcode's operand count matches OP_NAMES order"
+        );
     }
 
     #[test]

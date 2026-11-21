@@ -15,10 +15,11 @@
 // chunk, so the shipped runtime is one compact line of short names with no
 // opcode names and nothing that spells the runtime's purpose. See vm/mod.rs.
 //
-// Dispatch is numeric. The on-disk program carries, per per-build opcode byte,
-// the opcode's stable index (its position in opcodes.rs OP_NAMES) and its arity,
-// in layout.ops. The runtime looks the handler up in HANDLERS by that stable
-// index, so no opcode name appears here as a string or an identifier. The handler
+// Dispatch is numeric. The program carries only the hashed layout seed; the
+// runtime rebuilds the per-build byte to stable-index assignment from it, then
+// looks the handler up in HANDLERS by that stable index (an opcode's position in
+// opcodes.rs OP_NAMES), so no opcode name appears here as a string or an
+// identifier. The handler
 // table below is written in OP_NAMES order through a running counter, so a
 // handler lands at the index the compiler assigned the same opcode. See
 // docs/SHIELD-VM.md.
@@ -49,9 +50,10 @@
 
 	// Stable opcode indices, in the exact order of estrogen-core's opcodes.rs
 	// OP_NAMES. The counter assigns each name its position, so a handler stored at
-	// OP_<name> below sits at the same index the compiler's layout records for
-	// that opcode. These bindings are mangled away in the shipped runtime; only
-	// the numbers survive, and only inside the (encrypted) program's layout.ops.
+	// OP_<name> below sits at the same stable index the compiler's layout assigns
+	// a byte to for that opcode. These bindings are mangled away in the shipped
+	// runtime; only the numbers survive, and the per-build byte assignment is
+	// rebuilt from the hashed seed the program carries.
 	let _n = 0;
 	// prettier-ignore
 	const
@@ -1058,23 +1060,43 @@
 			}
 			d.c = code;
 		}
-		const layout = program.l;
+		// The layout is a single number, the hashed seed. Rebuild the per-build
+		// byte assignment from it with the same mulberry32 and Fisher-Yates the
+		// compiler used, so the ops map (one entry per opcode) never ships. ARITY
+		// holds each opcode's operand count by stable index (the OP_NAMES order
+		// the OP_* enum mirrors); a Rust test checks it against opcodes.rs.
+		const seedHash = program.l;
 		let steps = 0;
 
-		const tableSize = layout.tableSize;
+		const tableSize = 256;
 		const arityByByte = new Array(tableSize).fill(0);
 		const handlers = new Array(tableSize);
-		const trap = function () {
+		const trap = () => {
 			throw fatal('illegal instruction (trap slot)');
 		};
 		for (let b = 0; b < tableSize; b++) handlers[b] = trap;
-		const ops = layout.ops;
-		for (const byteStr of Object.keys(ops)) {
-			const byte = Number(byteStr);
-			const pair = ops[byteStr];
-			const handler = HANDLERS[pair[0]];
+		const slots = [];
+		for (let k = 0; k < tableSize; k++) slots[k] = k;
+		let rngState = seedHash | 0;
+		const nextRand = () => {
+			rngState = (rngState + 0x6d2b79f5) | 0;
+			let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+		for (let i = tableSize - 1; i >= 1; i--) {
+			const j = Math.floor(nextRand() * (i + 1));
+			const tmp = slots[i];
+			slots[i] = slots[j];
+			slots[j] = tmp;
+		}
+		const ARITY =
+			'0000000100000111111111111111111111111111000000000000000000000000000001010101111111111100010000001001110010000011001101010101011111110000000';
+		for (let idx = 0; idx < ARITY.length; idx++) {
+			const byte = slots[idx];
+			const handler = HANDLERS[idx];
 			if (handler) handlers[byte] = handler;
-			arityByByte[byte] = pair[1];
+			arityByByte[byte] = ARITY.charCodeAt(idx) - 48;
 		}
 
 		function makeFrame(def, closureScope, thisVal, args, extra) {

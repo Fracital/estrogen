@@ -82,23 +82,25 @@ the dispatch loop still reads numbers.
 
 ```
 {
-  "l": { "version": 1, "tableSize": 256, "ops": {…} },
+  "l": 3221897405,
   "k": [ … ],
   "f": [ { "c": "DAUi…" }, { "c": "…", "n": "name", "p": 2, "a": 1 } ]
 }
 ```
 
-- `layout` is the per-build opcode byte assignment. `ops` maps each opcode byte
-  (a string key) to `[stableIndex, arity]`, where `stableIndex` is the opcode's
-  position in `vm/opcodes.rs` `OP_NAMES` and `arity` is how many operand numbers
-  follow the byte. No opcode name is serialized. estrogen builds the byte
-  assignment with `vm/layout.rs`, a bit-for-bit port of the shield's
-  `buildLayout`: the same `mulberry32` PRNG, the same FNV-1a `hashSeed`, and the
-  same Fisher-Yates shuffle over the opcode names in `vm/opcodes.rs`, whose order
-  is the stable index space. The runtime looks a handler up by `stableIndex`, so
-  the byte assignment is data, not textual renaming, and it differs per build.
-  Unused bytes are trap slots. `layout.rs` carried `byteOf` and `nameOf` before;
-  numeric dispatch replaces both so the runtime never needs an opcode name.
+- `l` is the layout: just the hashed seed, one number. estrogen used to ship the
+  whole byte assignment as an `ops` map, one `"byte": [stableIndex, arity]` entry
+  for every opcode (all of `OP_NAMES`, about 1.8 KB), inside the encrypted
+  program. Now it ships only the hashed seed, and the runtime rebuilds the exact
+  byte assignment with the same `mulberry32` PRNG and Fisher-Yates shuffle the
+  compiler uses in `vm/layout.rs` (a bit-for-bit port of the shield's
+  `buildLayout`); the seed is pre-hashed with FNV-1a so the runtime skips the
+  string. Each opcode's arity comes from a static bit string in the runtime, one
+  bit per stable index in `OP_NAMES` order, which a `vm/layout.rs` test checks
+  against `vm/opcodes.rs`. The shuffle over `OP_NAMES` order is the stable index
+  space; the runtime looks a handler up by that index, so the byte assignment is
+  data, not textual renaming, and it differs per build. Unused bytes are trap
+  slots, and no opcode name is serialized.
 - `consts` is the constant pool. A string, a finite number, and a BigInt are the
   values the slice interns. NaN, the infinities, and negative zero use the
   shield's tagged form (`{ "$": "n", "v": "NaN" }` and so on), which the runtime's
