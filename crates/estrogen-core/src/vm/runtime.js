@@ -1385,10 +1385,20 @@
 			// Accessors for the same key and placement merge into one get/set
 			// descriptor.
 			const accessors = new Map();
-			const conciseFn = (name, def) =>
-				({
+			// A method drives through the same async and generator machinery a
+			// standalone function does, so an async method returns a promise, a
+			// generator method returns an iterator, and a plain method runs sync.
+			const conciseFn = (name, def) => {
+				const drive = def.g
+					? def.a
+						? makeAsyncGenerator
+						: makeGenerator
+					: def.a
+						? runAsync
+						: runSync;
+				return ({
 					[name](...args) {
-						return runSync(
+						return drive(
 							makeFrame(def, classScope, this, args, {
 								home: proto,
 								privs: privEnv,
@@ -1396,6 +1406,7 @@
 						);
 					},
 				})[name];
+			};
 			for (const method of desc.methods) {
 				const key = method.key;
 				const def = functions[method.fn];

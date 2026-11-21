@@ -575,9 +575,6 @@ impl Compiler {
                     if method.computed || !method.decorators.is_empty() {
                         return Err(Unsupported("computed or decorated class method"));
                     }
-                    if method.value.r#async || method.value.generator {
-                        return Err(Unsupported("async or generator class method"));
-                    }
                     let body = method
                         .value
                         .body
@@ -607,13 +604,17 @@ impl Compiler {
                             MethodDefinitionKind::Set => "set",
                             MethodDefinitionKind::Constructor => unreachable!(),
                         };
+                        // A getter or setter is never async or generator (that is
+                        // a syntax error), so only a plain method carries either
+                        // flag; the body compiles through the same async and
+                        // generator machinery a standalone function uses.
                         let index = self.compile_function(
                             &method.value.params,
                             FnBody::Block(&body.statements),
                             None,
                             false,
-                            false,
-                            false,
+                            method.value.r#async,
+                            method.value.generator,
                         )?;
                         methods.push(json!({
                             "key": key,
