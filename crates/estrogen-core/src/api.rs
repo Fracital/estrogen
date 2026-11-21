@@ -202,7 +202,14 @@ mod tests {
             seed: Some(b"vm".to_vec()),
             ..Options::default()
         };
-        let out = obfuscate_js("const a = 1 + 2; const b = a * 10; b - 1;\n", &opts).unwrap();
+        // An IIFE, so there is no top-level declaration (a classic script's
+        // top-level binding is a page global and declines); the body still
+        // exercises the VM subset.
+        let out = obfuscate_js(
+            "(() => { const a = 1 + 2; const b = a * 10; return b - 1; })();\n",
+            &opts,
+        )
+        .unwrap();
         assert!(out.code.contains(crate::format::MARKER));
         assert!(
             out.code.contains("JSON.parse("),

@@ -223,6 +223,14 @@ impl Compiler {
                     | Statement::ExportDefaultDeclaration(_)
             )
         });
+        // A classic script's top-level declaration is a page global: a
+        // `function`, `class`, or `var`/`let`/`const` bound at the program body
+        // is visible to the other script tags on the page (one file defines
+        // `Grid`, another reads it). The VM wrapper would scope that binding to
+        // the wrapper, so the global vanishes and a multi-script app breaks. The
+        // decline is enforced after the body compiles, once `import.meta` usage
+        // is known (it proves module scope, where the binding is module-local).
+        let has_top_level_declaration = program.body.iter().any(is_top_level_declaration);
         self.fns.push(FnState {
             code: Vec::new(),
             loops: Vec::new(),
@@ -241,6 +249,17 @@ impl Compiler {
             self.predeclare_vars(&program.body)?;
         }
         self.compile_scope_body(&program.body, true)?;
+        // Decline a classic script that binds a top-level global (see above). The
+        // chunk is classic when it has neither module syntax, a caller-supplied
+        // script kind, nor `import.meta` (whose presence proves module scope, so
+        // the binding is module-local and safe to compile). `import.meta` usage
+        // is known only now, after the body compiled.
+        if has_top_level_declaration && !known_module && !allow_module_var && !self.uses_import_meta
+        {
+            return Err(Unsupported(
+                "a classic script top-level declaration is a page global",
+            ));
+        }
         // After the body runs, write each exported binding's final value to the
         // module exports object the wrapper re-exports. Exports are const, so the
         // value is final here.
@@ -943,6 +962,23 @@ impl Compiler {
             Statement::FunctionDeclaration(_) => Err(Unsupported(
                 "function declaration outside a statement-list top",
             )),
+            // Name the statement that declined, so the VM trace is actionable
+            // instead of a bare "statement outside the subset". A local
+            // `export { a as b }` list and `export default` are the common ones
+            // (a re-export, `export const`, and `import` compile at the top).
+            Statement::ExportNamedDeclaration(_) => {
+                Err(Unsupported("export list statement outside the subset"))
+            }
+            Statement::ExportDefaultDeclaration(_) => {
+                Err(Unsupported("export default statement outside the subset"))
+            }
+            Statement::ForOfStatement(_) => {
+                Err(Unsupported("for-await-of loop outside the subset"))
+            }
+            Statement::WithStatement(_) => Err(Unsupported("with statement outside the subset")),
+            Statement::DebuggerStatement(_) => {
+                Err(Unsupported("debugger statement outside the subset"))
+            }
             _ => Err(Unsupported("statement outside the subset")),
         }
     }
@@ -3464,6 +3500,20 @@ fn binding_identifier<'a, 'b>(
         BindingPattern::BindingIdentifier(id) => Ok(id),
         _ => Err(Unsupported("destructuring binding")),
     }
+}
+
+/// Whether a top-level statement binds a name that a classic script would
+/// expose on the page: a function or class declaration, or a `var`/`let`/`const`
+/// declaration. These become page globals, so a chunk with no module syntax
+/// declines (see [`Compiler::compile_main`]). A statement that binds nothing at
+/// the top level (an expression, an `if`, a loop, a bare block) is not one.
+fn is_top_level_declaration(statement: &Statement<'_>) -> bool {
+    matches!(
+        statement,
+        Statement::FunctionDeclaration(_)
+            | Statement::ClassDeclaration(_)
+            | Statement::VariableDeclaration(_)
+    )
 }
 
 /// A local `export <decl>` is supported only for `const` with plain identifier

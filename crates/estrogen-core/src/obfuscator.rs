@@ -1033,8 +1033,13 @@ mod tests {
     fn a_compilable_chunk_becomes_a_vm_chunk() {
         let dir = tmp_dir();
         let js = dir.join("app.js");
-        // A chunk the VM subset covers: declarations + expressions, no imports.
-        fs::write(&js, "const a = 1 + 2; const b = a * 10; b - 1;\n").unwrap();
+        // A chunk the VM subset covers, wrapped in an IIFE so it binds no
+        // top-level global (a classic script's top-level declaration declines).
+        fs::write(
+            &js,
+            "(() => { const a = 1 + 2; const b = a * 10; return b - 1; })();\n",
+        )
+        .unwrap();
 
         let obf = Obfuscator::new(Options {
             seed: Some(b"vm-seed".to_vec()),
@@ -1089,7 +1094,11 @@ mod tests {
         // canaries. The VM encrypts the program (so the string never ships in the
         // clear) and renames the local to a slot (so the name is gone), and the
         // output scan finds neither, so the build does not fail closed.
-        fs::write(&js, "const secretBrand = 'topSecretValue'; secretBrand;\n").unwrap();
+        fs::write(
+            &js,
+            "(() => { const secretBrand = 'topSecretValue'; return secretBrand; })();\n",
+        )
+        .unwrap();
 
         let obf = Obfuscator::new(Options {
             seed: Some(b"canary-seed".to_vec()),

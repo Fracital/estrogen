@@ -41,6 +41,28 @@ fn run_node(code: &str, tag: &str) -> (bool, String, String) {
     )
 }
 
+/// Run `code` as a classic script (a `.js` file, not a module) with node and
+/// return (success, stdout, stderr). Used to confirm a classic chunk's top-level
+/// bindings survive obfuscation.
+fn run_node_classic(code: &str, tag: &str) -> (bool, String, String) {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "estrogen-vm-classic-{}-{tag}.js",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).expect("create temp");
+        f.write_all(code.as_bytes()).expect("write temp");
+    }
+    let out = Command::new("node").arg(&path).output().expect("run node");
+    std::fs::remove_file(&path).ok();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// The supported corpus: each source is a module whose last top-level expression
 /// is the value to compare. These exercise literals, locals (slot load/init),
 /// globals, member access, calls and method calls, `new`, unary and binary
@@ -775,6 +797,70 @@ fn unsupported_constructs_decline() {
     }
 }
 
+/// A classic script's top-level declarations are page globals: another script
+/// tag on the page reads them. The VM wrapper would scope them to itself and the
+/// global would vanish, so a chunk with no module syntax and any top-level
+/// declaration must decline and take the literal fallback, which keeps the
+/// bindings. A classic chunk that declares nothing at the top level still
+/// compiles. This is the vibeOS 2048/Breakout regression: `tile.js` defines
+/// `Tile`, `application.js` reads it.
+#[test]
+fn classic_script_top_level_declarations_decline_and_keep_globals() {
+    let opts = Options {
+        seed: Some(b"vm-classic-globals".to_vec()),
+        ..Options::default()
+    };
+    // Every kind of top-level declaration in a classic script declines.
+    for source in [
+        "function Tile() { this.x = 1 }",
+        "class Grid {}",
+        "var VERSION = 2;",
+        "let counter = 0;",
+        "const LABEL = 'x';",
+        "function Tile() { this.x = 1 } var VERSION = 2;",
+    ] {
+        assert!(
+            try_compile_chunk(source, &opts)
+                .expect("classic fallback")
+                .is_none(),
+            "expected a classic top-level declaration to decline: {source}"
+        );
+    }
+    // A classic chunk that binds nothing at the top level still VM-compiles: an
+    // assignment to a global with no declaration of its own.
+    for source in [
+        "window.foo = function () { return 1 };",
+        "globalThis.counter = (globalThis.counter || 0) + 1;",
+    ] {
+        let output = try_compile_chunk(source, &opts)
+            .expect("expression chunk")
+            .unwrap_or_else(|| panic!("VM declined an expression-only classic chunk: {source}"));
+        assert!(output.contains("JSON.parse("), "not bytecode: {source}");
+    }
+
+    if !node_available("classic_script_top_level_declarations_decline_and_keep_globals") {
+        return;
+    }
+    // The literal fallback keeps the bindings: run as a classic script, the
+    // obfuscated output still has a usable `Tile` and `VERSION`.
+    let source = "function Tile(n) { this.n = n } var VERSION = 2;";
+    let obf = estrogen_core::obfuscate_js(source, &opts)
+        .expect("obfuscate")
+        .code;
+    assert!(
+        !obf.contains("JSON.parse("),
+        "should have fallen back: {obf}"
+    );
+    let check = format!("{obf}\nconsole.log(typeof Tile, VERSION, new Tile(5).n);");
+    let (ok, stdout, stderr) = run_node_classic(&check, "classic-globals");
+    assert!(ok, "classic script failed: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "function 2 5",
+        "the fallback dropped a classic top-level binding: {stdout}"
+    );
+}
+
 #[test]
 fn class_chunks_require_known_module_scope() {
     let opts = Options {
@@ -1009,8 +1095,10 @@ fn embedded_runtime_has_no_comments() {
 /// and the name compiles to a slot index.
 #[test]
 fn vm_function_chunk_leaks_no_plaintext() {
-    let src = "function reveal() { const secretCanaryLocal = 'topSecretCanaryValue'; \
-               return secretCanaryLocal; } reveal();\n";
+    // An IIFE, not a top-level `function reveal`, so the chunk VM-compiles: a
+    // classic top-level declaration would be a page global and decline.
+    let src = "(function reveal() { const secretCanaryLocal = 'topSecretCanaryValue'; \
+               return secretCanaryLocal; })();\n";
     let opts = Options {
         seed: Some(b"leak-seed".to_vec()),
         ..Options::default()
@@ -1136,9 +1224,11 @@ fn vm_chunk_runtime_is_mangled_and_names_free() {
     };
     // A chunk that exercises many opcode groups (arithmetic, calls, control flow,
     // slots, arrays, closures), so its runtime carries their handlers.
+    // Wrapped in an IIFE so the chunk VM-compiles: a top-level `function pow` and
+    // `const xs` would be page globals in a classic script and decline.
     let src =
-        "function pow(b, e) { let r = 1; for (let i = 0; i < e; i++) { r = r * b; } return r; } \
-               const xs = [1, 2, 3].map((n) => n + 1); pow(2, xs.length);\n";
+        "(function () { function pow(b, e) { let r = 1; for (let i = 0; i < e; i++) { r = r * b; } return r; } \
+               const xs = [1, 2, 3].map((n) => n + 1); return pow(2, xs.length); })();\n";
     let out = try_compile_chunk(src, &opts)
         .expect("compile should not error")
         .expect("a function chunk should VM-compile");
