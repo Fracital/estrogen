@@ -1222,6 +1222,49 @@ fn vm_local_export_lists_and_default_match_native() {
     }
 }
 
+#[test]
+fn vm_declaration_form_exports_match_native() {
+    if !node_available("vm_declaration_form_exports_match_native") {
+        return;
+    }
+    // A declaration-form export (`export function`, `export class`) compiles and
+    // exports the defined value, beside sibling non-exported bindings.
+    let cases = [
+        (
+            "export function h(x){ return x + 1 } export class C { m(){ return 2 } }",
+            "[m.h(1), new m.C().m()]",
+        ),
+        (
+            "const internal = 5; export function g(){ return internal } export const k = internal * 2;",
+            "[m.g(), m.k]",
+        ),
+        (
+            "export class Base { who(){ return 'base' } } export class Sub extends Base {}",
+            "[new m.Sub().who()]",
+        ),
+    ];
+    for (i, (source, observe)) in cases.iter().enumerate() {
+        let output = try_compile_chunk(
+            source,
+            &Options {
+                seed: Some(b"vm-decl-exports".to_vec()),
+                ..Options::default()
+            },
+        )
+        .expect("VM export compilation failed")
+        .unwrap_or_else(|| panic!("VM declined a declaration-form export module: {source}"));
+        assert!(output.contains("JSON.parse("), "not VM bytecode: {output}");
+
+        let native = import_namespace(source, observe, &format!("decl-exp-native-{i}"));
+        let vm = import_namespace(&output, observe, &format!("decl-exp-vm-{i}"));
+        assert_eq!(
+            native.0, vm.0,
+            "export mismatch for {source}\n{output}\nnative stderr: {}\nvm stderr: {}",
+            native.1, vm.1
+        );
+    }
+}
+
 /// Write `module_src` to a temp `.mjs`, import it from a sibling runner module,
 /// and return the JSON of `observe` over the namespace `m`, plus node's stderr.
 fn import_namespace(module_src: &str, observe: &str, tag: &str) -> (String, String) {

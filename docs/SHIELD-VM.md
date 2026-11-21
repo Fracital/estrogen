@@ -411,7 +411,8 @@ Falls back (declines, so the literal and name passes run instead):
   holds a handler across a `yield` declines the same way a standalone generator
   does. Native
   static imports and reexports work, and a local `export const`, an
-  `export { a as b }` list, and `export default` compile through the hybrid
+  `export { a as b }` list, `export default`, and a declaration-form
+  `export function`/`export class` compile through the hybrid
   wrapper: the VM writes each binding's final value to the exports object, which
   the wrapper re-exports. A `let` export reassigned after an importer reads it
   reflects only that final value, since the full live-binding loader is not

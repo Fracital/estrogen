@@ -41,11 +41,12 @@ use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression, AssignmentOperator,
     AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BinaryOperator,
     BindingPattern, ChainElement, ChainExpression, Class, ClassElement, ComputedMemberExpression,
-    ExportDefaultDeclarationKind, Expression, ForStatement, ForStatementInit, ForStatementLeft,
-    FormalParameters, Function, IfStatement, ImportOrExportKind, LabeledStatement, LogicalOperator,
-    MemberExpression, MethodDefinitionKind, ModuleExportName, ObjectPropertyKind, Program,
-    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, StaticMemberExpression,
-    SwitchStatement, TryStatement, UnaryOperator, UpdateOperator, VariableDeclarationKind,
+    Declaration, ExportDefaultDeclarationKind, Expression, ForStatement, ForStatementInit,
+    ForStatementLeft, FormalParameters, Function, IfStatement, ImportOrExportKind,
+    LabeledStatement, LogicalOperator, MemberExpression, MethodDefinitionKind, ModuleExportName,
+    ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+    StaticMemberExpression, SwitchStatement, TryStatement, UnaryOperator, UpdateOperator,
+    VariableDeclarationKind,
 };
 use oxc_ast::AstKind;
 use oxc_ast_visit::Visit;
@@ -893,18 +894,61 @@ impl Compiler {
                     let slot = self.add_local(name.name.as_str());
                     self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
                 }
-                Statement::ExportDeclaration(ex) if top_level => {
-                    let decl = export_const_declaration(ex)?;
-                    let kind = lexical_kind(decl.kind)?;
-                    for d in &decl.declarations {
-                        let id = binding_identifier(&d.id)?;
-                        let slot = self.add_local(id.name.as_str());
-                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
-                        self.exports.push(id.name.as_str().to_string());
-                        self.export_writes
-                            .push((id.name.as_str().to_string(), id.name.as_str().to_string()));
+                Statement::ExportDeclaration(ex) if top_level => match &ex.declaration {
+                    // `export function h() {}` hoists like a plain function
+                    // declaration and records `h` as an export the wrapper writes
+                    // back after the body runs.
+                    Declaration::FunctionDeclaration(func) => {
+                        let name = func
+                            .id
+                            .as_ref()
+                            .ok_or(Unsupported("export function without a name"))?
+                            .name
+                            .as_str()
+                            .to_string();
+                        let slot = self
+                            .scopes
+                            .last()
+                            .expect("scope")
+                            .names
+                            .iter()
+                            .position(|existing| existing == &name)
+                            .unwrap_or_else(|| self.add_local(&name));
+                        hoisted.push((slot, func));
+                        self.exports.push(name.clone());
+                        self.export_writes.push((name.clone(), name));
                     }
-                }
+                    // `export class C {}` declares its slot here and compiles into
+                    // it in the statement pass, like a plain class declaration.
+                    Declaration::ClassDeclaration(class) => {
+                        if self.root_class_needs_module_mode() {
+                            return Err(Unsupported("top-level class needs module kind"));
+                        }
+                        let name = class
+                            .id
+                            .as_ref()
+                            .ok_or(Unsupported("anonymous class declaration"))?
+                            .name
+                            .as_str()
+                            .to_string();
+                        let slot = self.add_local(&name);
+                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
+                        self.exports.push(name.clone());
+                        self.export_writes.push((name.clone(), name));
+                    }
+                    _ => {
+                        let decl = export_const_declaration(ex)?;
+                        let kind = lexical_kind(decl.kind)?;
+                        for d in &decl.declarations {
+                            let id = binding_identifier(&d.id)?;
+                            let slot = self.add_local(id.name.as_str());
+                            self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                            self.exports.push(id.name.as_str().to_string());
+                            self.export_writes
+                                .push((id.name.as_str().to_string(), id.name.as_str().to_string()));
+                        }
+                    }
+                },
                 _ => {}
             }
         }
@@ -927,10 +971,16 @@ impl Compiler {
             self.emit1("MAKE_FUNC", idx as i64);
             self.emit1("DEF_FUNC_SLOT", slot as i64);
         }
-        // Statements in order. Function declarations are already defined.
+        // Statements in order. Function declarations are already defined, and so
+        // is an exported function declaration, which was hoisted above.
         for stmt in stmts {
             if matches!(stmt, Statement::FunctionDeclaration(_)) {
                 continue;
+            }
+            if let Statement::ExportDeclaration(ex) = stmt {
+                if matches!(&ex.declaration, Declaration::FunctionDeclaration(_)) {
+                    continue;
+                }
             }
             self.compile_statement(stmt, top_level)?;
         }
@@ -951,22 +1001,40 @@ impl Compiler {
             // A local `export const <bindings>` compiles its declaration here;
             // the slot was declared in the hoist pass and the name recorded for
             // the wrapper. The main emits EXPORT_BINDING for each at the end.
-            Statement::ExportDeclaration(ex) if top_level => {
-                let decl = export_const_declaration(ex)?;
-                for d in &decl.declarations {
-                    let id = binding_identifier(&d.id)?;
-                    let (_, slot) = self
-                        .resolve(id.name.as_str())
-                        .ok_or(Unsupported("export binding not declared"))?;
-                    let init = d
-                        .init
+            Statement::ExportDeclaration(ex) if top_level => match &ex.declaration {
+                // The exported function was already defined in the hoist pass.
+                Declaration::FunctionDeclaration(_) => Ok(()),
+                // `export class C {}`: compile into the slot declared in the hoist
+                // pass, like a plain class declaration.
+                Declaration::ClassDeclaration(class) => {
+                    let name = class
+                        .id
                         .as_ref()
-                        .ok_or(Unsupported("export const without an initializer"))?;
-                    self.compile_named_expr(init, id.name.as_str())?;
-                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                        .ok_or(Unsupported("anonymous class declaration"))?;
+                    let (depth, slot) = self
+                        .resolve(name.name.as_str())
+                        .ok_or(Unsupported("class binding"))?;
+                    self.compile_class(class, None, Some(pack_addr(depth, slot)))?;
+                    self.emit0("POP");
+                    Ok(())
                 }
-                Ok(())
-            }
+                _ => {
+                    let decl = export_const_declaration(ex)?;
+                    for d in &decl.declarations {
+                        let id = binding_identifier(&d.id)?;
+                        let (_, slot) = self
+                            .resolve(id.name.as_str())
+                            .ok_or(Unsupported("export binding not declared"))?;
+                        let init = d
+                            .init
+                            .as_ref()
+                            .ok_or(Unsupported("export const without an initializer"))?;
+                        self.compile_named_expr(init, id.name.as_str())?;
+                        self.emit1("INIT_SLOT", pack_addr(0, slot));
+                    }
+                    Ok(())
+                }
+            },
             Statement::EmptyStatement(_) => Ok(()),
             Statement::ExpressionStatement(s) => {
                 self.compile_expr(&s.expression)?;

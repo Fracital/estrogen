@@ -1065,9 +1065,9 @@ mod tests {
     fn a_chunk_outside_the_subset_falls_back_to_literals() {
         let dir = tmp_dir();
         let js = dir.join("app.js");
-        // A top-level function is outside the VM subset, so the whole chunk falls
-        // back to the literal-pool path, which still encrypts the string.
-        fs::write(&js, "export function greet() { return 'hello world'; }\n").unwrap();
+        // A `debugger` statement is outside the VM subset, so the whole chunk
+        // falls back to the literal-pool path, which still encrypts the string.
+        fs::write(&js, "export const greeting = 'hello world'; debugger;\n").unwrap();
 
         let obf = Obfuscator::new(Options {
             seed: Some(b"fb-seed".to_vec()),
