@@ -356,8 +356,9 @@ pub struct Options {
     /// obfuscation target, so this only shrinks it; it fails closed on a parse
     /// error (the original is kept). The CLI exposes `--no-minify-css`.
     pub minify_css: bool,
-    /// Rename top-level identifiers in a classic script too, not only in an ES
-    /// module. Off by default. A `function` or `var` at the top of a classic
+    /// Rename top-level identifiers in a classic script too, the way an ES
+    /// module's already are. Off by default. A `function` or `var` at the top of
+    /// a classic
     /// script is a property of the global object, so another script can read it
     /// by name; the mangle pass keeps those names unless this flag says the chunk
     /// is self-contained. With it on, a top-level name whose every use is a direct

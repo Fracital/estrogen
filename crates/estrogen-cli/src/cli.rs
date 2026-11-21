@@ -80,8 +80,9 @@ pub struct Common {
     #[arg(long = "no-vm")]
     pub no_vm: bool,
 
-    /// Rename top-level names in a classic script too, not only in an ES module.
-    /// Off by default, since a classic script's top-level `function` or `var` can
+    /// Rename top-level names in a classic script too, the way an ES module's
+    /// already are. Off by default, since a classic script's top-level
+    /// `function` or `var` can
     /// be a global another file reads by name. Set it when the chunk is
     /// self-contained and its top-level names are private.
     #[arg(long = "top-level")]
