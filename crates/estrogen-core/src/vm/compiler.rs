@@ -1140,13 +1140,6 @@ impl Compiler {
     }
 
     fn compile_switch(&mut self, s: &SwitchStatement<'_>, label: Option<&str>) -> R<()> {
-        // A lexical declaration in a case needs the switch block-scope model,
-        // which is not ported yet; decline such switches.
-        for case in &s.cases {
-            if block_needs_scope(&case.consequent) {
-                return Err(Unsupported("lexical declaration in a switch case"));
-            }
-        }
         // The discriminant lives in a temp slot, not on the operand stack, so a
         // `break`/`continue` out of the switch never leaves a stray value.
         self.open_scope();
@@ -1154,6 +1147,48 @@ impl Compiler {
         self.emit1("DECLARE_SLOT", (temp as i64) << 2);
         self.compile_expr(&s.discriminant)?;
         self.emit1("INIT_SLOT", pack_addr(0, temp));
+
+        // The whole case block is one lexical scope the cases share. Declare its
+        // `let`/`const`/`class` bindings up front as TDZ cells (after the
+        // discriminant, so a discriminant that shadows one still reads the outer
+        // binding), so a declaration in any case resolves to a slot and a case
+        // that reaches it initializes it. A `var` is hoisted at the function
+        // level already. A function declaration in a case has Annex B hoisting
+        // the VM does not model, so decline it.
+        for case in &s.cases {
+            for stmt in &case.consequent {
+                match stmt {
+                    Statement::VariableDeclaration(decl)
+                        if decl.kind != VariableDeclarationKind::Var =>
+                    {
+                        let kind = lexical_kind(decl.kind)?;
+                        for d in &decl.declarations {
+                            let mut names = Vec::new();
+                            collect_pattern_names(&d.id, &mut names)?;
+                            for name in names {
+                                let slot = self.add_local(&name);
+                                self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                            }
+                        }
+                    }
+                    Statement::ClassDeclaration(class) => {
+                        if self.root_class_needs_module_mode() {
+                            return Err(Unsupported("top-level class needs module kind"));
+                        }
+                        let name = class
+                            .id
+                            .as_ref()
+                            .ok_or(Unsupported("anonymous class declaration"))?;
+                        let slot = self.add_local(name.name.as_str());
+                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
+                    }
+                    Statement::FunctionDeclaration(_) => {
+                        return Err(Unsupported("function declaration in a switch case"));
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let mut body_sites: Vec<(usize, usize)> = Vec::new();
         let mut default_case: Option<usize> = None;
@@ -3176,6 +3211,26 @@ fn has_closure_stmt(s: &Statement<'_>) -> bool {
                 })
         }
         Statement::ReturnStatement(r) => r.argument.as_ref().is_some_and(has_closure_expr),
+        // A for-of/in body or iterable can hold a closure that captures the outer
+        // for-let binding. The head's binding target cannot hide one that matters
+        // here: the only target the VM compiles is a single plain identifier (a
+        // destructuring or assignment-target head declines in compile_iterated),
+        // so recursing into the iterable and body is sound.
+        Statement::ForOfStatement(f) => has_closure_expr(&f.right) || has_closure_stmt(&f.body),
+        Statement::ForInStatement(f) => has_closure_expr(&f.right) || has_closure_stmt(&f.body),
+        Statement::LabeledStatement(l) => has_closure_stmt(&l.body),
+        Statement::ThrowStatement(t) => has_closure_expr(&t.argument),
+        // A destructuring catch binding declines in compile_try, so only the
+        // block, catch, and finally bodies can hold a closure that reaches here.
+        Statement::TryStatement(t) => {
+            t.block.body.iter().any(has_closure_stmt)
+                || t.handler
+                    .as_ref()
+                    .is_some_and(|h| h.body.body.iter().any(has_closure_stmt))
+                || t.finalizer
+                    .as_ref()
+                    .is_some_and(|f| f.body.iter().any(has_closure_stmt))
+        }
         _ => true,
     }
 }

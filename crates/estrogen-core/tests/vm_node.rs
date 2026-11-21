@@ -309,6 +309,18 @@ const CONTROL: &[&str] = &[
     "let o = []; function f() { try { o.push('t'); return o.length; } finally { o.push('x'); } } const r = f(); [r, o.length]",
     // finally over a for-of body (iterator closes normally, finally still runs)
     "let o = []; function f() { for (const n of [1, 2]) { try { o.push(n); } finally { o.push(-n); } } return o; } f()",
+    // a for-let whose body contains a for-of no longer over-declines
+    "let total = 0; for (let i = 0; i < 3; i++) { for (const x of [10, 20]) total += i * x; } total",
+    // a for-let whose body contains a try no longer over-declines
+    "let s = 0; for (let i = 0; i < 4; i++) { try { if (i === 2) throw i; s += i; } catch (e) { s += 100; } } s",
+    // a for-let whose body contains a labeled statement no longer over-declines
+    "let s = 0; for (let i = 0; i < 3; i++) { L: { if (i === 1) break L; s += i; } } s",
+    // a let/const declared directly in a switch case, shared across the case block
+    "function kind(n) { switch (n) { case 0: let a = 'zero'; return a; case 1: const b = 'one'; return b; default: return 'other'; } } [kind(0), kind(1), kind(2)]",
+    // the discriminant reads the outer binding, not the case-scoped shadow
+    "function f() { let x = 5; switch (x) { case 5: let x = 99; return x; default: return -1; } } f()",
+    // a case-scoped let is in TDZ for a case that does not declare it
+    "function f(n) { switch (n) { case 1: return 'a'; case 2: let v = 7; return v; } } [f(1), f(2)]",
 ];
 
 /// Expression-surface mutation: compound, logical, and update assignment to a
@@ -589,6 +601,11 @@ fn unsupported_constructs_decline() {
         // a for-let binding captured by a closure must decline, because estrogen
         // uses one binding where native makes one per iteration.
         "const fns = []; for (let i = 0; i < 3; i++) { fns.push(() => i); } fns[0]()",
+        // the closure check still finds a capture reached through an inner for-of
+        "const fns = []; for (let i = 0; i < 2; i++) { for (const x of [0]) fns.push(() => i); } fns[0]()",
+        // a function declaration in a switch case has Annex B hoisting the VM does
+        // not model, so it declines even though lexical case bindings compile
+        "switch (1) { case 1: function g() { return 1; } g(); }",
         // a labeled break that would close more than one for-of iterator at once
         // declines, matching the conservative multi-iterator unwinding stance.
         "L: for (const x of [1, 2]) { for (const y of [3, 4]) { break L; } }",
