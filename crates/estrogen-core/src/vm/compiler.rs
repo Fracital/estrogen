@@ -483,45 +483,49 @@ impl Compiler {
                         .body
                         .as_ref()
                         .ok_or(Unsupported("class method body"))?;
-                    match method.kind {
-                        MethodDefinitionKind::Constructor => {
-                            if constructor.is_some() || method.r#static {
-                                return Err(Unsupported("class constructor kind"));
-                            }
-                            constructor = Some(self.compile_function(
-                                &method.value.params,
-                                FnBody::Block(&body.statements),
-                                None,
-                                false,
-                                false,
-                                false,
-                            )?);
+                    if let MethodDefinitionKind::Constructor = method.kind {
+                        if constructor.is_some() || method.r#static {
+                            return Err(Unsupported("class constructor kind"));
                         }
-                        MethodDefinitionKind::Method => {
-                            let key = static_key(&method.key)
-                                .ok_or(Unsupported("non-static class method key"))?;
-                            let index = self.compile_function(
-                                &method.value.params,
-                                FnBody::Block(&body.statements),
-                                None,
-                                false,
-                                false,
-                                false,
-                            )?;
-                            methods
-                                .push(json!({"key": key, "static": method.r#static, "fn": index}));
-                        }
-                        _ => return Err(Unsupported("class getter or setter")),
+                        constructor = Some(self.compile_function(
+                            &method.value.params,
+                            FnBody::Block(&body.statements),
+                            None,
+                            false,
+                            false,
+                            false,
+                        )?);
+                    } else {
+                        // A plain method, a getter, or a setter. All compile to a
+                        // function; `kind` tells BUILD_CLASS whether to install a
+                        // value or an accessor on the prototype or the class.
+                        let key = static_key(&method.key)
+                            .ok_or(Unsupported("non-static class method key"))?;
+                        let kind = match method.kind {
+                            MethodDefinitionKind::Method => "method",
+                            MethodDefinitionKind::Get => "get",
+                            MethodDefinitionKind::Set => "set",
+                            MethodDefinitionKind::Constructor => unreachable!(),
+                        };
+                        let index = self.compile_function(
+                            &method.value.params,
+                            FnBody::Block(&body.statements),
+                            None,
+                            false,
+                            false,
+                            false,
+                        )?;
+                        methods.push(json!({
+                            "key": key,
+                            "static": method.r#static,
+                            "fn": index,
+                            "kind": kind,
+                        }));
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
                     if field.computed || !field.decorators.is_empty() {
                         return Err(Unsupported("computed or decorated class field"));
-                    }
-                    // An instance field of a derived class initializes after
-                    // super() returns, which the subset does not thread yet.
-                    if has_super && !field.r#static {
-                        return Err(Unsupported("instance field in a derived class"));
                     }
                     let key =
                         static_key(&field.key).ok_or(Unsupported("non-static class field key"))?;

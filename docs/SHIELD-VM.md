@@ -284,8 +284,13 @@ falls back. The subset:
   so using `this` before `super()` throws. `super.prop` and `super.method()` read
   and call through the prototype of the method's home object with `this` as the
   receiver, and `new.target` loads from the frame. The class prototype stays
-  non-writable. A derived class with an instance field declines, because a field
-  initializes after `super()` returns, which is not threaded yet.
+  non-writable. A derived class's instance fields initialize right after
+  `super()` binds `this`: the constructor frame carries the field initializers
+  and `SUPER_CALL` runs them on the new receiver, and an implicit derived
+  constructor runs them on the `Reflect.construct` result.
+- Class accessors: a `get` or `set`, instance or static, installs a merged
+  accessor descriptor (`enumerable` false, `configurable` true) on the prototype
+  or the class. A plain method still installs a value property.
 - Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `for`/`of`,
   `for`/`in`, `switch`, `try`/`catch`/`finally`, `throw`, and `break`/`continue`,
   both unlabeled and to a label on an enclosing loop, `switch`, or block. A
@@ -343,9 +348,9 @@ falls back. The subset:
 
 Falls back (declines, so the literal and name passes run instead):
 
-- A decorated class, a derived class with an instance field, class getters and
-  setters, computed, `async`, or generator methods, private class members,
-  static blocks, a computed super member, and a spread in `super()`. Native
+- A decorated class, a computed method, field, or accessor key, an `async` or
+  generator method, private class members, static blocks, a computed super
+  member, and a spread in `super()`. Native
   static imports and reexports work, but the VM's full module loader is not
   ported, so a local export of a value computed in the VM beyond the simple
   cases takes the fallback.
@@ -431,11 +436,11 @@ does, is still a large amount of further work. In rough dependency order:
    `loader-template.js` still need a full port. A real Vite graph also has
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
-4. The rest of the class surface: getters and setters, private state, computed,
-   `async`, and generator methods, static blocks, an instance field in a derived
-   class, a computed super member, and a spread in `super()`. The common derived
+4. The rest of the class surface: private state, computed method, field, and
+   accessor keys, `async` and generator methods, static blocks, a computed super
+   member, and a spread in `super()`. The common derived
    case (`extends`, `super(...)`, `super.method()`/`super.prop`, `new.target`,
-   the prototype chain) compiles.
+   instance fields, getters and setters, the prototype chain) compiles.
 5. The soundness fixpoint the shield computes (no native chunk may import a VM
    chunk), the emit-time guard against a chunk naming a renamed sibling file, and
    the per-chunk integrity hash and anti-tamper checks (P7), which estrogen does

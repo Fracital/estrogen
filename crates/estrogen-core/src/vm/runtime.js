@@ -786,6 +786,9 @@
 		const Sup = frame.superClass === null ? Object : frame.superClass;
 		const o = Reflect.construct(Sup, args, frame.newTarget);
 		frame.thisVal = o;
+		// Instance fields of a derived class initialize immediately after super()
+		// returns, before the rest of the constructor body runs.
+		if (frame.initFields) frame.initFields(o);
 		s.push(o);
 	};
 	HANDLERS[OP_RETURN] = function (
@@ -1116,6 +1119,9 @@
 				home: extra ? extra.home : undefined,
 				newTarget: extra ? extra.newTarget : undefined,
 				superClass: extra ? extra.superClass : undefined,
+				// A derived constructor's instance fields initialize right after
+				// super() binds `this`; SUPER_CALL runs this with the receiver.
+				initFields: extra ? extra.initFields : undefined,
 			};
 		}
 
@@ -1186,6 +1192,11 @@
 					configurable: true,
 				});
 			};
+			const initInstanceFields = (receiver) => {
+				for (const field of desc.fields) {
+					if (!field.static) defineField(receiver, field);
+				}
+			};
 			const Class = function (...args) {
 				const nt = new.target;
 				if (!nt)
@@ -1196,11 +1207,13 @@
 					// A derived class's `this` comes from super(); an implicit
 					// constructor forwards straight to the superclass.
 					if (desc.ctor === null) {
-						return Reflect.construct(
+						const inst = Reflect.construct(
 							superClass === null ? Object : superClass,
 							args,
 							nt,
 						);
+						initInstanceFields(inst);
+						return inst;
 					}
 					const f = makeFrame(
 						functions[desc.ctor],
@@ -1211,6 +1224,7 @@
 							home: proto,
 							newTarget: nt,
 							superClass,
+							initFields: initInstanceFields,
 						},
 					);
 					const value = runSync(f);
@@ -1264,24 +1278,55 @@
 				configurable: true,
 			});
 			Object.defineProperty(Class, 'prototype', { writable: false });
-			for (const method of desc.methods) {
-				const key = method.key;
-				const def = functions[method.fn];
-				// Concise methods have no own prototype and cannot be constructed.
-				const fn = {
-					[key](...args) {
+			// A get or set installs an accessor; a plain method installs a value.
+			// Accessors for the same key and placement merge into one get/set
+			// descriptor.
+			const accessors = new Map();
+			const conciseFn = (name, def) =>
+				({
+					[name](...args) {
 						return runSync(
 							makeFrame(def, classScope, this, args, { home: proto }),
 						);
 					},
-				}[key];
-				Object.defineProperty(fn, 'length', {
-					value: def.p || 0,
-					configurable: true,
-				});
-				Object.defineProperty(method.static ? Class : proto, key, {
-					value: fn,
-					writable: true,
+				})[name];
+			for (const method of desc.methods) {
+				const key = method.key;
+				const def = functions[method.fn];
+				const target = method.static ? Class : proto;
+				const kind = method.kind || 'method';
+				if (kind === 'method') {
+					// Concise methods have no own prototype and are not constructable.
+					const fn = conciseFn(key, def);
+					Object.defineProperty(fn, 'length', {
+						value: def.p || 0,
+						configurable: true,
+					});
+					Object.defineProperty(target, key, {
+						value: fn,
+						writable: true,
+						enumerable: false,
+						configurable: true,
+					});
+				} else {
+					const fn = conciseFn(kind + ' ' + key, def);
+					Object.defineProperty(fn, 'length', {
+						value: def.p || 0,
+						configurable: true,
+					});
+					const mapKey = (method.static ? 'S:' : 'I:') + key;
+					let acc = accessors.get(mapKey);
+					if (!acc) {
+						acc = { target, key };
+						accessors.set(mapKey, acc);
+					}
+					acc[kind] = fn;
+				}
+			}
+			for (const acc of accessors.values()) {
+				Object.defineProperty(acc.target, acc.key, {
+					get: acc.get,
+					set: acc.set,
 					enumerable: false,
 					configurable: true,
 				});

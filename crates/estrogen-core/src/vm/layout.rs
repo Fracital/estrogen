@@ -63,14 +63,6 @@ impl Layout {
     pub fn to_json(&self) -> Value {
         Value::from(self.seed_hash)
     }
-
-    /// The byte assigned to each opcode, in `OP_NAMES` order. The runtime must
-    /// rebuild this exact vector from [`to_json`]'s seed hash, so a test checks
-    /// the JS port against it.
-    #[cfg(test)]
-    pub fn bytes_in_order(&self) -> Vec<u8> {
-        OP_NAMES.iter().map(|name| self.byte_of(name)).collect()
-    }
 }
 
 /// FNV-1a over the seed string, matching the shield's `hashSeed`. Works on the

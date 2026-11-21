@@ -226,6 +226,26 @@ const CLASSES: &[&str] = &[
     "class A {} class B extends A { constructor() { return this; } } let e; try { new B(); } catch (err) { e = err && err.constructor && err.constructor.name; } e",
     // extends null: the prototype has no parent
     "class A extends null { constructor() { return Object.create(new.target.prototype); } } [Object.getPrototypeOf(A.prototype), A.prototype instanceof Object]",
+    // a derived class instance field initializes after super() (reads a super-set prop)
+    "class A { constructor() { this.x = 10; } } class B extends A { y = this.x + 5; } const b = new B(); [b.x, b.y]",
+    // derived field with an explicit constructor, readable in the body after super()
+    "class A { constructor(n) { this.n = n; } } class B extends A { doubled = this.n * 2; constructor(n) { super(n); this.extra = this.doubled + 1; } } const b = new B(5); [b.n, b.doubled, b.extra]",
+    // field initializes after super() runs but before the rest of the body
+    "let log = []; class A { constructor() { log.push('super'); } } class B extends A { f = (log.push('field'), 1); constructor() { super(); log.push('body'); } } new B(); log.join(',')",
+    // derived field with an implicit constructor
+    "class A { constructor(a) { this.a = a; } } class B extends A { b = 7; } const o = new B(3); [o.a, o.b]",
+    // a static field on a derived class
+    "class A {} class B extends A { static s = 99; } B.s",
+    // an instance getter and setter sharing a key
+    "class C { constructor() { this._v = 0; } get x() { return this._v; } set x(v) { this._v = v * 2; } } const c = new C(); c.x = 5; c.x",
+    // a getter returns a computed value and its descriptor is an accessor
+    "class C { get x() { return 42; } } const d = Object.getOwnPropertyDescriptor(C.prototype, 'x'); [new C().x, typeof d.get, d.set, d.enumerable, d.configurable]",
+    // a static getter on the class itself
+    "class C { static get n() { return 7; } } [C.n, Object.getOwnPropertyDescriptor(C, 'n').enumerable]",
+    // a getter inherited through extends
+    "class A { get kind() { return 'a'; } } class B extends A {} new B().kind",
+    // a setter with no getter leaves the getter undefined
+    "class C { set x(v) { this.stored = v; } } const c = new C(); c.x = 9; [c.stored, Object.getOwnPropertyDescriptor(C.prototype, 'x').get]",
 ];
 
 /// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
@@ -656,9 +676,6 @@ fn unsupported_constructs_decline() {
     let unsupported = [
         "var z = 1; z",
         "import x from './y.js'; x",
-        "class C { get x() { return 1; } }",
-        "class A {} class B extends A { f = 1; }",
-        "class C { set x(value) {} }",
         "class C { [Math.random()]() {} }",
         "class C { [Math.random()] = 1; }",
         "class C { #private = 1; }",
@@ -1060,9 +1077,9 @@ fn unsupported_chunk_still_declines_at_the_api() {
         seed: Some(b"fallback-seed".to_vec()),
         ..Options::default()
     };
-    // A class getter is still outside the subset, so the VM must decline it.
-    let declined = try_compile_chunk("class C { get x() { return 1; } }\n", &opts)
-        .expect("compile should not error");
+    // A private class member is still outside the subset, so the VM declines it.
+    let declined =
+        try_compile_chunk("class C { #x = 1; }\n", &opts).expect("compile should not error");
     assert!(
         declined.is_none(),
         "an out-of-subset class chunk must decline to the fallback path"
