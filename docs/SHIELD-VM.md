@@ -406,8 +406,11 @@ Falls back (declines, so the literal and name passes run instead):
   each key expression evaluated in source order into the array BUILD_CLASS_DYN
   reads; a computed object-literal getter or setter key compiles too. A spread in
   `super()` compiles through SUPER_CALL_APPLY, and an anonymous class expression
-  compiles, taking its name from an identifier assignment or declarator the way a
-  function does. An async or generator method whose own body
+  compiles, taking its name from an identifier assignment, a declarator, or a
+  static object-property key, and the empty string in a bare position, the way a
+  function does. An anonymous class under a computed key or as a default value
+  declines when the chunk observes a name, since the name is set at run time. An
+  async or generator method whose own body
   holds a handler across a `yield` declines the same way a standalone generator
   does. Native
   static imports and reexports work, and a local `export const`, an

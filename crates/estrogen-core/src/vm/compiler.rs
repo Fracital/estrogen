@@ -2015,20 +2015,15 @@ impl Compiler {
                     self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 2);
                     self.compile_class(class, None, Some(pack_addr(0, slot)))?;
                     self.close_scope();
-                } else if !self.keep_names {
-                    // The chunk observes no callable name, so every class name is
-                    // dropped to the empty string anyway (see `add_class`). An
-                    // anonymous class expression then compiles with no inferred
-                    // name and nothing can tell the difference.
-                    self.compile_class(class, None, None)?;
                 } else {
-                    // The chunk reads a callable name, so a wrong inferred name
-                    // would be observable. A named-evaluation position that infers
-                    // a non-empty name (a declarator, a field, or an identifier
-                    // assignment) is compiled with that name by its own path; a
-                    // bare position here would infer the empty string, but to stay
-                    // safe the rarer observed case still declines.
-                    return Err(Unsupported("anonymous class name inference"));
+                    // A bare anonymous class expression reaches this arm only
+                    // outside a named-evaluation position: a declarator, a field,
+                    // or a plain identifier assignment routes through
+                    // `compile_named_expr` with its inferred name. Outside those,
+                    // `(class {}).name` is the empty string by spec, so compiling
+                    // with no inferred name matches native whether or not the chunk
+                    // observes a callable name.
+                    self.compile_class(class, None, None)?;
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => {
@@ -2198,13 +2193,26 @@ impl Compiler {
                             self.emit1("PUSH_CONST", i as i64);
                         }
                     }
-                    self.compile_expr(&p.value)?;
                     if computed_key {
+                        // A computed key names its anonymous class/function value
+                        // at run time, which this path cannot do, so an observed
+                        // name declines rather than ship the empty string.
+                        if self.keep_names && is_anonymous_class(&p.value) {
+                            return Err(Unsupported("anonymous class under a computed key"));
+                        }
+                        self.compile_expr(&p.value)?;
                         self.emit0("OBJ_SET_DYN");
                     } else {
-                        let i = self
-                            .consts
-                            .add_str(static_key.as_deref().expect("static key"));
+                        let key = static_key.as_deref().expect("static key");
+                        // A static-key data property names an anonymous class or
+                        // function value after its key. `__proto__:` sets the
+                        // prototype and triggers no named evaluation.
+                        if key == "__proto__" {
+                            self.compile_expr(&p.value)?;
+                        } else {
+                            self.compile_named_expr(&p.value, key)?;
+                        }
+                        let i = self.consts.add_str(key);
                         self.emit1("OBJ_SET", i as i64);
                     }
                 }
@@ -3006,6 +3014,12 @@ impl Compiler {
     /// default. This is the per-leaf default of `{ a = 1 }` and `[a = 2]`, which
     /// applies only to `undefined`, not to `null` or other falsy values.
     fn apply_default(&mut self, default: &Expression<'_>) -> R<()> {
+        // A default value names an anonymous class after its binding, which this
+        // path does not know here, so an observed name declines rather than ship
+        // the empty string. A dropped-name chunk compiles it with no name.
+        if self.keep_names && is_anonymous_class(default) {
+            return Err(Unsupported("anonymous class as a default value"));
+        }
         self.emit0("DUP");
         self.emit0("PUSH_UNDEF");
         self.emit0("SEQ");
@@ -3976,6 +3990,14 @@ fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> R<&'a str> {
 /// bindings. A `const` is never reassigned, so the wrapper can re-export its
 /// final value after the module runs without missing a later mutation. Every
 /// other export declaration, and `export { ... }` specifiers, decline.
+/// Whether an expression is an anonymous class expression, whose `.name` a
+/// named-evaluation position would set to its binding or key. In a position that
+/// cannot supply that name here, an observed-name chunk declines instead of
+/// shipping the empty string.
+fn is_anonymous_class(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::ClassExpression(class) if class.id.is_none())
+}
+
 fn export_const_declaration<'a, 'b>(
     ex: &'b oxc_ast::ast::ExportDeclaration<'a>,
 ) -> R<&'b oxc_ast::ast::VariableDeclaration<'a>> {

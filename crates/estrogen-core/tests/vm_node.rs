@@ -213,6 +213,13 @@ const CLASSES: &[&str] = &[
     "class C { constructor() { this.seen = this.x; } x = 9; } new C().seen",
     "class C { static name = 'renamed'; static value; } [C.name, C.value, Object.getOwnPropertyDescriptor(C, 'name').enumerable]",
     "const Named = class { x = 2; }; [Named.name, new Named().x]",
+    // A bare anonymous class expression (not a named-evaluation position) has an
+    // empty `.name`; each case reads `.name`, so the chunk keeps names.
+    "const arr = [class { m() { return 5; } }]; [arr[0].name, new arr[0]().m()]",
+    "function nameOf(c) { return c.name; } [nameOf(class {}), nameOf(class Tagged {})]",
+    "const C = class {}; [(class {}).name, C.name, (class Keep {}).name]",
+    // a static-key object property names its anonymous class value after the key
+    "const object = { C: class { m() { return 3; } } }; [object.C.name, new object.C().m()]",
     "const Outer = class Inner { static self = Inner; m() { return Inner.name; } }; [Outer.name, Outer.self === Outer, new Outer().m(), typeof Inner]",
     "let read; { class Scoped { x = 3; m() { return Scoped.name; } } read = () => new Scoped().m(); } read()",
     "class C { x = () => this; } const c = new C(); c.x() === c",
@@ -841,10 +848,11 @@ fn unsupported_constructs_decline() {
         // handler across a yield, the same limit a standalone generator has
         "class C { *g() { try { yield 1; } finally {} } }",
         "class C { async *g() { for (const x of [1]) yield x; } }",
-        // an anonymous class in a bare position (here an object-property value)
-        // whose name the chunk then reads still declines, since the inferred name
-        // would be observable and this path compiles it as the empty string
-        "const object = { C: class {} }; object.C.name",
+        // an anonymous class under a computed key, or as a default value, names
+        // itself after the key/binding at run time; this path cannot name it, so
+        // an observed name still declines rather than ship the empty string
+        "const k = 'C'; const object = { [k]: class {} }; object.C.name",
+        "function f(C = class {}) { return C.name; } f()",
         // a generator (sync or async) declines when its own frame would hold a
         // handler across a yield (try, for-of, for-in)
         "function* g() { try { yield 1; } finally {} }",
