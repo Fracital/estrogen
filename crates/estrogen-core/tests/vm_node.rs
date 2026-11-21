@@ -136,6 +136,8 @@ const FUNCTIONS: &[&str] = &[
     "function f(x){var x; return x;} f(13)",
     "function f(){var x=5; var x; return x;} f()",
     "function f(){var x=1; {var x=7;} return x;} f()",
+    "function f(){ L: { var x = 5; break L; } return x; } f()",
+    "function f(){ outer: for (var i = 0; i < 3; i++) { var last = i; } return [i, last]; } f()",
     "function f(){for(var i=0;i<3;i++){} return i;} f()",
     "function f(){const funcs=[]; for(var i=0;i<3;i++){funcs.push(()=>i);} return funcs.map(g=>g());} f()",
     "function f(){var x=1; function update(){x=x+2;} update(); return x;} f()",

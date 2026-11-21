@@ -2778,6 +2778,9 @@ fn collect_function_var_stmt(stmt: &Statement<'_>, names: &mut Vec<String>) -> R
                 collect_function_vars(&finalizer.body, names)?;
             }
         }
+        Statement::LabeledStatement(labeled) => {
+            collect_function_var_stmt(&labeled.body, names)?;
+        }
         // Nested functions and classes have separate var environments. Other
         // unrecognized statements are rejected by the actual compiler.
         _ => {}
