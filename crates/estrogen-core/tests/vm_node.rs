@@ -977,6 +977,84 @@ fn vm_module_context_matches_native() {
     }
 }
 
+/// A local `export { a as b }` list and `export default` compile to VM bytecode,
+/// and an importer sees the same exports as from the native source. Each module
+/// is imported from a temp file, once as the original source and once as the VM
+/// chunk, and the observed exports are compared.
+#[test]
+fn vm_local_export_lists_and_default_match_native() {
+    if !node_available("vm_local_export_lists_and_default_match_native") {
+        return;
+    }
+    // (module source, a JS expression over the imported namespace `m`).
+    let cases = [
+        // An aliased export list beside a default expression: the list reads the
+        // local bindings `a`/`b`, the default evaluates `a + b()`.
+        (
+            "const a = 1; function b(){ return 2 } class C {}; export { a, b as bb }; export default a + b();",
+            "[m.a, m.bb, m.default]",
+        ),
+        // `export default function(){}`: the default is a callable.
+        (
+            "export default function(){ return 42 }",
+            "[typeof m.default, m.default()]",
+        ),
+        // `export default class {}`: the default constructs and its method runs.
+        (
+            "export default class { m(){ return 7 } }",
+            "[typeof m.default, new m.default().m()]",
+        ),
+        // `export default <identifier>`: the default is the object value.
+        (
+            "const x = { k: 9 }; export default x;",
+            "[m.default.k]",
+        ),
+        // `export { v as default }`: the specifier form of a default export.
+        ("const v = 5; export { v as default };", "[m.default]"),
+    ];
+    for (i, (source, observe)) in cases.iter().enumerate() {
+        let output = try_compile_chunk(
+            source,
+            &Options {
+                seed: Some(b"vm-exports".to_vec()),
+                ..Options::default()
+            },
+        )
+        .expect("VM export compilation failed")
+        .unwrap_or_else(|| panic!("VM declined export module: {source}"));
+        assert!(output.contains("JSON.parse("), "not VM bytecode: {output}");
+
+        let native = import_namespace(source, observe, &format!("exp-native-{i}"));
+        let vm = import_namespace(&output, observe, &format!("exp-vm-{i}"));
+        assert_eq!(
+            native.0, vm.0,
+            "export mismatch for {source}\n{output}\nnative stderr: {}\nvm stderr: {}",
+            native.1, vm.1
+        );
+    }
+}
+
+/// Write `module_src` to a temp `.mjs`, import it from a sibling runner module,
+/// and return the JSON of `observe` over the namespace `m`, plus node's stderr.
+fn import_namespace(module_src: &str, observe: &str, tag: &str) -> (String, String) {
+    let mut chunk = std::env::temp_dir();
+    chunk.push(format!(
+        "estrogen-vm-chunk-{}-{tag}.mjs",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&chunk).expect("create chunk");
+        f.write_all(module_src.as_bytes()).expect("write chunk");
+    }
+    let chunk_name = chunk.file_name().unwrap().to_str().unwrap().to_string();
+    let runner =
+        format!("import * as m from './{chunk_name}';\nconsole.log(JSON.stringify({observe}));");
+    let (ok, stdout, stderr) = run_node(&runner, tag);
+    std::fs::remove_file(&chunk).ok();
+    assert!(ok, "node import failed for {module_src}: {stderr}");
+    (stdout, stderr)
+}
+
 #[test]
 fn static_imports_use_native_linking_and_vm_bytecode() {
     if !node_available("static_imports_use_native_linking_and_vm_bytecode") {

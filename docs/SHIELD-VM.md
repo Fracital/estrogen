@@ -399,9 +399,12 @@ Falls back (declines, so the literal and name passes run instead):
   member, and a spread in `super()`. An async or generator method whose own body
   holds a handler across a `yield` declines the same way a standalone generator
   does. Native
-  static imports and reexports work, but the VM's full module loader is not
-  ported, so a local export of a value computed in the VM beyond the simple
-  cases takes the fallback.
+  static imports and reexports work, and a local `export const`, an
+  `export { a as b }` list, and `export default` compile through the hybrid
+  wrapper: the VM writes each binding's final value to the exports object, which
+  the wrapper re-exports. A `let` export reassigned after an importer reads it
+  reflects only that final value, since the full live-binding loader is not
+  ported.
 - A labeled `break`/`continue` across a `try`, an escaping `break`/`continue`
   out of a `for`/`of` (its iterator close is not routed through the finally
   chain), and a `break`/`continue` inside a `finally` that leaves it (which would
@@ -480,9 +483,11 @@ does, is still a large amount of further work. In rough dependency order:
    lexical binding, and the conservative closure check that makes a
    `for (let ...)` containing a `for`/`of`, `try`, or labeled statement decline.
 3. ES modules and the loader: static imports and native reexports have a hybrid
-   wrapper now. Locally declared exports, the module descriptor (`imports`,
-   `exports`, `reexports`, `deps`, `exportSlots`), the module ops, and the shield
-   `loader-template.js` still need a full port. A real Vite graph also has
+   wrapper now, and local export declarations, `export { a as b }` lists, and
+   `export default` re-export their final values through it. The full
+   live-binding loader (the module descriptor `imports`, `exports`, `reexports`,
+   `deps`, `exportSlots`, the module ops, and the shield `loader-template.js`)
+   still needs a port. A real Vite graph also has
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
 4. The rest of the class surface: private state, computed method, field, and

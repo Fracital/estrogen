@@ -326,17 +326,41 @@ fn emit_chunk(
         setup.push_str(&format!("const {exports_name}=Object.create(null);"));
         opts.push(format!("exports:{exports_name}"));
         // The VM wrote each export's final value into the exports object during
-        // the run above; re-export them from native const bindings so a consumer
-        // links to them. Exports are const, so the value is settled.
-        let bindings: Vec<String> = module
-            .exports
-            .iter()
-            .map(|name| {
-                let literal = serde_json::to_string(name).expect("identifier JSON");
-                format!("{name}={exports_name}[{literal}]")
-            })
-            .collect();
-        export_tail = format!("export const {};", bindings.join(","));
+        // the run above; re-export them so a consumer links to them. A plain
+        // identifier name re-exports as a const binding, which also makes the
+        // name readable in the module (as `export const` does). `default`, a
+        // reserved word, or a string export name cannot be a const binding, so
+        // each binds a fresh local and re-exports through a specifier, and
+        // `default` through `export default`. The value is settled by here.
+        let mut const_bindings = Vec::new();
+        let mut spec_decls = Vec::new();
+        let mut spec_exports = Vec::new();
+        let mut default_literal = None;
+        for (i, name) in module.exports.iter().enumerate() {
+            let literal = serde_json::to_string(name).expect("export name JSON");
+            if name == "default" {
+                default_literal = Some(literal);
+            } else if is_plain_identifier_name(name) && !is_reserved_word(name) {
+                const_bindings.push(format!("{name}={exports_name}[{literal}]"));
+            } else {
+                let tmp = fresh(&format!("{exports_name}x{i}"), source, &pool_name);
+                spec_decls.push(format!("{tmp}={exports_name}[{literal}]"));
+                spec_exports.push(format!("{tmp} as {}", export_name_token(name)));
+            }
+        }
+        if !const_bindings.is_empty() {
+            export_tail.push_str(&format!("export const {};", const_bindings.join(",")));
+        }
+        if !spec_decls.is_empty() {
+            export_tail.push_str(&format!(
+                "const {};export{{{}}};",
+                spec_decls.join(","),
+                spec_exports.join(",")
+            ));
+        }
+        if let Some(literal) = default_literal {
+            export_tail.push_str(&format!("export default {exports_name}[{literal}];"));
+        }
     }
     let argument = if opts.is_empty() {
         String::new()
@@ -356,6 +380,82 @@ fn emit_chunk(
         imports = imports.statements,
         runtime = runtime_iife_pruned(used_opcodes),
     ))
+}
+
+/// The exported-name token in an `export { local as <token> }` specifier. A
+/// plain identifier is written bare, which keeps a reserved word such as
+/// `default` valid in this position; any other name becomes a string-literal
+/// export name.
+fn export_name_token(name: &str) -> String {
+    if is_plain_identifier_name(name) {
+        name.to_string()
+    } else {
+        serde_json::to_string(name).expect("export name JSON")
+    }
+}
+
+/// Whether `name` cannot be a `const` binding in the module wrapper, so it needs
+/// the specifier export form. Covers the JS reserved words and the strict-mode
+/// restricted names (`eval`, `arguments`); the wrapper is always a strict module.
+/// A few contextual words are included conservatively, which only chooses the
+/// specifier form for them, never wrong output.
+fn is_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "do" | "if"
+            | "in"
+            | "for"
+            | "let"
+            | "new"
+            | "try"
+            | "var"
+            | "case"
+            | "else"
+            | "enum"
+            | "eval"
+            | "null"
+            | "this"
+            | "true"
+            | "void"
+            | "with"
+            | "await"
+            | "break"
+            | "catch"
+            | "class"
+            | "const"
+            | "false"
+            | "super"
+            | "throw"
+            | "while"
+            | "yield"
+            | "delete"
+            | "export"
+            | "import"
+            | "return"
+            | "static"
+            | "switch"
+            | "typeof"
+            | "default"
+            | "extends"
+            | "finally"
+            | "continue"
+            | "debugger"
+            | "function"
+            | "arguments"
+            | "instanceof"
+    )
+}
+
+/// Whether `name` is a plain ASCII identifier the wrapper can write bare. A
+/// name with any other character (a hyphen, a dot, a unicode letter) takes the
+/// string-literal export form instead.
+fn is_plain_identifier_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c == '$' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
 }
 
 /// The runtime execution core as an inlinable expression that evaluates to the

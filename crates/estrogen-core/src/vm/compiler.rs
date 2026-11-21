@@ -41,11 +41,11 @@ use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression, AssignmentOperator,
     AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BinaryOperator,
     BindingPattern, ChainElement, ChainExpression, Class, ClassElement, ComputedMemberExpression,
-    Expression, ForStatement, ForStatementInit, ForStatementLeft, FormalParameters, Function,
-    IfStatement, LabeledStatement, LogicalOperator, MemberExpression, MethodDefinitionKind,
-    ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
-    StaticMemberExpression, SwitchStatement, TryStatement, UnaryOperator, UpdateOperator,
-    VariableDeclarationKind,
+    ExportDefaultDeclarationKind, Expression, ForStatement, ForStatementInit, ForStatementLeft,
+    FormalParameters, Function, IfStatement, ImportOrExportKind, LabeledStatement, LogicalOperator,
+    MemberExpression, MethodDefinitionKind, ModuleExportName, ObjectPropertyKind, Program,
+    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, StaticMemberExpression,
+    SwitchStatement, TryStatement, UnaryOperator, UpdateOperator, VariableDeclarationKind,
 };
 use oxc_ast_visit::Visit;
 
@@ -80,6 +80,7 @@ pub fn compile_program(program: &Program<'_>, seed: &str, known_module: bool) ->
         uses_import_meta: false,
         uses_dynamic_import: false,
         exports: Vec::new(),
+        export_writes: Vec::new(),
         keep_names: names_observable(program),
     };
     let main_index = c.compile_main(program, known_module)?;
@@ -196,7 +197,16 @@ struct Compiler {
     /// in declaration order. The wrapper uses these to pass the module context.
     uses_import_meta: bool,
     uses_dynamic_import: bool,
+    /// The public names the module exports, in the order discovered. The wrapper
+    /// re-exports each from the exports object the VM fills. A `default` entry is
+    /// re-exported with `export default` instead of a const binding.
     exports: Vec<String>,
+    /// Each deferred export writeback as `(local binding, public name)`. The main
+    /// loads the local binding and stores it under the public name at the end of
+    /// the run. An aliased `export { a as b }` loads `a` and exports `b`; a plain
+    /// `export const a` or `export { a }` has the two the same. `export default`
+    /// is written inline at its statement, so it is not in this list.
+    export_writes: Vec<(String, String)>,
     /// Whether the chunk observes a callable's name. When false, every function
     /// and class name is dropped from the emitted program, so a decoded program
     /// carries no original identifier and `fn.name`/`constructor.name` read as
@@ -261,11 +271,13 @@ impl Compiler {
             ));
         }
         // After the body runs, write each exported binding's final value to the
-        // module exports object the wrapper re-exports. Exports are const, so the
-        // value is final here.
-        for name in self.exports.clone() {
-            self.emit_load_name(&name)?;
-            let idx = self.consts.add_str(&name);
+        // module exports object the wrapper re-exports. A `const`/`let`/`function`
+        // binding has settled by here; a `let` reassigned later is exported as its
+        // final value, which the snapshot model approximates. `export default` is
+        // not in this list; it was written inline at its own statement.
+        for (local, public) in self.export_writes.clone() {
+            self.emit_load_name(&local)?;
+            let idx = self.consts.add_str(&public);
             self.emit1("EXPORT_BINDING", idx as i64);
         }
         self.emit0("HALT");
@@ -687,6 +699,55 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile the value of an `export default` declaration onto the stack. A
+    /// function or class declares no module binding here (its name is only
+    /// self-referential), so it compiles as a value; every other form is an
+    /// expression.
+    fn compile_export_default(&mut self, decl: &ExportDefaultDeclarationKind<'_>) -> R<()> {
+        match decl {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                let fb = func
+                    .body
+                    .as_ref()
+                    .ok_or(Unsupported("function without a body"))?;
+                let name = func.id.as_ref().map(|id| id.name.as_str().to_string());
+                let idx = self.compile_function(
+                    &func.params,
+                    FnBody::Block(&fb.statements),
+                    name,
+                    false,
+                    func.r#async,
+                    func.generator,
+                )?;
+                self.emit1("MAKE_FUNC", idx as i64);
+                Ok(())
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                // A named default class binds its own name in a wrapper scope for
+                // self-reference, the same as a named class expression.
+                if let Some(id) = &class.id {
+                    self.open_scope();
+                    let slot = self.add_local(id.name.as_str());
+                    self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 2);
+                    self.compile_class(class, None, Some(pack_addr(0, slot)))?;
+                    self.close_scope();
+                } else {
+                    self.compile_class(class, None, None)?;
+                }
+                Ok(())
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                Err(Unsupported("export default interface"))
+            }
+            _ => {
+                let expr = decl
+                    .as_expression()
+                    .ok_or(Unsupported("export default declaration"))?;
+                self.compile_expr(expr)
+            }
+        }
+    }
+
     fn predeclare_vars(&mut self, stmts: &[Statement<'_>]) -> R<()> {
         let mut var_names = Vec::new();
         collect_function_vars(stmts, &mut var_names)?;
@@ -777,6 +838,8 @@ impl Compiler {
                         let slot = self.add_local(id.name.as_str());
                         self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
                         self.exports.push(id.name.as_str().to_string());
+                        self.export_writes
+                            .push((id.name.as_str().to_string(), id.name.as_str().to_string()));
                     }
                 }
                 _ => {}
@@ -963,15 +1026,37 @@ impl Compiler {
             Statement::FunctionDeclaration(_) => Err(Unsupported(
                 "function declaration outside a statement-list top",
             )),
-            // Name the statement that declined, so the VM trace is actionable
-            // instead of a bare "statement outside the subset". A local
-            // `export { a as b }` list and `export default` are the common ones
-            // (a re-export, `export const`, and `import` compile at the top).
-            Statement::ExportNamedDeclaration(_) => {
-                Err(Unsupported("export list statement outside the subset"))
+            // A local `export { a, b as c }` list. The specifiers name bindings
+            // already declared in this module; record each as a deferred export
+            // writeback that the main emits at the end, mapping the local binding
+            // to its public name. A re-export (`export { x } from 'm'`) is a
+            // separate statement the native wrapper keeps; this arm is only the
+            // local list, which carries no `source`.
+            Statement::ExportNamedDeclaration(decl) if top_level => {
+                if decl.export_kind != ImportOrExportKind::Value {
+                    // `export type { T }` emits nothing at runtime.
+                    return Ok(());
+                }
+                for spec in &decl.specifiers {
+                    if spec.export_kind != ImportOrExportKind::Value {
+                        continue;
+                    }
+                    let local = module_export_name(&spec.local)?;
+                    let public = module_export_name(&spec.exported)?;
+                    self.exports.push(public.to_string());
+                    self.export_writes
+                        .push((local.to_string(), public.to_string()));
+                }
+                Ok(())
             }
-            Statement::ExportDefaultDeclaration(_) => {
-                Err(Unsupported("export default statement outside the subset"))
+            // `export default <expr|function|class>`. Evaluate the value here, in
+            // module order, and write it to the exports object under `default`.
+            Statement::ExportDefaultDeclaration(ex) if top_level => {
+                self.compile_export_default(&ex.declaration)?;
+                let idx = self.consts.add_str("default");
+                self.emit1("EXPORT_BINDING", idx as i64);
+                self.exports.push("default".to_string());
+                Ok(())
             }
             Statement::ForOfStatement(_) => {
                 Err(Unsupported("for-await-of loop outside the subset"))
@@ -3515,6 +3600,21 @@ fn is_top_level_declaration(statement: &Statement<'_>) -> bool {
             | Statement::ClassDeclaration(_)
             | Statement::VariableDeclaration(_)
     )
+}
+
+/// The spelling of one side of an export specifier. A local is an identifier
+/// reference; a public name is an identifier or a string literal (`export { a as
+/// "x" }`). A string with a lone surrogate (only a built AST can hold one)
+/// declines.
+fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> R<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(id) => Ok(id.name.as_str()),
+        ModuleExportName::IdentifierReference(id) => Ok(id.name.as_str()),
+        ModuleExportName::StringLiteral(s) => s
+            .value
+            .as_str()
+            .ok_or(Unsupported("export name with a lone surrogate")),
+    }
 }
 
 /// A local `export <decl>` is supported only for `const` with plain identifier
