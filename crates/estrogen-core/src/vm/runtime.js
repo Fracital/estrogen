@@ -1489,27 +1489,42 @@
 						configurable: true,
 					});
 				} else {
-					const fn = conciseFn(kind + ' ' + key, def);
+					// An accessor's name is `get <key>`/`set <key>`. A symbol key
+					// renders as `[<description>]`, or the empty string when it has
+					// no description, which plain concatenation cannot produce.
+					const keyName =
+						typeof key === 'symbol'
+							? key.description === undefined
+								? ''
+								: '[' + key.description + ']'
+							: key;
+					const fn = conciseFn(kind + ' ' + keyName, def);
 					Object.defineProperty(fn, 'length', {
 						value: def.p || 0,
 						configurable: true,
 					});
-					const mapKey = (method.static ? 'S:' : 'I:') + key;
-					let acc = accessors.get(mapKey);
+					// Key the map by the raw key so a symbol key works, with a
+					// static and an instance bucket since both may share one key.
+					let acc = accessors.get(key);
 					if (!acc) {
-						acc = { target, key };
-						accessors.set(mapKey, acc);
+						acc = {};
+						accessors.set(key, acc);
 					}
-					acc[kind] = fn;
+					const slot = method.static ? 'S' : 'I';
+					if (!acc[slot]) acc[slot] = { target, key };
+					acc[slot][kind] = fn;
 				}
 			}
 			for (const acc of accessors.values()) {
-				Object.defineProperty(acc.target, acc.key, {
-					get: acc.get,
-					set: acc.set,
-					enumerable: false,
-					configurable: true,
-				});
+				for (const bucket of [acc.I, acc.S]) {
+					if (!bucket) continue;
+					Object.defineProperty(bucket.target, bucket.key, {
+						get: bucket.get,
+						set: bucket.set,
+						enumerable: false,
+						configurable: true,
+					});
+				}
 			}
 			if (desc.bind !== null) {
 				const slot = scopeAt(classScope, desc.bind >>> 16).slots[

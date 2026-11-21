@@ -627,14 +627,10 @@ impl Compiler {
                             MethodDefinitionKind::Constructor => unreachable!(),
                         };
                         // A computed key is evaluated at class definition and read
-                        // from the keys array by index. A computed accessor key
-                        // would need symbol-safe `get`/`set` naming, so only a
-                        // plain computed method key is ported; a computed accessor
-                        // still declines.
+                        // from the keys array by index. A computed getter or setter
+                        // key works the same way; the runtime installs the accessor
+                        // under the evaluated key, including a symbol key.
                         let (key, ckey) = if method.computed {
-                            if !matches!(method.kind, MethodDefinitionKind::Method) {
-                                return Err(Unsupported("computed class accessor key"));
-                            }
                             let ke = method
                                 .key
                                 .as_expression()

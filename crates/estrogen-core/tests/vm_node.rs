@@ -220,6 +220,13 @@ const CLASSES: &[&str] = &[
     "const C = class {}; [(class {}).name, C.name, (class Keep {}).name]",
     // a static-key object property names its anonymous class value after the key
     "const object = { C: class { m() { return 3; } } }; [object.C.name, new object.C().m()]",
+    // a computed getter/setter key on a class, including a get/set pair, a static
+    // accessor, a symbol key, and the accessor's `get <key>`/`set <key>` name
+    "const k = 'x'; class K { get [k]() { return 9; } set [k](v) { this._v = v; } } const o = new K(); const r = o.x; o.x = 5; [r, o._v]",
+    "const k = 'y'; class K { static get [k]() { return 7; } static set [k](v) { this.saved = v; } } const r = K.y; K.y = 3; [r, K.saved]",
+    "const s = Symbol('s'); class K { get [s]() { return 42; } } [new K()[s]]",
+    "const k = 'x'; class K { get [k]() { return 1; } } Object.getOwnPropertyDescriptor(K.prototype, 'x').get.name",
+    "const sy = Symbol('d'); class K { get [sy]() { return 1; } } const d = Object.getOwnPropertyDescriptor(K.prototype, sy); d.get.name",
     "const Outer = class Inner { static self = Inner; m() { return Inner.name; } }; [Outer.name, Outer.self === Outer, new Outer().m(), typeof Inner]",
     "let read; { class Scoped { x = 3; m() { return Scoped.name; } } read = () => new Scoped().m(); } read()",
     "class C { x = () => this; } const c = new C(); c.x() === c",
@@ -839,9 +846,6 @@ fn unsupported_constructs_decline() {
     let unsupported = [
         "var z = 1; z",
         "import x from './y.js'; x",
-        // a computed class accessor key still declines (symbol-safe get/set
-        // naming is not ported), though a computed method or field key compiles
-        "class C { get [Math.random()]() { return 1; } }",
         "class C { #m() { return 1; } }",
         "class C { static #s = 1; }",
         // an async or generator method's body still declines when it would hold a

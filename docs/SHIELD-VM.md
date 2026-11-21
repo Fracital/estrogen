@@ -401,10 +401,13 @@ falls back. The subset:
 
 Falls back (declines, so the literal and name passes run instead):
 
-- A decorated class, a computed class accessor key, private class members, and a
-  computed super member (`super[x]`). A computed method or field key compiles,
-  each key expression evaluated in source order into the array BUILD_CLASS_DYN
-  reads; a computed object-literal getter or setter key compiles too. A spread in
+- A decorated class, private class members, and a
+  computed super member (`super[x]`). A computed method, field, getter, or setter
+  key compiles, each key expression evaluated in source order into the array
+  BUILD_CLASS_DYN reads; the runtime installs an accessor under the evaluated key,
+  including a symbol key, whose `get <key>`/`set <key>` name renders a symbol as
+  `[<description>]`. A computed object-literal getter or setter key compiles too.
+  A spread in
   `super()` compiles through SUPER_CALL_APPLY, and an anonymous class expression
   compiles, taking its name from an identifier assignment, a declarator, or a
   static object-property key, and the empty string in a bare position, the way a
@@ -512,8 +515,8 @@ does, is still a large amount of further work. In rough dependency order:
    still needs a port. A real Vite graph also has
    third-party code with unsupported syntax, so the main estro.help editor
    bundle still uses literal-pool fallback.
-4. The rest of the class surface: private state, a computed class accessor key,
-   and a computed super member. Computed method and field keys, `async` and
+4. The rest of the class surface: private state and a computed super member.
+   Computed method, field, getter, and setter keys, `async` and
    generator methods, a spread in `super()`, and an anonymous class expression
    now compile. The common derived
    case (`extends`, `super(...)`, `super.method()`/`super.prop`, `new.target`,
