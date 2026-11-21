@@ -76,6 +76,11 @@ impl Pass for LiteralsPass {
                 &visitor.name,
                 ctx.options.top_level_names,
             )?);
+            edits.extend(super::deadcode::collect(
+                program,
+                ctx.source,
+                &visitor.name,
+            )?);
             super::assemble_js(&mut edits, ctx.source, program, visitor.pool);
             Ok(edits)
         })

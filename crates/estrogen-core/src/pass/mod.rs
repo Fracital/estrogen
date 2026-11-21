@@ -29,6 +29,7 @@
 // too.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod css;
+mod deadcode;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod html;
 pub mod literals;

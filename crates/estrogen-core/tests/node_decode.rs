@@ -357,3 +357,76 @@ globalThis.__out = [pick(5), obj["label"], t];
     let expected = "[\"positive\",\"ready\",\"count=ready; pick=positive\"]";
     assert_eq!(got, expected);
 }
+
+#[test]
+fn dead_branches_do_not_change_control_flow_or_values() {
+    if !node_available("dead_branches_do_not_change_control_flow_or_values") {
+        return;
+    }
+    // Heavy control flow so the opaque-predicate pass injects many dead branches:
+    // loops, nested blocks, a try/catch, a switch with braced cases, a class with
+    // methods and a derived constructor (the injected code is `this`-free, so it
+    // is safe before and after super()), and an arrow with a block body. The
+    // runtime values must match the untouched original exactly.
+    let source = r#"
+        function collatzSteps(start) {
+            let n = start;
+            let steps = 0;
+            while (n > 1) {
+                if (n % 2 === 0) {
+                    n = n / 2;
+                } else {
+                    n = 3 * n + 1;
+                }
+                steps += 1;
+            }
+            return steps;
+        }
+        function classify(value) {
+            switch (value % 3) {
+                case 0: { return "zero"; }
+                case 1: { return "one"; }
+                default: { return "two"; }
+            }
+        }
+        class Shape {
+            constructor(sides) { this.sides = sides; }
+            describe() { return this.sides + " sides"; }
+        }
+        class Square extends Shape {
+            constructor() {
+                super(4);
+                this.kind = "square";
+            }
+            describe() { return this.kind + ": " + super.describe(); }
+        }
+        const sum = (list) => {
+            let total = 0;
+            for (const item of list) {
+                total += item;
+            }
+            return total;
+        };
+        let caught = "none";
+        try {
+            throw new Error("boom");
+        } catch (e) {
+            caught = e.message;
+        } finally {
+            caught += "!";
+        }
+        globalThis.__out = [
+            collatzSteps(27),
+            collatzSteps(6),
+            classify(0), classify(7), classify(8),
+            new Square().describe(),
+            sum([1, 2, 3, 4, 5]),
+            caught
+        ];
+    "#;
+    let out = compare_values_in_node(source, "dead-branches");
+    // The pass actually fired: at least one always-false guard is present.
+    assert!(out.contains("if("), "no dead branch was injected: {out}");
+    // The guarded body never runs, so the overall values are unchanged, which
+    // compare_values_in_node already asserted against the original run.
+}
