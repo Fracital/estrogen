@@ -21,8 +21,8 @@
 //! rules read. estrogen edits the source by byte range; it does not reprint the AST.
 
 use oxc_ast::ast::{
-    ClassBody, ClassElement, Expression, PropertyKey, PropertyKind, StaticMemberExpression,
-    StringLiteral, TemplateLiteral,
+    BooleanLiteral, ClassBody, ClassElement, Expression, NumericLiteral, PropertyKey, PropertyKind,
+    StaticMemberExpression, StringLiteral, TemplateLiteral,
 };
 use oxc_ast::AstKind;
 use oxc_ast_visit::Visit;
@@ -51,6 +51,10 @@ impl Pass for LiteralsPass {
             let keys = FileKeys::new(ctx.options, ctx.source.as_bytes())?;
             let pool = PoolBuilder::for_program(keys, program)?;
             let name = pool.name().to_string();
+            // A per-file salt from the decoder name, which is derived from the
+            // seed and the file content, so the number and boolean disguises vary
+            // per file and per build. Each site mixes this with its span offset.
+            let salt = fnv1a(name.as_bytes());
             let mut visitor = LiteralVisitor {
                 source: ctx.source,
                 name,
@@ -59,6 +63,7 @@ impl Pass for LiteralsPass {
                 stack: Vec::new(),
                 restricted_depth: 0,
                 error: None,
+                salt,
             };
             visitor.visit_program(program);
             if let Some(err) = visitor.error {
@@ -82,6 +87,8 @@ struct LiteralVisitor<'a> {
     stack: Vec<AstKind<'a>>,
     restricted_depth: usize,
     error: Option<Error>,
+    /// Per-file seed for the number and boolean disguises.
+    salt: u64,
 }
 
 impl<'a> LiteralVisitor<'a> {
@@ -205,6 +212,52 @@ impl<'a> LiteralVisitor<'a> {
     /// Handle one string literal: skip it if its position requires it, convert a
     /// non-computed key to `[NAME(i)]`, otherwise replace the value with
     /// `NAME(i)`.
+    /// True when `span` is the non-computed key of its parent property, where an
+    /// expression form (`(40 + 2)`, `(!0)`) would be a syntax error.
+    fn is_property_key(&self, span: oxc_span::Span) -> bool {
+        match self.stack.last().copied() {
+            Some(AstKind::ObjectProperty(p)) => !p.computed && is_key(&p.key, span),
+            Some(AstKind::BindingProperty(p)) => !p.computed && is_key(&p.key, span),
+            Some(AstKind::PropertyDefinition(p)) => !p.computed && p.key.span() == span,
+            Some(AstKind::MethodDefinition(p)) => !p.computed && p.key.span() == span,
+            Some(AstKind::AssignmentTargetPropertyProperty(p)) => {
+                !p.computed && p.name.span() == span
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace a non-negative integer literal with an equal integer expression
+    /// (hex, an xor, or a sum), varied per site. The value is preserved exactly;
+    /// floats, bigints, a value past the safe integer range, and a numeric
+    /// property key are left alone.
+    fn handle_number(&mut self, lit: &NumericLiteral<'a>) {
+        let span = lit.span;
+        if self.is_property_key(span) {
+            return;
+        }
+        let v = lit.value;
+        if !(v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= 9_007_199_254_740_992.0) {
+            return;
+        }
+        let n = v as u64;
+        let text = obf_number(n, mix(self.salt, span.start as u64));
+        self.edits
+            .push(Edit::replace(span.start as usize, span.end as usize, text));
+    }
+
+    /// Replace `true`/`false` with a disguised equivalent (`(!0)`/`(!1)` or
+    /// `(!![])`/`(![])`), unless it is a boolean property key.
+    fn handle_boolean(&mut self, lit: &BooleanLiteral) {
+        let span = lit.span;
+        if self.is_property_key(span) {
+            return;
+        }
+        let text = obf_bool(lit.value, mix(self.salt, span.start as u64));
+        self.edits
+            .push(Edit::replace(span.start as usize, span.end as usize, text));
+    }
+
     fn handle_string(&mut self, lit: &StringLiteral<'a>) {
         let parent = match self.stack.last().copied() {
             Some(p) => p,
@@ -390,6 +443,8 @@ impl<'a> Visit<'a> for LiteralVisitor<'a> {
                 AstKind::StringLiteral(lit) => self.handle_string(lit),
                 AstKind::TemplateLiteral(tpl) => self.handle_template(tpl),
                 _ if self.restricted_depth != 0 => {}
+                AstKind::NumericLiteral(lit) => self.handle_number(lit),
+                AstKind::BooleanLiteral(lit) => self.handle_boolean(lit),
                 AstKind::StaticMemberExpression(m) => self.handle_static_member(m),
                 AstKind::ObjectProperty(p) if !p.computed && !p.shorthand => {
                     self.handle_static_key(&p.key, p.kind == PropertyKind::Init && !p.method);
@@ -445,6 +500,58 @@ fn is_key(key: &oxc_ast::ast::PropertyKey, span: oxc_span::Span) -> bool {
     key.span() == span
 }
 
+/// FNV-1a over bytes, for the per-file salt.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Mix the file salt with a site offset into a well-spread value (splitmix64),
+/// so the three bit-slices used to pick a disguise are independent.
+fn mix(salt: u64, offset: u64) -> u64 {
+    let mut z = salt
+        .wrapping_add(offset)
+        .wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// A parenthesized integer expression equal to `n`, chosen by `salt`. The value
+/// is exact: a hex rendering, an xor of two sub-2^31 halves (so JS's 32-bit
+/// signed `^` stays positive), or a sum of two positive parts. Always wrapped in
+/// parens so it is precedence-safe in any expression position.
+fn obf_number(n: u64, salt: u64) -> String {
+    match salt % 3 {
+        0 => format!("(0x{n:x})"),
+        1 if n < 0x8000_0000 => {
+            let a = (((salt >> 21) as u32) & 0x7fff_ffff) | 1;
+            let b = a ^ (n as u32);
+            format!("(0x{a:x}^0x{b:x})")
+        }
+        _ => {
+            // Split into two non-trivial positive parts when possible, so
+            // neither half is `n` itself.
+            let p = if n < 2 { 0 } else { 1 + (salt >> 33) % (n - 1) };
+            format!("({p}+{})", n - p)
+        }
+    }
+}
+
+/// A parenthesized boolean equivalent, varied by `salt`.
+fn obf_bool(value: bool, salt: u64) -> &'static str {
+    match (value, salt.is_multiple_of(2)) {
+        (true, true) => "(!0)",
+        (true, false) => "(!![])",
+        (false, true) => "(!1)",
+        (false, false) => "(![])",
+    }
+}
+
 /// The span of an expression.
 fn expression_span(expr: &Expression) -> oxc_span::Span {
     expr.span()
@@ -495,7 +602,9 @@ mod tests {
     #[test]
     fn identity_when_no_literals() {
         let opts = seeded(&[]);
-        let src = "const a = 1 + 2;";
+        // No string, number, or boolean to disguise, and a classic-script
+        // top-level binding the name pass leaves alone, so nothing is edited.
+        let src = "const a = b + c;";
         let ctx = FileContext::new("app.js", FileKind::Js, src, &opts);
         let edits = LiteralsPass.collect_edits(&ctx).unwrap();
         assert!(edits.is_empty());

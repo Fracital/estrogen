@@ -147,9 +147,10 @@ mod tests {
 
     #[test]
     fn source_with_no_literal_is_unchanged() {
-        let out = obfuscate_js("const a = 1 + 2;", &literal_opts(b"x")).unwrap();
+        // No string, number, or boolean to disguise, so the pass makes no edits.
+        let out = obfuscate_js("const a = b + c;", &literal_opts(b"x")).unwrap();
         assert_eq!(out.edits, 0);
-        assert_eq!(out.code, "const a = 1 + 2;");
+        assert_eq!(out.code, "const a = b + c;");
         assert!(out.map.is_none());
     }
 

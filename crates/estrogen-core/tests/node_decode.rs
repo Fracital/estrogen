@@ -141,6 +141,56 @@ fn numeric_members_and_class_fields_preserve_syntax_and_values() {
 }
 
 #[test]
+fn numbers_and_booleans_are_disguised_but_keep_their_values() {
+    if !node_available("numbers_and_booleans_are_disguised_but_keep_their_values") {
+        return;
+    }
+    // Integers and booleans in every ordinary position: arithmetic, array
+    // indices, bitwise, comparisons, logical operators, a computed key, and a
+    // numeric property key (which must stay a plain key). A float and a bigint
+    // stay untouched.
+    let source = r#"
+        const nums = [0, 1, 42, 255, 1000000, 2147483647];
+        const flags = [true, false];
+        const obj = { 42: "k", val: 7, [1 + 1]: "c" };
+        let sum = 0;
+        for (let i = 0; i < 10; i++) sum += i * 2;
+        const bits = (0xff & 0x0f) ^ 5;
+        const pi = 3.14;
+        const big = 9007199254740993n;
+        globalThis.__out = [
+            nums.reduce((x, y) => x + y, 0),
+            flags[0] && !flags[1],
+            flags[0] ? 100 : 200,
+            obj[42],
+            obj.val === 7,
+            [10, 20, 30][1],
+            sum, bits, pi, String(big),
+            255 > 254, 42 === 42
+        ];
+    "#;
+    let out = compare_values_in_node(source, "numbers-and-booleans");
+
+    // A boolean disguise and a numeric disguise both appear, so the literals
+    // were rewritten rather than left in the clear.
+    assert!(
+        out.contains("!0") || out.contains("!1") || out.contains("![]"),
+        "no boolean disguise appeared: {out}"
+    );
+    assert!(
+        out.contains("0x") || out.contains('^'),
+        "no numeric disguise appeared: {out}"
+    );
+    // The numeric property key stays a plain key, and the float and bigint are
+    // left alone.
+    assert!(out.contains("3.14"), "the float was altered: {out}");
+    assert!(
+        out.contains("9007199254740993n"),
+        "the bigint was altered: {out}"
+    );
+}
+
+#[test]
 fn emitted_decoder_round_trips_values_in_node() {
     if !node_available("emitted_decoder_round_trips_values_in_node") {
         return;

@@ -67,12 +67,15 @@ fn compare_module(source: &str, output: &str, expression: &str) {
 
 #[test]
 fn shadowed_locals_shorten_without_a_pool_and_keep_their_closures() {
+    // The two score bindings are initialized to floats, which the number
+    // disguise leaves untouched, so they stay a stable anchor for finding the
+    // mangled names below.
     let source = r#"export function collectScores(startingScoreForTeam) {
-        let runningScoreForTeam = 317;
+        let runningScoreForTeam = 317.5;
         const readOuter = () => runningScoreForTeam + startingScoreForTeam;
         const scores = [readBonus(), readOuter()];
         {
-            let runningScoreForTeam = 8;
+            let runningScoreForTeam = 8.5;
             scores.push(() => ++runningScoreForTeam);
         }
         var hoistedBonusForTeam = 6;
@@ -89,7 +92,8 @@ fn shadowed_locals_shorten_without_a_pool_and_keep_their_closures() {
     compare_module(source, &output, "api.collectScores(3)");
 
     // Find each binding by its initializer, not by the minifier's choice of name.
-    let declarations = Regex::new(r"\b(?:let|var|const)\s+([^\s=,;]+)\s*=\s*(?:317|8)\b").unwrap();
+    let declarations =
+        Regex::new(r"\b(?:let|var|const)\s+([^\s=,;]+)\s*=\s*(?:317\.5|8\.5)").unwrap();
     let names: Vec<_> = declarations
         .captures_iter(&output)
         .map(|c| c[1].len())
