@@ -151,6 +151,20 @@ reformatting it changes nothing a consumer depends on. The shipped runtime is on
 line of short names, with no comments, no opcode names, and nothing that spells
 `estrogen`, `createRuntime`, `ARITY`, or any handler name.
 
+The runtime is also tree-shaken per chunk. `runtime.js` defines a handler for
+every opcode, but a chunk dispatches only the opcodes its bytecode references, so
+each unused `HANDLERS[...]` assignment is weight in a prefix every VM chunk
+inlines. `Program::used_opcode_names` walks every function's code, maps each
+per-build byte back to its stable opcode through the layout, and collects the set
+the chunk actually uses; `prune_handlers` removes the assignment for every other
+opcode from the runtime source before `mangle_minify`. This is safe because the
+dispatch table fills a byte only when its handler is defined
+(`if (handler) handlers[byte] = handler`), so a removed handler leaves a trap
+slot, and a trap byte never appears in a code this program runs. A small chunk
+keeps a handful of handlers instead of all of them; `a_small_chunk_ships_a_pruned_runtime`
+asserts a tiny chunk's whole output is smaller than the full runtime alone and
+still runs in node.
+
 `embedded_runtime_has_no_comments` proves the embedded runtime has no comments,
 is one line with no run of two or more spaces, and still loads in node.
 `vm_chunk_runtime_is_mangled_and_names_free` compiles a VM chunk and asserts its

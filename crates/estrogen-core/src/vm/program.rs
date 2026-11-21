@@ -265,6 +265,31 @@ impl Program {
     pub fn into_json_string(self) -> String {
         self.into_json().to_string()
     }
+
+    /// The set of opcode names the program's bytecode actually references. Walk
+    /// every function's code, mapping each per-build byte back to its stable
+    /// opcode through the layout and skipping its operands by arity. The runtime
+    /// emitted for this chunk keeps only the handlers for these opcodes; every
+    /// other byte stays a trap slot that the code never reaches.
+    pub fn used_opcode_names(&self) -> std::collections::HashSet<&'static str> {
+        use super::opcodes::{arity, OP_NAMES};
+        // Per-build byte -> (stable opcode index, arity).
+        let mut by_byte: [(usize, usize); 256] = [(0, 0); 256];
+        for (index, name) in OP_NAMES.iter().enumerate() {
+            by_byte[self.layout.byte_of(name) as usize] = (index, arity(name));
+        }
+        let mut used = std::collections::HashSet::new();
+        for function in &self.functions {
+            let mut pos = 0usize;
+            while pos < function.code.len() {
+                let byte = (function.code[pos] as usize) & 0xff;
+                let (index, operands) = by_byte[byte];
+                used.insert(OP_NAMES[index]);
+                pos += 1 + operands;
+            }
+        }
+        used
+    }
 }
 
 #[cfg(test)]

@@ -1143,3 +1143,33 @@ fn unsupported_chunk_still_declines_at_the_api() {
         "an out-of-subset class chunk must decline to the fallback path"
     );
 }
+
+/// A chunk ships only the opcode handlers it uses. A tiny program references a
+/// handful of opcodes, so its whole emitted chunk (the pruned runtime, the pool
+/// decoder, and the program) is smaller than the full runtime alone, and it
+/// still runs correctly: no handler the program dispatches was dropped.
+#[test]
+fn a_small_chunk_ships_a_pruned_runtime() {
+    let opts = Options {
+        seed: Some(b"prune".to_vec()),
+        ..Options::default()
+    };
+    let chunk = try_compile_chunk("globalThis.__prune_r = 1 + 2 * 20;", &opts)
+        .unwrap()
+        .expect("the tiny chunk compiles to VM bytecode");
+    assert!(chunk.contains("JSON.parse("), "not a VM chunk: {chunk}");
+    let full = runtime_iife().len();
+    assert!(
+        chunk.len() < full,
+        "the pruned chunk ({}) should be smaller than the full runtime ({full})",
+        chunk.len(),
+    );
+
+    if !node_available("a_small_chunk_ships_a_pruned_runtime") {
+        return;
+    }
+    let script = format!("{chunk}\nconsole.log(globalThis.__prune_r);");
+    let (ok, stdout, stderr) = run_node(&script, "pruned-runtime");
+    assert!(ok, "the pruned chunk failed in node:\n{stderr}");
+    assert_eq!(stdout.trim(), "41", "pruned chunk ran wrong: {stdout}");
+}

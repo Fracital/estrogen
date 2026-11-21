@@ -158,8 +158,14 @@ pub fn try_compile_chunk(source: &str, options: &Options) -> Result<Option<Strin
         // promise the wrapper must await before it is considered evaluated.
         main_is_async: program.functions[program.main_index].is_async,
     };
+    // Which opcode handlers this chunk needs, computed before the program is
+    // consumed into JSON, so the emitted runtime drops the handlers it never
+    // dispatches.
+    let used = program.used_opcode_names();
     let json = program.into_json_string();
-    Ok(Some(emit_chunk(&json, source, options, &imports, &module)?))
+    Ok(Some(emit_chunk(
+        &json, source, options, &imports, &module, &used,
+    )?))
 }
 
 /// What the emitted wrapper must pass to the runtime beyond imported bindings:
@@ -259,6 +265,7 @@ fn emit_chunk(
     options: &Options,
     imports: &NativeImports,
     module: &ModuleContext,
+    used_opcodes: &HashSet<&'static str>,
 ) -> Result<String> {
     let mut keys = FileKeys::new(options, source.as_bytes())?;
     // The short generated name the chunk binds the runtime to, drawn from the
@@ -347,7 +354,7 @@ fn emit_chunk(
     Ok(format!(
         "/* {MARKER} */{imports}const {vm_name}={runtime};{decoder}{setup}{await_kw}{vm_name}(JSON.parse({pool_name}(0)){argument})();{export_tail}",
         imports = imports.statements,
-        runtime = runtime_iife(),
+        runtime = runtime_iife_pruned(used_opcodes),
     ))
 }
 
@@ -367,6 +374,71 @@ pub fn runtime_iife() -> String {
             printed.trim().trim_end_matches(';').trim_end().to_string()
         })
         .clone()
+}
+
+/// The runtime for one chunk, with the opcode handlers it never dispatches
+/// removed before mangling. The full runtime defines a handler for every
+/// opcode, but a chunk uses only a fraction, so each unused `HANDLERS[...]`
+/// assignment is pure weight in the prefix every VM chunk inlines. Removing them
+/// is safe: the dispatch table fills a byte only when its handler is defined
+/// (`if (handler) handlers[byte] = handler`), so a removed handler leaves a trap
+/// slot, and a trap byte never appears in a code this program runs. Not cached,
+/// because the kept set differs per chunk; the full `runtime_iife` stays for the
+/// tests that run every program through one runtime.
+fn runtime_iife_pruned(used_opcodes: &HashSet<&'static str>) -> String {
+    let pruned = prune_handlers(RUNTIME_JS, used_opcodes);
+    let printed = mangle_minify(&pruned);
+    printed.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+/// Remove each `HANDLERS[OP_X] = ...` statement whose opcode the chunk does not
+/// use. The handlers are top-level statements in the runtime IIFE at a single
+/// tab of indentation: a single-line form (`\tHANDLERS[OP_X] = ...;`) and a
+/// block form that opens with `{` and closes on a line that is exactly `\t};`,
+/// because a handler body is indented deeper. Nothing else in the runtime
+/// matches `\tHANDLERS[OP_`, so this touches only handler assignments.
+fn prune_handlers(src: &str, used_opcodes: &HashSet<&'static str>) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        match handler_opcode(line) {
+            Some(name) if !used_opcodes.contains(name) => {
+                if line.trim_end().ends_with("};") {
+                    // Single-line form: the whole assignment is this one line.
+                    i += 1;
+                } else {
+                    // Multi-line form, whether the first line opens the body (`{`)
+                    // or a multi-line parameter list (`(`). Drop through the one
+                    // line that is exactly `\t};`, which closes the statement.
+                    i += 1;
+                    while i < lines.len() && lines[i] != "\t};" {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(line);
+                i += 1;
+            }
+        }
+    }
+    out.join("\n")
+}
+
+/// The opcode name of a `\tHANDLERS[OP_<name>] = ...` assignment line, without
+/// the `OP_` prefix (so it matches `opcodes::OP_NAMES`), or `None` for any other
+/// line.
+fn handler_opcode(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("\tHANDLERS[OP_")?;
+    let end = rest.find(']')?;
+    if rest[end..].starts_with("] =") {
+        Some(&rest[..end])
+    } else {
+        None
+    }
 }
 
 /// Mangle every binding in a self-contained JS source and print it minified,
