@@ -843,8 +843,8 @@ fn unsupported_constructs_decline() {
         // a break or continue inside a finally that escapes it would abandon the
         // pending completion record, which is not ported, so it declines.
         "for (;;) { try { x(); } finally { continue; } }",
-        // a labeled jump across a try is not routed through the finally chain.
-        "outer: for (;;) { try { break outer; } finally {} }",
+        // a labeled jump that crosses a catch (not a finally) is not routed
+        "outer: for (;;) { try { break outer; } catch (e) {} }",
         // an escaping jump out of a for-of across a try would skip the iterator
         // close, so it declines.
         "for (const x of [1, 2]) { try { if (x === 1) break; } finally {} }",
@@ -1096,6 +1096,52 @@ fn vm_return_across_nested_iterators_matches_native() {
         assert_eq!(
             vm_out, native_out,
             "nested-iterator return behavior changed: {source}"
+        );
+    }
+}
+
+/// A labeled `break`/`continue` that crosses one or more `finally` blocks (but
+/// no for-of iterator) runs each crossed finally before transferring, using the
+/// same trampoline the unlabeled jump uses. Each source runs natively and as its
+/// VM chunk; the observed ordered log is compared.
+#[test]
+fn vm_labeled_jump_across_finally_matches_native() {
+    if !node_available("vm_labeled_jump_across_finally_matches_native") {
+        return;
+    }
+    let cases = [
+        // labeled break out of the outer loop from inside a try: the finally runs
+        // before the break transfers.
+        "const log = []; outer: for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { try { if (j === 1) break outer; log.push('b' + i + j); } finally { log.push('f' + i + j); } } } globalThis.__r = log;",
+        // labeled continue: each finally runs, the outer loop advances.
+        "const log = []; outer: for (let i = 0; i < 2; i++) { for (let j = 0; j < 3; j++) { try { if (j === 1) continue outer; log.push(i + '-' + j); } finally { log.push('f' + i + j); } } } globalThis.__r = log;",
+        // break across two nested finallys: inner then outer run in order.
+        "const log = []; L: for (let i = 0; i < 2; i++) { try { try { log.push('x' + i); if (i === 0) break L; } finally { log.push('in' + i); } } finally { log.push('out' + i); } } globalThis.__r = log;",
+        // a finally with a normal completion in between still runs its own finally
+        // on the way out, and the labeled break skips the rest.
+        "const log = []; top: for (let i = 0; i < 3; i++) { try { for (let k = 0; k < 2; k++) { try { if (i === 1) break top; } finally { log.push('k' + i + k); } } } finally { log.push('t' + i); } } globalThis.__r = log;",
+    ];
+    for (i, source) in cases.iter().enumerate() {
+        let full = format!("import 'data:text/javascript,';\n{source}");
+        let output = try_compile_chunk(
+            &full,
+            &Options {
+                seed: Some(b"vm-labeled-finally".to_vec()),
+                ..Options::default()
+            },
+        )
+        .expect("VM compile")
+        .unwrap_or_else(|| panic!("VM declined a labeled jump across a finally: {source}"));
+        assert!(output.contains("JSON.parse("), "not VM bytecode: {source}");
+        let native = format!("{full}\nconsole.log(JSON.stringify(globalThis.__r));");
+        let vm = format!("{output}\nconsole.log(JSON.stringify(globalThis.__r));");
+        let (ok_native, native_out, native_err) = run_node(&native, &format!("labeled-native-{i}"));
+        assert!(ok_native, "native labeled jump failed: {native_err}");
+        let (ok_vm, vm_out, vm_err) = run_node(&vm, &format!("labeled-vm-{i}"));
+        assert!(ok_vm, "VM labeled jump failed: {vm_err}");
+        assert_eq!(
+            vm_out, native_out,
+            "labeled jump across finally changed: {source}"
         );
     }
 }

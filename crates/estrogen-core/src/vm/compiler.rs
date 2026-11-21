@@ -3487,13 +3487,31 @@ impl Compiler {
             .rposition(|l| l.label.as_deref() == Some(label))
             .ok_or(Unsupported("labeled break target not found"))?;
         self.check_finally_escape(idx)?;
-        // Routing a labeled jump through a crossed try/finally is not ported;
-        // only unlabeled break/continue cross a try.
-        if self
-            .crossed_handlers(idx)
+        let crossed = self.crossed_handlers(idx);
+        let crosses_finally = crossed
             .iter()
-            .any(|h| !matches!(h, HandlerKind::Iterator))
-        {
+            .any(|h| matches!(h, HandlerKind::Finally { .. }));
+        let crosses_iterator = crossed.iter().any(|h| matches!(h, HandlerKind::Iterator));
+        let target_is_for_of = self.fns.last().expect("frame").loops[idx]
+            .iterator
+            .is_some_and(|i| i.handler_active);
+        // A labeled break that crosses a finally, with no for-of iterator crossed
+        // and a non-for-of target, routes through the same finally trampoline the
+        // unlabeled break uses: ABRUPT_JUMP runs each crossed finally, then a
+        // trampoline exits the leftover scopes and jumps to the loop exit.
+        if crosses_finally && !crosses_iterator && !target_is_for_of {
+            let target = self.fns.last().expect("frame").loops[idx].break_depth;
+            let site = self
+                .emit_escape_cleanup(idx, target)?
+                .expect("a crossed finally yields a trampoline jump");
+            self.fns.last_mut().expect("frame").loops[idx]
+                .break_sites
+                .push(site);
+            return Ok(());
+        }
+        // A crossed catch, or a finally combined with a for-of iterator, is not
+        // routed through the trampoline; decline.
+        if crossed.iter().any(|h| !matches!(h, HandlerKind::Iterator)) {
             return Err(Unsupported("labeled break across a try"));
         }
         // Close every active iterator of a loop this break fully exits, innermost
@@ -3536,11 +3554,28 @@ impl Compiler {
             // here.
             return Err(Unsupported("continue to a non-loop label"));
         }
-        if self
-            .crossed_handlers(idx)
+        let crossed = self.crossed_handlers(idx);
+        let crosses_finally = crossed
             .iter()
-            .any(|h| !matches!(h, HandlerKind::Iterator))
-        {
+            .any(|h| matches!(h, HandlerKind::Finally { .. }));
+        let crosses_iterator = crossed.iter().any(|h| matches!(h, HandlerKind::Iterator));
+        let target_is_for_of = self.fns.last().expect("frame").loops[idx]
+            .iterator
+            .is_some_and(|i| i.handler_active);
+        // A labeled continue that crosses a finally, with no for-of iterator
+        // crossed and a non-for-of target, routes through the finally trampoline
+        // like the unlabeled continue, landing at the loop's continue target.
+        if crosses_finally && !crosses_iterator && !target_is_for_of {
+            let target = self.fns.last().expect("frame").loops[idx].continue_depth;
+            let site = self
+                .emit_escape_cleanup(idx, target)?
+                .expect("a crossed finally yields a trampoline jump");
+            self.fns.last_mut().expect("frame").loops[idx]
+                .continue_sites
+                .push(site);
+            return Ok(());
+        }
+        if crossed.iter().any(|h| !matches!(h, HandlerKind::Iterator)) {
             return Err(Unsupported("labeled continue across a try"));
         }
         // Inner loops this continue fully exits have their iterators closed; the

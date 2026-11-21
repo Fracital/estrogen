@@ -414,15 +414,20 @@ Falls back (declines, so the literal and name passes run instead):
   the wrapper re-exports. A `let` export reassigned after an importer reads it
   reflects only that final value, since the full live-binding loader is not
   ported.
-- A labeled `break`/`continue` across a `try`, an escaping `break`/`continue`
-  out of a `for`/`of` (its iterator close is not routed through the finally
-  chain), and a `break`/`continue` inside a `finally` that leaves it (which would
-  abandon the pending completion). An unlabeled `break`/`continue` that escapes a
-  plain loop through a `try`/`catch` or `try`/`finally` compiles: a crossed catch
-  is popped and a crossed finally runs first, through `ABRUPT_JUMP`. A `return`
-  that leaves a `try` while a `for`/`of` iterator is still open; a `switch` case
-  that declares a lexical binding; and a labeled jump that would close more than
-  one `for`/`of` iterator at once.
+- An escaping `break`/`continue` out of a `for`/`of` across a `try` (its iterator
+  close is not routed through the finally chain), and a `break`/`continue` inside
+  a `finally` that leaves it (which would abandon the pending completion). An
+  unlabeled `break`/`continue` that escapes a plain loop through a `try`/`catch`
+  or `try`/`finally` compiles: a crossed catch is popped and a crossed finally
+  runs first, through `ABRUPT_JUMP`. A labeled `break`/`continue` compiles the
+  same way when it crosses a finally without also crossing a `for`/`of`; a labeled
+  jump across a bare catch, or one that also crosses a `for`/`of`, still declines.
+  Still declining: a `return` that leaves a `try` while a `for`/`of` iterator is
+  still open; a `switch` case that declares a lexical binding; and a labeled jump
+  that would close more than one `for`/`of` iterator at once. A `return` that
+  leaves more than one open `for`/`of` compiles: each iterator is closed innermost
+  first, and a `return()` that throws propagates while the outer iterators still
+  close.
 - A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
   inside an async generator; and a `for await` loop.
 - A `for (let ...)` whose update makes a closure. A test or body closure compiles:
