@@ -22,6 +22,8 @@ export default defineConfig({
 	integrations: [estrogen({ binaryPath: estrogenBin })],
 	vite: {
 		build: {
+			// Keep the standalone VM script as a file so estrogen can rewrite it.
+			assetsInlineLimit: 0,
 			rollupOptions: { output: hashedOutput },
 		},
 	},

@@ -10,7 +10,17 @@ repo="$(dirname "$web")"
 crate="$repo/crates/estrogen-wasm"
 pkg="$crate/pkg"
 
-wasm-pack build "$crate" --target web --out-dir pkg --out-name estrogen
+if command -v wasm-pack >/dev/null 2>&1; then
+	wasm-pack build "$crate" --target web --out-dir pkg --out-name estrogen
+else
+	# A standard Rust toolchain with wasm-bindgen CLI can build the same web
+	# artifacts. Keep wasm-bindgen CLI at the version in Cargo.lock.
+	cargo build --manifest-path "$repo/Cargo.toml" --release \
+		--target wasm32-unknown-unknown -p estrogen-wasm
+	mkdir -p "$pkg"
+	wasm-bindgen "$repo/target/wasm32-unknown-unknown/release/estrogen_wasm.wasm" \
+		--target web --out-dir "$pkg" --out-name estrogen
+fi
 
 dst="$web/src/wasm"
 mkdir -p "$dst"

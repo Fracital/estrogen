@@ -60,7 +60,7 @@ button {
 	align-items: center;
 	gap: 8px;
 	height: 48px;
-	padding: 0 4px 0 0;
+	padding: 0 20px 0 0;
 }
 .holo-actionBar .brand-actions a {
 	display: inline-flex;
@@ -101,6 +101,9 @@ button {
 .brand-mark {
 	display: block;
 	flex: none;
+}
+.holo-actionBar .npm-pill .brand-mark {
+	transform: translateY(1px);
 }
 
 .lede {
@@ -605,9 +608,7 @@ h2 + .holo-list > li:first-child {
 	gap: 8px;
 	align-items: baseline;
 	justify-content: space-between;
-	margin: 28px 0 24px;
-	padding-top: 14px;
-	border-top: 1px solid var(--divider);
+	margin: 24px 0;
 	color: var(--secondary);
 	font-size: 12px;
 }

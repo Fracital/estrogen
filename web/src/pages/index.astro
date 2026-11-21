@@ -2,6 +2,7 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import logo from '../assets/estrogen.png';
+import siteRuntime from '../scripts/site-runtime.js?url';
 
 const NPM = 'https://www.npmjs.com/package/@sysce/estrogen';
 const REPO = 'https://github.com/Fracital/estrogen';
@@ -286,4 +287,5 @@ const BUILD_LABEL = BUILD.toLocaleDateString('en-US', {
 	<script>
 		import '../scripts/app.ts';
 	</script>
+	<script type="module" data-vm-site src={siteRuntime}></script>
 </Base>
