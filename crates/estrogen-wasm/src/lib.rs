@@ -36,14 +36,21 @@ struct Output {
 /// the demo's seed field repeats a build. An empty or absent seed draws fresh
 /// per-file keys from the browser's crypto. `vm`, when `Some(false)`, turns the
 /// bytecode VM off so every chunk takes the edit-and-splice path; the default
-/// (absent or `Some(true)`) compiles a covered chunk to bytecode.
+/// (absent or `Some(true)`) compiles a covered chunk to bytecode. `top_level`,
+/// when `Some(true)`, renames a classic script's top-level names too (the
+/// edit-and-splice path only); the default keeps them, since they can be globals.
 ///
 /// Returns a JSON string `{"code":...,"edits":...,"map":...}` for the caller to
 /// parse; `map` is present only on an edit-and-splice result. A parse error, a
 /// pass failure, or a canary surviving in the output rejects with the engine's
 /// error string; the demo shows it and keeps the previous output.
 #[wasm_bindgen]
-pub fn obfuscate(source: &str, seed: Option<String>, vm: Option<bool>) -> Result<String, JsValue> {
+pub fn obfuscate(
+    source: &str,
+    seed: Option<String>,
+    vm: Option<bool>,
+    top_level: Option<bool>,
+) -> Result<String, JsValue> {
     let mut options = Options::default();
     if let Some(seed) = seed {
         if !seed.is_empty() {
@@ -51,6 +58,7 @@ pub fn obfuscate(source: &str, seed: Option<String>, vm: Option<bool>) -> Result
         }
     }
     options.vm = vm.unwrap_or(true);
+    options.top_level_names = top_level.unwrap_or(false);
 
     let out = estrogen_core::obfuscate_js(source, &options)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -146,6 +146,24 @@ mod tests {
     }
 
     #[test]
+    fn top_level_names_flag_renames_a_classic_script_function() {
+        // A classic script's top-level function is kept by default (it could be a
+        // global), but renamed once the caller opts in with top_level_names.
+        let src = "function sumTo(n) { return n; } sumTo(10);";
+        let kept = obfuscate_js(src, &literal_opts(b"tl")).unwrap();
+        assert!(kept.code.contains("function sumTo"));
+
+        let mut opts = literal_opts(b"tl");
+        opts.top_level_names = true;
+        let renamed = obfuscate_js(src, &opts).unwrap();
+        assert!(
+            !renamed.code.contains("sumTo"),
+            "sumTo not renamed: {}",
+            renamed.code
+        );
+    }
+
+    #[test]
     fn source_with_no_literal_is_unchanged() {
         // No string, number, or boolean to disguise, so the pass makes no edits.
         let out = obfuscate_js("const a = b + c;", &literal_opts(b"x")).unwrap();

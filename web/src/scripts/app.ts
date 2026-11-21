@@ -51,6 +51,7 @@ editor.setValue(SAMPLE);
 
 const wrapToggle = byId<HTMLInputElement>('wrapToggle');
 const vmToggle = byId<HTMLInputElement>('vmToggle');
+const topLevelToggle = byId<HTMLInputElement>('topLevelToggle');
 
 let ready = false;
 
@@ -415,7 +416,12 @@ function runObfuscate(): void {
 	if (!ready) return;
 	try {
 		const result = JSON.parse(
-			obfuscate(editor.getValue(), currentSeed(), vmToggle.checked),
+			obfuscate(
+				editor.getValue(),
+				currentSeed(),
+				vmToggle.checked,
+				topLevelToggle.checked,
+			),
 		);
 		const code = result.code as string;
 		const n = result.edits as number;
@@ -642,7 +648,9 @@ async function runFolder(files: NamedFile[]): Promise<void> {
 		const source = JS_EXT.test(path) ? asText(original) : null;
 		if (source !== null) {
 			try {
-				const result = JSON.parse(obfuscate(source, seed, vmToggle.checked));
+				const result = JSON.parse(
+					obfuscate(source, seed, vmToggle.checked, topLevelToggle.checked),
+				);
 				const code = result.code as string;
 				const count = (result.edits as number) ?? 0;
 				out = {

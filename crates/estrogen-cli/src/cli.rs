@@ -80,6 +80,13 @@ pub struct Common {
     #[arg(long = "no-vm")]
     pub no_vm: bool,
 
+    /// Rename top-level names in a classic script too, not only in an ES module.
+    /// Off by default, since a classic script's top-level `function` or `var` can
+    /// be a global another file reads by name. Set it when the chunk is
+    /// self-contained and its top-level names are private.
+    #[arg(long = "top-level")]
+    pub top_level: bool,
+
     /// Do not collapse the edit-and-splice JS output to a single line; keep the
     /// edit-preserving output and its private source map. Minification is on by
     /// default; it reprints the literal and proxy pass output as one line, with
@@ -169,6 +176,9 @@ impl Cli {
         }
         if common.no_vm {
             options.vm = false;
+        }
+        if common.top_level {
+            options.top_level_names = true;
         }
         if common.no_minify {
             options.minify = false;

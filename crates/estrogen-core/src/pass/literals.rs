@@ -70,7 +70,12 @@ impl Pass for LiteralsPass {
                 return Err(err);
             }
             let mut edits = visitor.edits;
-            edits.extend(super::mangle::collect(program, ctx.source, &visitor.name)?);
+            edits.extend(super::mangle::collect(
+                program,
+                ctx.source,
+                &visitor.name,
+                ctx.options.top_level_names,
+            )?);
             super::assemble_js(&mut edits, ctx.source, program, visitor.pool);
             Ok(edits)
         })

@@ -187,6 +187,19 @@ const BUILD_LABEL = BUILD.toLocaleDateString('en-US', {
 				<li class="row">
 					<label>
 						<span class="grow">
+							<span class="title">Top-level names</span>
+							<span class="summary"
+								>Rename top-level functions and variables too. Only safe when the
+								code is self-contained, since a classic script's top-level names can
+								be globals. No effect with the VM on.</span
+							>
+						</span>
+						<input id="topLevelToggle" type="checkbox" />
+					</label>
+				</li>
+				<li class="row">
+					<label>
+						<span class="grow">
 							<span class="title">Virtual Machine</span>
 							<span class="summary"
 								>makes the JS really nice, minor performance overhead, doesn't produce

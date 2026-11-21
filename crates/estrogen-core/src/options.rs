@@ -192,6 +192,7 @@ struct ConfigOptions {
     optimize_svg: Option<bool>,
     minify_html: Option<bool>,
     minify_css: Option<bool>,
+    top_level_names: Option<bool>,
     /// Where `build` writes the vendor manifest. Absent uses
     /// [`DEFAULT_VENDOR_MANIFEST`]; an empty string turns it off. A relative path
     /// lands under the dist root, an absolute path is used as is.
@@ -355,6 +356,14 @@ pub struct Options {
     /// obfuscation target, so this only shrinks it; it fails closed on a parse
     /// error (the original is kept). The CLI exposes `--no-minify-css`.
     pub minify_css: bool,
+    /// Rename top-level identifiers in a classic script too, not only in an ES
+    /// module. Off by default. A `function` or `var` at the top of a classic
+    /// script is a property of the global object, so another script can read it
+    /// by name; the mangle pass keeps those names unless this flag says the chunk
+    /// is self-contained. With it on, a top-level name whose every use is a direct
+    /// call is renamed, while an exported or observed name is still kept. The CLI
+    /// exposes `--top-level` and the web demo the top-level toggle.
+    pub top_level_names: bool,
 }
 
 impl Default for Options {
@@ -374,6 +383,7 @@ impl Default for Options {
             optimize_svg: true,
             minify_html: true,
             minify_css: true,
+            top_level_names: false,
         }
     }
 }
@@ -405,6 +415,7 @@ impl Options {
             optimize_svg: file.options.optimize_svg.unwrap_or(true),
             minify_html: file.options.minify_html.unwrap_or(true),
             minify_css: file.options.minify_css.unwrap_or(true),
+            top_level_names: file.options.top_level_names.unwrap_or(false),
         };
         opts.canaries.retain(|c| !c.value.is_empty());
         if opts.jobs == 0 {

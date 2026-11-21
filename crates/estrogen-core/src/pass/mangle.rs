@@ -28,7 +28,18 @@ use crate::edit::{Edit, EditSet};
 use crate::error::Result;
 
 /// Collect renames against the same source as the literal-pool edits.
-pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Result<EditSet> {
+///
+/// `top_level_names` lets the pass rename top-level bindings in a classic script
+/// too, the same renaming an ES module already gets. It is off for a classic
+/// script by default, since a top-level `function` or `var` there is a global
+/// another file can read by name; the caller sets it when the chunk is
+/// self-contained. See [`crate::options::Options::top_level_names`].
+pub(crate) fn collect(
+    program: &Program<'_>,
+    source: &str,
+    reserved: &str,
+    top_level_names: bool,
+) -> Result<EditSet> {
     let built = SemanticBuilder::new()
         .with_build_nodes(true)
         .with_class_table(true)
@@ -167,6 +178,7 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
                                 !reads_callable_names
                                     && !declarator_is_exported(nodes, node.id())
                                     && (has_module_syntax
+                                        || top_level_names
                                         || (explicitly_strict
                                             && scoping.symbol_scope_id(*symbol) != root))
                                     && scoping.symbol_redeclarations(*symbol).is_empty()
@@ -227,6 +239,7 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
                         )
                         // A sloppy block function may also declare a var binding.
                         && (has_module_syntax
+                            || top_level_names
                             || (explicitly_strict && scoping.symbol_scope_id(*symbol) != root))
                         && scoping.symbol_declaration(*symbol) == node.id()
                         && scoping.symbol_redeclarations(*symbol).is_empty()
@@ -270,8 +283,9 @@ pub(crate) fn collect(program: &Program<'_>, source: &str, reserved: &str) -> Re
         }
     }
 
-    // Top-level renaming is safe only once the file is known to be a module.
-    options.top_level = Some(has_module_syntax);
+    // Top-level renaming is safe once the file is known to be a module, or when
+    // the caller vouches that a classic script's top-level names are private.
+    options.top_level = Some(has_module_syntax || top_level_names);
 
     options.reserved.extend(
         occurrences
@@ -680,10 +694,14 @@ mod tests {
     use super::*;
 
     fn mangle(source: &str, source_type: SourceType) -> String {
+        mangle_opt(source, source_type, false)
+    }
+
+    fn mangle_opt(source: &str, source_type: SourceType, top_level_names: bool) -> String {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, source_type).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let output = collect(&parsed.program, source, "decoder")
+        let output = collect(&parsed.program, source, "decoder", top_level_names)
             .unwrap()
             .apply(source)
             .unwrap();
@@ -744,6 +762,26 @@ mod tests {
         // `var` and `function` are globals. The pass must not rename them.
         let input = "var topLevelGlobal = 1; function topLevelHelper() { return topLevelGlobal; }";
         assert_eq!(mangle(input, SourceType::cjs()), input);
+    }
+
+    #[test]
+    fn the_top_level_flag_renames_a_private_script_function() {
+        // With the top-level flag on, a classic script's top-level `function`
+        // whose only use is a direct call is renamed, the same as in a module.
+        let input = "function sumTo(n) { return n; } console.log(sumTo(10));";
+        let output = mangle_opt(input, SourceType::cjs(), true);
+        assert!(!output.contains("sumTo"), "sumTo not renamed: {output}");
+        // The call still reaches the renamed binding, so the program is intact.
+        assert!(output.contains("console.log("));
+    }
+
+    #[test]
+    fn the_top_level_flag_still_keeps_an_observed_script_name() {
+        // Even with the flag on, a name the code reads back (`.name`) is kept, so
+        // the rename never changes an observable value.
+        let input = "function keepMe() {} console.log(keepMe.name, keepMe());";
+        let output = mangle_opt(input, SourceType::cjs(), true);
+        assert!(output.contains("keepMe"), "observed name renamed: {output}");
     }
 
     #[test]
