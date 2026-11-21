@@ -407,8 +407,10 @@ Falls back (declines, so the literal and name passes run instead):
   BUILD_CLASS_DYN reads; the runtime installs an accessor under the evaluated key,
   including a symbol key, whose `get <key>`/`set <key>` name renders a symbol as
   `[<description>]`. A computed object-literal getter or setter key compiles too.
-  A spread in
-  `super()` compiles through SUPER_CALL_APPLY, and an anonymous class expression
+  A numeric literal method or object-pattern key (`0() {}`, `{ 0: x }`) compiles
+  as its string property name when the value is a non-negative integer. A spread in
+  `super()` compiles through SUPER_CALL_APPLY and a spread in a `super.method(...)`
+  call through CALL_METHOD_APPLY, and an anonymous class expression
   compiles, taking its name from an identifier assignment, a declarator, or a
   static object-property key, and the empty string in a bare position, the way a
   function does. An anonymous class under a computed key or as a default value
