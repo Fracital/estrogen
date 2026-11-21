@@ -1132,7 +1132,13 @@
 		// captured scope, so slot addresses resolve across the closure boundary.
 		function createClosure(def, ctx) {
 			'use strict';
-			const drive = def.g ? makeGenerator : def.a ? runAsync : runSync;
+			const drive = def.g
+				? def.a
+					? makeAsyncGenerator
+					: makeGenerator
+				: def.a
+					? runAsync
+					: runSync;
 			// A plain function takes its new.target and home from the call site;
 			// an arrow inherits both from the defining context.
 			const fn = def.r
@@ -1615,6 +1621,125 @@
 				}
 				step();
 			});
+		}
+
+		// Drive an async generator frame. Calling the function returns an async
+		// iterator; each next/throw/return returns a promise and is queued, so
+		// requests settle in order. A request runs the frame until it yields (the
+		// request resolves to { value, done: false }), awaits (the value is
+		// awaited and the frame resumed), returns or halts (resolves to
+		// { value, done: true }), or throws (rejects). The generator body has no
+		// try/for-of/in (the compiler declines those in a generator), so the
+		// frame never holds a handler across a suspend. yield* is declined for
+		// async generators, so SIG_YIELD_STAR never reaches here.
+		function makeAsyncGenerator(frame) {
+			let done = false;
+			let started = false;
+			let running = false;
+			const queue = [];
+
+			function enqueue(value, mode) {
+				return new Promise(function (resolve, reject) {
+					queue.push({
+						value: value,
+						mode: mode,
+						resolve: resolve,
+						reject: reject,
+					});
+					pump();
+				});
+			}
+
+			function pump() {
+				if (running || queue.length === 0) return;
+				const req = queue[0];
+				if (done) {
+					queue.shift();
+					if (req.mode === 'throw') req.reject(req.value);
+					else
+						req.resolve({
+							value: req.mode === 'return' ? req.value : undefined,
+							done: true,
+						});
+					pump();
+					return;
+				}
+				running = true;
+				advance(req.value, req.mode);
+			}
+
+			// Resume the frame, then react to how it suspends. Called first for the
+			// queued request, then again after each awaited value settles.
+			function advance(value, mode) {
+				let sig;
+				try {
+					if (!started) {
+						started = true;
+						if (mode === 'throw') return reactFinish('throw', value);
+						if (mode === 'return') return reactFinish('return', value);
+						sig = runFrame(frame);
+					} else if (mode === 'throw') {
+						if (!unwindFrame(frame, value)) return reactFinish('throw', value);
+						sig = runFrame(frame);
+					} else if (mode === 'return') {
+						return reactFinish('return', value);
+					} else {
+						frame.stack.push(value);
+						sig = runFrame(frame);
+					}
+				} catch (error) {
+					return reactFinish('throw', error);
+				}
+				react(sig);
+			}
+
+			function react(sig) {
+				if (sig.type === SIG_AWAIT) {
+					Promise.resolve(sig.value).then(
+						function (v) {
+							advance(v, 'next');
+						},
+						function (e) {
+							advance(e, 'throw');
+						},
+					);
+					return;
+				}
+				if (sig.type === SIG_YIELD) {
+					const req = queue.shift();
+					running = false;
+					req.resolve({ value: sig.value, done: false });
+					pump();
+					return;
+				}
+				reactFinish('return', sig.value);
+			}
+
+			// End the generator: resolve the current request done, or reject it.
+			function reactFinish(mode, value) {
+				done = true;
+				const req = queue.shift();
+				running = false;
+				if (mode === 'throw') req.reject(value);
+				else req.resolve({ value: value, done: true });
+				pump();
+			}
+
+			const gen = {
+				next: function (value) {
+					return enqueue(value, 'next');
+				},
+				throw: function (error) {
+					return enqueue(error, 'throw');
+				},
+				return: function (value) {
+					return enqueue(value, 'return');
+				},
+			};
+			gen[Symbol.asyncIterator] = function () {
+				return this;
+			};
+			return gen;
 		}
 
 		function run(args) {

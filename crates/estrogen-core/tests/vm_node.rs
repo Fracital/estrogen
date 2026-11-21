@@ -615,6 +615,15 @@ const ASYNC_CASES: &[&str] = &[
     "const e = async () => { try { await Promise.reject(new Error('x')); return 'no'; } catch (err) { return 'caught ' + err.message; } }; e()",
     "const p = (async () => 7)(); p",
     "async function outer() { async function inner(n) { return await Promise.resolve(n * 2); } return (await inner(3)) + (await inner(4)); } outer()",
+    // async generators: a body that both awaits and yields, consumed by manual
+    // next() (a consumer `for await` would itself decline, so drive it by hand)
+    "async function* g() { yield 1; yield await Promise.resolve(2); yield 3; } const it = g(); (async () => { const r = []; r.push((await it.next()).value); r.push((await it.next()).value); r.push((await it.next()).value); const d = await it.next(); r.push(d.value === undefined); r.push(d.done); return r; })()",
+    // a value sent into yield, and the return value as the final done result
+    "async function* g() { const a = yield 1; const b = yield a + 1; return a + b; } const it = g(); (async () => { const r1 = await it.next(); const r2 = await it.next(10); const r3 = await it.next(20); return [r1.value, r2.value, r3.value, r3.done]; })()",
+    // await inside a loop in the generator body, driven to completion
+    "async function* range(n) { let i = 0; while (i < n) { yield await Promise.resolve(i * 10); i++; } } const it = range(3); (async () => { const out = []; let x; while (!(x = await it.next()).done) out.push(x.value); return out; })()",
+    // a rejection awaited in the body propagates out of next()
+    "async function* g() { yield await Promise.reject(new Error('boom')); } const it = g(); (async () => { try { await it.next(); return 'no'; } catch (e) { return 'caught ' + e.message; } })()",
 ];
 
 #[test]
@@ -684,11 +693,14 @@ fn unsupported_constructs_decline() {
         "class C { *method() {} }",
         "let C; C = class {}; C.name",
         "const object = { C: class {} }; object.C.name",
-        // generators decline when their own frame would hold a handler across a
-        // yield (try, for-of, for-in), plus async generators
+        // a generator (sync or async) declines when its own frame would hold a
+        // handler across a yield (try, for-of, for-in)
         "function* g() { try { yield 1; } finally {} }",
         "function* g() { for (const x of [1, 2]) yield x; }",
-        "async function* g() { yield 1; }",
+        "async function* g() { try { yield 1; } finally {} }",
+        // yield* in an async generator and a consumer for-await still decline
+        "async function* g() { yield* [1, 2]; }",
+        "async function f() { for await (const x of []) {} }",
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",
         "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",

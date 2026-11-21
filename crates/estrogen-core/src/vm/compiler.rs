@@ -615,9 +615,6 @@ impl Compiler {
                     }
                 }
                 Statement::FunctionDeclaration(func) => {
-                    if func.r#async && func.generator {
-                        return Err(Unsupported("async generator function"));
-                    }
                     let name = func
                         .id
                         .as_ref()
@@ -1477,9 +1474,6 @@ impl Compiler {
             Expression::AssignmentExpression(a) => self.compile_assign(a)?,
             Expression::UpdateExpression(u) => self.compile_update(u)?,
             Expression::FunctionExpression(func) => {
-                if func.r#async && func.generator {
-                    return Err(Unsupported("async generator function expression"));
-                }
                 let fb = func
                     .body
                     .as_ref()
@@ -1700,6 +1694,11 @@ impl Compiler {
                 // expression's result. `yield* arg` pushes the iterable and
                 // delegates: the driver drives its iterator, forwarding
                 // next/throw/return, and leaves the delegate's return value here.
+                // `yield*` in an async generator delegates to an async iterator,
+                // which the async-generator driver does not drive yet; decline.
+                if y.delegate && self.fns.last().expect("frame").is_async {
+                    return Err(Unsupported("yield* in an async generator"));
+                }
                 match &y.argument {
                     Some(arg) => self.compile_expr(arg)?,
                     None => self.emit0("PUSH_UNDEF"),

@@ -195,17 +195,18 @@ mod tests {
 
     #[test]
     fn a_chunk_off_the_vm_subset_falls_back_with_a_map() {
-        // An async generator is outside the VM subset, so the whole chunk takes
-        // the literal edit-and-splice path instead of compiling to bytecode. That
-        // path keeps an edit list, so the private debug map is written. (Imports
-        // and local exports on their own now compile through the VM wrapper.)
+        // A generator whose body uses try is outside the VM subset (it would hold
+        // a handler across a yield), so the whole chunk takes the literal
+        // edit-and-splice path instead of compiling to bytecode. That path keeps
+        // an edit list, so the private debug map is written. (Imports and local
+        // exports on their own now compile through the VM wrapper.)
         let opts = Options {
             seed: Some(b"vm".to_vec()),
             minify: false,
             ..Options::default()
         };
         let out = obfuscate_js(
-            "export const s = 'hello world'; async function* g() { yield s; }",
+            "export const s = 'hello world'; function* g() { try { yield s; } finally {} }",
             &opts,
         )
         .unwrap();

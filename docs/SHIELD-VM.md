@@ -342,9 +342,15 @@ falls back. The subset:
   body to the next `yield` or the end, `yield` suspends with its value and
   resumes with the value `next` was given, and spread, `for`/`of`, and manual
   `next`/`return` all consume it (a `for`/`of` break calls the generator's
-  `return`). The body must not use `try`, `for`/`of`, or `for`/`in`, since those
-  keep a handler on the frame across a `yield`; `yield*` and async generators
-  are not ported.
+  `return`). `yield*` delegates to another iterator, forwarding its values and
+  return. The body must not use `try`, `for`/`of`, or `for`/`in`, since those
+  keep a handler on the frame across a `yield`.
+- Async generators: an `async function*` runs on the runtime's async-generator
+  driver. Calling it returns an async iterator whose `next`/`throw`/`return`
+  return promises of `{ value, done }`, queued so they settle in order. The body
+  may both `await` and `yield`; an awaited rejection propagates out of the
+  pending `next`. `yield*` in an async generator and a consumer `for await` are
+  not ported, and the same `try`/`for`/`of`/`for`/`in` restriction applies.
 
 Falls back (declines, so the literal and name passes run instead):
 
@@ -363,7 +369,7 @@ Falls back (declines, so the literal and name passes run instead):
   declares a lexical binding; and a labeled jump that would close more than one
   `for`/`of` iterator at once.
 - A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
-  delegation; and async generators.
+  inside an async generator; and a `for await` loop.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
   binding where native makes one per iteration, so it declines rather than
   observe the difference wrongly. The closure check is conservative, so a
@@ -423,8 +429,8 @@ compiles a real app bundle, the way the shield's 25-of-25 integration proof
 does, is still a large amount of further work. In rough dependency order:
 
 1. The rest of generators: a `try`, `for`/`of`, or `for`/`in` inside a generator
-   body, `yield*`, and async generators, which the completion-record and
-   iterator-close machinery can extend to.
+   body, `yield*` inside an async generator, and a `for await` consumer, which
+   the completion-record and iterator-close machinery can extend to.
 2. The rest of control flow: `break`/`continue` that escapes a `try` (the
    abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
    `jump` completion record), a `switch` case that declares a lexical binding, and
