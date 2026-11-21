@@ -388,8 +388,10 @@ falls back. The subset:
   resumes with the value `next` was given, and spread, `for`/`of`, and manual
   `next`/`return` all consume it (a `for`/`of` break calls the generator's
   `return`). `yield*` delegates to another iterator, forwarding its values and
-  return. The body must not use `try`, `for`/`of`, or `for`/`in`, since those
-  keep a handler on the frame across a `yield`.
+  return. The body may use `try`, `for`/`of`, or `for`/`in` when no `yield` or
+  `await` runs inside it: the handler then pushes and pops within one resume, like
+  an ordinary function. One with a `yield` or `await` inside would keep a handler
+  on the frame across a suspension, which is not ported, so it declines.
 - Async generators: an `async function*` runs on the runtime's async-generator
   driver. Calling it returns an async iterator whose `next`/`throw`/`return`
   return promises of `{ value, done }`, queued so they settle in order. The body
@@ -428,8 +430,9 @@ Falls back (declines, so the literal and name passes run instead):
   leaves more than one open `for`/`of` compiles: each iterator is closed innermost
   first, and a `return()` that throws propagates while the outer iterators still
   close.
-- A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
-  inside an async generator; and a `for await` loop.
+- A generator whose own `try`, `for`/`of`, or `for`/`in` can suspend inside it,
+  where a `yield` or `await` under the handler would need it to survive the
+  suspension; `yield*` inside an async generator; and a `for await` loop.
 - A `for (let ...)` whose update makes a closure. A test or body closure compiles:
   each iteration opens a fresh scope, the loop bindings are copied in, the test
   and body run there so a closure captures that iteration's value, any mutation is

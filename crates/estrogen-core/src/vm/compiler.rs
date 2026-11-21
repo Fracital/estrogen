@@ -47,6 +47,7 @@ use oxc_ast::ast::{
     PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, StaticMemberExpression,
     SwitchStatement, TryStatement, UnaryOperator, UpdateOperator, VariableDeclarationKind,
 };
+use oxc_ast::AstKind;
 use oxc_ast_visit::Visit;
 
 use super::layout::Layout;
@@ -1146,8 +1147,11 @@ impl Compiler {
     fn compile_try(&mut self, stmt: &TryStatement<'_>) -> R<()> {
         // A try inside a generator leaves a handler on the frame across a yield,
         // and a consumer's return/throw at that yield would need to run the
-        // finally and iterator cleanup. That is not ported, so decline.
-        if self.fns.last().expect("frame").is_generator {
+        // finally and iterator cleanup. That is not ported. A try with no yield
+        // or await inside it never suspends while its handler is live, so it
+        // pushes and pops within one resume like an ordinary function and
+        // compiles; one that can suspend inside declines.
+        if self.fns.last().expect("frame").is_generator && try_statement_suspends(stmt) {
             return Err(Unsupported("try in a generator"));
         }
         // A return that leaves a try while a for-of iterator is still open needs
@@ -1497,8 +1501,10 @@ impl Compiler {
     ) -> R<()> {
         // A for-of/in inside a generator keeps an iterator handler on the frame
         // across a yield; a consumer return/throw there would need to close it.
-        // Not ported, so decline.
-        if self.fns.last().expect("frame").is_generator {
+        // Not ported. The handler is live only while the body runs, so a body
+        // with no yield or await inside never suspends under it and compiles like
+        // an ordinary function's loop; a body that can suspend declines.
+        if self.fns.last().expect("frame").is_generator && statement_suspends(body) {
             return Err(Unsupported("for-of or for-in in a generator"));
         }
         // The loop head is either a fresh binding declaration or an existing
@@ -3806,6 +3812,42 @@ fn contains_return_stmt(stmts: &[Statement<'_>]) -> bool {
         }
         _ => false,
     })
+}
+
+/// Whether a `yield`, `yield*`, or `await` appears anywhere inside a node. A
+/// `try` or a `for`/`of`/`for`/`in` inside a generator keeps a handler (a finally
+/// or an iterator) live only while its body runs. If the generator suspends there
+/// on a `yield` (or an `await` in an async generator), a consumer's `return` or
+/// `throw` at that suspension would have to run the finally or close the iterator,
+/// which the runtime does not port, so the construct declines. Without a
+/// suspension inside, the handler pushes and pops within one resume and behaves
+/// exactly as in an ordinary function, so it compiles. The scan reaches into a
+/// nested function too, which only ever declines more, never less.
+struct SuspendScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for SuspendScan {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        if matches!(
+            kind,
+            AstKind::YieldExpression(_) | AstKind::AwaitExpression(_)
+        ) {
+            self.found = true;
+        }
+    }
+}
+
+fn try_statement_suspends(stmt: &TryStatement<'_>) -> bool {
+    let mut scan = SuspendScan { found: false };
+    scan.visit_try_statement(stmt);
+    scan.found
+}
+
+fn statement_suspends(stmt: &Statement<'_>) -> bool {
+    let mut scan = SuspendScan { found: false };
+    scan.visit_statement(stmt);
+    scan.found
 }
 
 fn pack_addr(depth: usize, index: usize) -> i64 {

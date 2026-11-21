@@ -639,6 +639,21 @@ const GENERATORS: &[&str] = &[
     "function* a() { yield 1; } function* b() { yield* a(); yield 2; } function* c() { yield* b(); yield 3; } [...c()]",
     // a value sent through yield* reaches the delegate's yield
     "function* inner() { const x = yield 1; return x * 10; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); [it.next().value, it.next(5).value]",
+    // a try/catch in a generator with no suspension inside it compiles: the
+    // handler pushes and pops within one resume, like an ordinary function
+    "function* g() { let r = 'x'; try { null.p; } catch (e) { r = 'caught'; } yield r; } [...g()]",
+    // a try/finally in a generator runs the finally after the block, in order
+    "function* g() { const log = []; try { log.push(1); } finally { log.push(2); } yield log.join(','); } [...g()]",
+    // a for-of with no suspension in its body iterates synchronously in a generator
+    "function* g() { let s = 0; for (const x of [1, 2, 3]) s += x; yield s; } [...g()]",
+    // a for-in with no suspension in its body
+    "function* g() { const keys = []; for (const k in { a: 1, b: 2 }) keys.push(k); yield keys.join(','); } [...g()]",
+    // a return through a try/finally in a generator runs the finally then ends
+    "(() => { const log = []; function* g() { try { log.push('a'); return; } finally { log.push('b'); } yield 'never'; } const it = g(); const d = it.next(); return [d.done, log.join(',')]; })()",
+    // a consumer return() at a yield OUTSIDE a later try must not run its finally
+    "(() => { const log = []; function* g() { yield 'a'; try { log.push('t'); } finally { log.push('f'); } yield 'b'; } const it = g(); const v = it.next().value; const r = it.return(9); return [v, r.value, r.done, log.length]; })()",
+    // an early return from a for-of in a generator closes the iterator
+    "(() => { const closed = []; const iter = { [Symbol.iterator]() { let i = 0; return { next: () => ({ value: ++i, done: i > 5 }), return() { closed.push('c'); return { done: true }; } }; } }; function* g() { for (const x of iter) { if (x === 2) return x; } } const it = g(); const d = it.next(); return [d.value, d.done, closed.join(',')]; })()",
 ];
 
 /// Tagged templates, object method shorthand, accessors, and spread in `new`.
@@ -835,6 +850,10 @@ fn unsupported_constructs_decline() {
         "function* g() { try { yield 1; } finally {} }",
         "function* g() { for (const x of [1, 2]) yield x; }",
         "async function* g() { try { yield 1; } finally {} }",
+        // an await inside a generator's try or for-of body is a suspension while
+        // the handler is live too, so it declines the same as a yield does
+        "async function* g() { try { await 1; } finally {} }",
+        "async function* g() { for (const x of [1]) { await x; } }",
         // yield* in an async generator and a consumer for-await still decline
         "async function* g() { yield* [1, 2]; }",
         "async function f() { for await (const x of []) {} }",
