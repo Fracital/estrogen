@@ -594,6 +594,53 @@
 	HANDLERS[OP_YIELD] = function (frame) {
 		return { type: SIG_YIELD, value: frame.stack.pop() };
 	};
+	// Module context handlers. moduleCtx is the tenth dispatch argument, filled
+	// from the native wrapper. IMPORT_META reads import.meta, DYNAMIC_IMPORT
+	// calls the native import() with the popped specifier (a promise), and
+	// EXPORT_BINDING writes the popped value to the module exports object under
+	// the constant-pool name in the operand.
+	HANDLERS[OP_IMPORT_META] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+		buildClass,
+		moduleCtx,
+	) {
+		frame.stack.push(moduleCtx.meta);
+	};
+	HANDLERS[OP_DYNAMIC_IMPORT] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+		buildClass,
+		moduleCtx,
+	) {
+		frame.stack.push(moduleCtx.loadImport(frame.stack.pop()));
+	};
+	HANDLERS[OP_EXPORT_BINDING] = function (
+		frame,
+		arg,
+		consts,
+		functions,
+		globals,
+		createClosure,
+		callValue,
+		doReturn,
+		buildClass,
+		moduleCtx,
+	) {
+		moduleCtx.exports[consts[arg]] = frame.stack.pop();
+	};
 
 	HANDLERS[OP_CALL] = function (
 		frame,
@@ -933,6 +980,14 @@
 	function createRuntime(program, options) {
 		const opts = options || {};
 		const globals = opts.globals || globalThis;
+		// The native module wrapper supplies these: `meta` is import.meta,
+		// `exports` is the object local exports are written to, and `loadImport`
+		// is the native dynamic import. Absent for a plain chunk.
+		const moduleCtx = {
+			meta: opts.meta,
+			exports: opts.exports,
+			loadImport: opts.import,
+		};
 		const stepCap =
 			typeof opts.budget === 'number' &&
 			isFinite(opts.budget) &&
@@ -1153,6 +1208,7 @@
 						callValue,
 						doReturn,
 						buildClass,
+						moduleCtx,
 					);
 				} catch (error) {
 					if (!unwindFrame(frame, error)) throw error;

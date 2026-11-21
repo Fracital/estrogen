@@ -184,6 +184,14 @@ pub struct Program {
     pub functions: Vec<FunctionDef>,
     /// Index of the module main in `functions`.
     pub main_index: usize,
+    /// The chunk reads `import.meta`, so the wrapper passes the module's meta.
+    /// Not serialized; it drives the emitted wrapper only.
+    pub uses_import_meta: bool,
+    /// The chunk uses dynamic `import()`, so the wrapper passes native import.
+    pub uses_dynamic_import: bool,
+    /// Names the chunk exports from its own bindings, in declaration order. The
+    /// wrapper re-exports each from the module exports object the VM fills.
+    pub exports: Vec<String>,
 }
 
 impl Program {

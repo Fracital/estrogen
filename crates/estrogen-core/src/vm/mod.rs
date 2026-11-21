@@ -150,8 +150,25 @@ pub fn try_compile_chunk(source: &str, options: &Options) -> Result<Option<Strin
             return Ok(None);
         }
     };
+    let module = ModuleContext {
+        needs_meta: program.uses_import_meta,
+        needs_import: program.uses_dynamic_import,
+        exports: program.exports.clone(),
+        // A top-level await makes the main async, so the module evaluates to a
+        // promise the wrapper must await before it is considered evaluated.
+        main_is_async: program.functions[program.main_index].is_async,
+    };
     let json = program.into_json_string();
-    Ok(Some(emit_chunk(&json, source, options, &imports)?))
+    Ok(Some(emit_chunk(&json, source, options, &imports, &module)?))
+}
+
+/// What the emitted wrapper must pass to the runtime beyond imported bindings:
+/// `import.meta`, native dynamic import, and the names to re-export.
+struct ModuleContext {
+    needs_meta: bool,
+    needs_import: bool,
+    exports: Vec<String>,
+    main_is_async: bool,
 }
 
 #[derive(Default)]
@@ -241,6 +258,7 @@ fn emit_chunk(
     source: &str,
     options: &Options,
     imports: &NativeImports,
+    module: &ModuleContext,
 ) -> Result<String> {
     let mut keys = FileKeys::new(options, source.as_bytes())?;
     // The short generated name the chunk binds the runtime to, drawn from the
@@ -260,16 +278,20 @@ fn emit_chunk(
     }
     let decoder = pool.into_pool().emit_decoder(&pool_name);
     let mut setup = String::new();
-    let mut argument = String::new();
+    // The fields of the runtime options object the chunk passes after the
+    // program. Each is added only when the chunk uses that part of the module
+    // context, so a plain chunk keeps the bare `vm(program)()` call.
+    let mut opts: Vec<String> = Vec::new();
+    let fresh = |base: &str, source: &str, pool_name: &str| {
+        let mut name = base.to_string();
+        while source.contains(&name) || name == pool_name {
+            name.push('_');
+        }
+        name
+    };
     if !imports.bindings.is_empty() {
-        let mut globals_name = format!("{vm_name}_g");
-        while source.contains(&globals_name) || globals_name == pool_name {
-            globals_name.push('_');
-        }
-        let mut bindings_name = format!("{globals_name}_i");
-        while source.contains(&bindings_name) || bindings_name == pool_name {
-            bindings_name.push('_');
-        }
+        let globals_name = fresh(&format!("{vm_name}_g"), source, &pool_name);
+        let bindings_name = fresh(&format!("{globals_name}_i"), source, &pool_name);
         setup.push_str(&format!("const {bindings_name}=Object.create(null);"));
         for local in &imports.bindings {
             let literal = serde_json::to_string(local).expect("identifier JSON");
@@ -283,14 +305,47 @@ fn emit_chunk(
         setup.push_str(&format!(
             "const {globals_name}=new Proxy(globalThis,{{get:(target,key)=>Object.hasOwn({bindings_name},key)?{bindings_name}[key]:Reflect.get(target,key,target),set:(target,key,value)=>Object.hasOwn({bindings_name},key)?({bindings_name}[key]=value,true):Reflect.set(target,key,value,target),has:(target,key)=>Object.hasOwn({bindings_name},key)||Reflect.has(target,key)}});"
         ));
-        argument = format!(",{{globals:{globals_name}}}");
+        opts.push(format!("globals:{globals_name}"));
     }
+    if module.needs_meta {
+        opts.push("meta:import.meta".to_string());
+    }
+    if module.needs_import {
+        opts.push("import:$=>import($)".to_string());
+    }
+    let mut export_tail = String::new();
+    if !module.exports.is_empty() {
+        let exports_name = fresh(&format!("{vm_name}_e"), source, &pool_name);
+        setup.push_str(&format!("const {exports_name}=Object.create(null);"));
+        opts.push(format!("exports:{exports_name}"));
+        // The VM wrote each export's final value into the exports object during
+        // the run above; re-export them from native const bindings so a consumer
+        // links to them. Exports are const, so the value is settled.
+        let bindings: Vec<String> = module
+            .exports
+            .iter()
+            .map(|name| {
+                let literal = serde_json::to_string(name).expect("identifier JSON");
+                format!("{name}={exports_name}[{literal}]")
+            })
+            .collect();
+        export_tail = format!("export const {};", bindings.join(","));
+    }
+    let argument = if opts.is_empty() {
+        String::new()
+    } else {
+        format!(",{{{}}}", opts.join(","))
+    };
     // The runtime IIFE evaluates to the factory; calling it with the decoded
     // program returns the entry function, which the trailing `()` runs. No part
     // of this spells the runtime's purpose: the names are generated and the
     // runtime body is mangled.
+    // A top-level await in the chunk makes the main async; await the run so the
+    // module is not considered evaluated until it settles. The wrapper is an ES
+    // module whenever this is reached, so a top-level await is valid.
+    let await_kw = if module.main_is_async { "await " } else { "" };
     Ok(format!(
-        "/* {MARKER} */{imports}const {vm_name}={runtime};{decoder}{setup}{vm_name}(JSON.parse({pool_name}(0)){argument})();",
+        "/* {MARKER} */{imports}const {vm_name}={runtime};{decoder}{setup}{await_kw}{vm_name}(JSON.parse({pool_name}(0)){argument})();{export_tail}",
         imports = imports.statements,
         runtime = runtime_iife(),
     ))

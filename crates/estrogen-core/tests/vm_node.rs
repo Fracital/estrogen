@@ -627,7 +627,6 @@ fn unsupported_constructs_decline() {
     let unsupported = [
         "var z = 1; z",
         "import x from './y.js'; x",
-        "export const q = 1;",
         "class C extends Array {}",
         "class C { get x() { return 1; } }",
         "class C { set x(value) {} }",
@@ -715,6 +714,56 @@ fn class_chunks_require_known_module_scope() {
             vm_stdout, native_stdout,
             "class module behavior changed: {source}"
         );
+    }
+}
+
+/// import.meta, a local `export const`, and dynamic `import()` run through the
+/// native module wrapper. Each case is compiled to a VM chunk, then both the
+/// original source and the transformed chunk run as ES modules in node and their
+/// observation is compared, so the wrapper plumbs the module context correctly.
+#[test]
+fn vm_module_context_matches_native() {
+    if !node_available("vm_module_context_matches_native") {
+        return;
+    }
+    let cases = [
+        // import.meta: a real object, stable identity, with a url string. The url
+        // itself differs per file, so compare its type, not its value.
+        (
+            "const m = import.meta; globalThis.__r = [typeof m, m === import.meta, typeof m.url];",
+            "globalThis.__r",
+        ),
+        // local export const: the value is readable both as the VM result and
+        // through the re-exported native binding.
+        (
+            "export const a = 6, b = a * 7; globalThis.__r = [a, b];",
+            "[globalThis.__r, a, b]",
+        ),
+        // dynamic import with top-level await: the wrapper awaits the async main.
+        (
+            "globalThis.__r = (await import('data:text/javascript,export default 42')).default + 1;",
+            "globalThis.__r",
+        ),
+    ];
+    for (i, (source, observe)) in cases.iter().enumerate() {
+        let output = try_compile_chunk(
+            source,
+            &Options {
+                seed: Some(b"vm-module-context".to_vec()),
+                ..Options::default()
+            },
+        )
+        .expect("VM module compilation failed")
+        .unwrap_or_else(|| panic!("VM declined module context: {source}"));
+        assert!(output.contains("JSON.parse("), "not VM bytecode: {output}");
+        let original = format!("{source}\nconsole.log(JSON.stringify({observe}));");
+        let transformed = format!("{output}\nconsole.log(JSON.stringify({observe}));");
+        let (ok_native, stdout_native, stderr_native) =
+            run_node(&original, &format!("module-native-{i}"));
+        assert!(ok_native, "native source failed: {stderr_native}");
+        let (ok_vm, stdout_vm, stderr_vm) = run_node(&transformed, &format!("module-vm-{i}"));
+        assert!(ok_vm, "VM module failed: {stderr_vm}\n{output}");
+        assert_eq!(stdout_vm, stdout_native, "module context changed: {source}");
     }
 }
 

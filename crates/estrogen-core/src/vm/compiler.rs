@@ -77,6 +77,9 @@ pub fn compile_program(program: &Program<'_>, seed: &str, known_module: bool) ->
         functions: Vec::new(),
         scopes: Vec::new(),
         fns: Vec::new(),
+        uses_import_meta: false,
+        uses_dynamic_import: false,
+        exports: Vec::new(),
     };
     let main_index = c.compile_main(program, known_module)?;
     Ok(VmProgram {
@@ -84,6 +87,9 @@ pub fn compile_program(program: &Program<'_>, seed: &str, known_module: bool) ->
         consts: c.consts,
         functions: c.functions,
         main_index,
+        uses_import_meta: c.uses_import_meta,
+        uses_dynamic_import: c.uses_dynamic_import,
+        exports: c.exports,
     })
 }
 
@@ -157,6 +163,12 @@ struct Compiler {
     scopes: Vec<Scope>,
     /// The function emission stack; the last entry is the one being compiled.
     fns: Vec<FnState>,
+    /// Set when the module reads `import.meta` or uses dynamic `import()`, and
+    /// the names the module exports from its own bindings (const/function/class),
+    /// in declaration order. The wrapper uses these to pass the module context.
+    uses_import_meta: bool,
+    uses_dynamic_import: bool,
+    exports: Vec<String>,
 }
 
 impl Compiler {
@@ -193,6 +205,14 @@ impl Compiler {
             self.predeclare_vars(&program.body)?;
         }
         self.compile_scope_body(&program.body, true)?;
+        // After the body runs, write each exported binding's final value to the
+        // module exports object the wrapper re-exports. Exports are const, so the
+        // value is final here.
+        for name in self.exports.clone() {
+            self.emit_load_name(&name)?;
+            let idx = self.consts.add_str(&name);
+            self.emit1("EXPORT_BINDING", idx as i64);
+        }
         self.emit0("HALT");
         self.scopes.pop();
         let st = self.fns.pop().expect("main frame");
@@ -609,6 +629,16 @@ impl Compiler {
                     let slot = self.add_local(name.name.as_str());
                     self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | 1);
                 }
+                Statement::ExportDeclaration(ex) if top_level => {
+                    let decl = export_const_declaration(ex)?;
+                    let kind = lexical_kind(decl.kind)?;
+                    for d in &decl.declarations {
+                        let id = binding_identifier(&d.id)?;
+                        let slot = self.add_local(id.name.as_str());
+                        self.emit1("DECLARE_SLOT", ((slot as i64) << 2) | kind);
+                        self.exports.push(id.name.as_str().to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -652,6 +682,25 @@ impl Compiler {
             // linking remains responsible for their live export bindings.
             Statement::ExportAllDeclaration(_) if top_level => Ok(()),
             Statement::ExportFromDeclaration(_) if top_level => Ok(()),
+            // A local `export const <bindings>` compiles its declaration here;
+            // the slot was declared in the hoist pass and the name recorded for
+            // the wrapper. The main emits EXPORT_BINDING for each at the end.
+            Statement::ExportDeclaration(ex) if top_level => {
+                let decl = export_const_declaration(ex)?;
+                for d in &decl.declarations {
+                    let id = binding_identifier(&d.id)?;
+                    let (_, slot) = self
+                        .resolve(id.name.as_str())
+                        .ok_or(Unsupported("export binding not declared"))?;
+                    let init = d
+                        .init
+                        .as_ref()
+                        .ok_or(Unsupported("export const without an initializer"))?;
+                    self.compile_named_expr(init, id.name.as_str())?;
+                    self.emit1("INIT_SLOT", pack_addr(0, slot));
+                }
+                Ok(())
+            }
             Statement::EmptyStatement(_) => Ok(()),
             Statement::ExpressionStatement(s) => {
                 self.compile_expr(&s.expression)?;
@@ -1633,6 +1682,21 @@ impl Compiler {
                 self.emit0("YIELD");
             }
             Expression::TaggedTemplateExpression(tagged) => self.compile_tagged_template(tagged)?,
+            Expression::ImportMeta(_) => {
+                // import.meta is read from the native module wrapper.
+                self.uses_import_meta = true;
+                self.emit0("IMPORT_META");
+            }
+            Expression::ImportExpression(i) => {
+                // Dynamic import() calls the native import the wrapper supplies.
+                // Import options and phases are not forwarded yet.
+                if i.options.is_some() || i.phase.is_some() {
+                    return Err(Unsupported("dynamic import options or phase"));
+                }
+                self.compile_expr(&i.source)?;
+                self.uses_dynamic_import = true;
+                self.emit0("DYNAMIC_IMPORT");
+            }
             _ => return Err(Unsupported("expression outside the subset")),
         }
         Ok(())
@@ -3119,6 +3183,23 @@ fn binding_identifier<'a, 'b>(
     match pat {
         BindingPattern::BindingIdentifier(id) => Ok(id),
         _ => Err(Unsupported("destructuring binding")),
+    }
+}
+
+/// A local `export <decl>` is supported only for `const` with plain identifier
+/// bindings. A `const` is never reassigned, so the wrapper can re-export its
+/// final value after the module runs without missing a later mutation. Every
+/// other export declaration, and `export { ... }` specifiers, decline.
+fn export_const_declaration<'a, 'b>(
+    ex: &'b oxc_ast::ast::ExportDeclaration<'a>,
+) -> R<&'b oxc_ast::ast::VariableDeclaration<'a>> {
+    match &ex.declaration {
+        oxc_ast::ast::Declaration::VariableDeclaration(decl)
+            if decl.kind == VariableDeclarationKind::Const =>
+        {
+            Ok(decl)
+        }
+        _ => Err(Unsupported("export declaration outside the subset")),
     }
 }
 
