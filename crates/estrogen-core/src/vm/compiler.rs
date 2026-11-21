@@ -490,6 +490,8 @@ impl Compiler {
         self.fns.push(FnState {
             code: Vec::new(),
             loops: Vec::new(),
+            handlers: Vec::new(),
+            finally_floors: Vec::new(),
             is_module_main: false,
             allow_module_var: false,
             allow_root_class: false,
