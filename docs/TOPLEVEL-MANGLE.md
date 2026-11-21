@@ -95,8 +95,9 @@ does not make the name any less visible.
 
 The pass runs `oxc_mangler` with `top_level` set to whether the file has module
 syntax. It keeps function and class names through OXC's `keep_names` option,
-then assigns fresh short names to eligible private callable declarations. All
-renames use byte-range edits. It never reprints the AST.
+then assigns fresh short names to eligible private callables: function and class
+declarations, and a `const`/`let`/`var` bound to an anonymous arrow or function.
+All renames use byte-range edits. It never reprints the AST.
 
 | Source                                             | Output                             | How                                                                                                                                                                                                       |
 | -------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -141,9 +142,14 @@ other inline export falls back to unchanged.
 
 The pass can shorten a private function declaration when every reference is a
 direct call. A private class declaration qualifies when every reference uses
-`new`. Neither qualifies if its binding is reassigned or redeclared, if it is
-exported, or if the file observes a callable name. Those name checks apply to the
-whole file.
+`new`. A `const`/`let`/`var` bound to an anonymous arrow or function qualifies
+the same way a function declaration does: its inferred `.name` would be kept by
+`keep_names`, so the pass renames it to a fresh name when every reference is a
+direct call, nothing in the file observes a callable name, and it is not
+exported. A binding to a class expression is left alone, because an instance's
+`constructor.name` is observable outside the file. None of these qualify if the
+binding is reassigned or redeclared, if it is exported, or if the file observes a
+callable name. Those name checks apply to the whole file.
 
 The name check counts a `.name` read, a `{ name }` destructure, a
 `.constructor.name`, a string literal `"name"` (which can key a computed read or
