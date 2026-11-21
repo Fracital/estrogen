@@ -379,6 +379,22 @@ const CONTROL: &[&str] = &[
     "function f() { let r = ''; try { switch (2) { case 2: r += 'a'; break; default: r += 'b'; } } finally { r += 'z'; } return r; } f()",
     // an inner loop with break inside a plain try/catch
     "function f() { let t = 0; try { for (const x of [1, 2, 3]) { if (x === 3) break; t += x; } } catch (e) { t = -1; } return t; } f()",
+    // a break that escapes a try/finally runs the finally then exits the loop
+    "let o = []; for (let i = 0; i < 5; i++) { try { if (i === 2) break; o.push(i); } finally { o.push(-1); } } o",
+    // a continue that crosses a finally runs it then continues
+    "let o = []; for (let i = 0; i < 3; i++) { try { if (i === 1) continue; o.push(i); } finally { o.push(10 + i); } } o",
+    // a return that crosses a finally runs it, inside a loop
+    "function f() { let o = []; for (let i = 0; i < 3; i++) { try { if (i === 1) return o; } finally { o.push(i); } } return o; } f()",
+    // a finally that returns overrides a pending break
+    "function f() { for (;;) { try { break; } finally { return 'from-finally'; } } return 'after'; } f()",
+    // a break crossing two nested finallys runs them inner-to-outer
+    "let o = []; for (let i = 0; i < 2; i++) { try { try { if (i === 0) break; o.push('b' + i); } finally { o.push('f1-' + i); } } finally { o.push('f2-' + i); } } o",
+    // a break that escapes a try/catch (no finally) pops the catch handler
+    "let o = []; for (let i = 0; i < 4; i++) { try { if (i === 2) break; o.push(i); } catch (e) {} } o",
+    // a break escaping a try/finally out of a while loop
+    "let i = 0; let s = 0; while (i < 5) { try { i++; if (i === 3) break; s += i; } finally { s += 100; } } s",
+    // a continue escaping a nested block scope and a finally keeps the binding
+    "let o = []; for (let i = 0; i < 3; i++) { try { let k = i * 2; if (i === 1) continue; o.push(k); } finally { o.push(-i); } } o",
 ];
 
 /// Expression-surface mutation: compound, logical, and update assignment to a
@@ -713,11 +729,14 @@ fn unsupported_constructs_decline() {
         "const o = { value: 7, get: function () { return this.value; } }; (o?.get)()",
         "function f() { const x = 7; return eval('x'); } f()",
         "function f(){for(const x of [1,2]){for(const y of [3,4]){return x+y;}}} f()",
-        "while (true) { try { break; } catch(e){} }",
-        // a break or continue that escapes a try (catch or finally) needs the
-        // abrupt-jump trampoline, which is not emitted yet, so it declines.
-        "while (true) { try { break; } finally {} }",
+        // a break or continue inside a finally that escapes it would abandon the
+        // pending completion record, which is not ported, so it declines.
         "for (;;) { try { x(); } finally { continue; } }",
+        // a labeled jump across a try is not routed through the finally chain.
+        "outer: for (;;) { try { break outer; } finally {} }",
+        // an escaping jump out of a for-of across a try would skip the iterator
+        // close, so it declines.
+        "for (const x of [1, 2]) { try { if (x === 1) break; } finally {} }",
         "try { throw { x: 1 }; } catch ({ x }) {}",
         // a for-let binding captured by a closure must decline, because estrogen
         // uses one binding where native makes one per iteration.

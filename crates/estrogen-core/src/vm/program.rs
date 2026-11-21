@@ -113,6 +113,18 @@ impl ConstPool {
         self.intern(format!("s:{s}"), || Value::from(s.to_string()))
     }
 
+    /// Store an abrupt-jump record `{ t: target, s: stop }` that ABRUPT_JUMP
+    /// reads to route a break or continue through the finally chain. Each is a
+    /// distinct code position, so it is not interned.
+    pub fn add_jump_record(&mut self, target: i64, stop: i64) -> usize {
+        let mut obj = Map::new();
+        obj.insert("t".to_string(), Value::from(target));
+        obj.insert("s".to_string(), Value::from(stop));
+        let index = self.entries.len();
+        self.entries.push(Value::Object(obj));
+        index
+    }
+
     /// Intern a finite number constant and return its pool index. NaN and the
     /// infinities are stored as tagged objects the runtime's `decodeConst`
     /// reverses, because JSON cannot carry them.

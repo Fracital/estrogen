@@ -362,14 +362,15 @@ Falls back (declines, so the literal and name passes run instead):
   static imports and reexports work, but the VM's full module loader is not
   ported, so a local export of a value computed in the VM beyond the simple
   cases takes the fallback.
-- A `break` or `continue` that escapes a `try` (its block, catch, or finally),
-  which needs the abrupt-jump trampoline that is not emitted yet. A jump that
-  targets a loop or `switch` nested inside the try stays inside it and compiles;
-  only a jump that would leave the try declines, and a labeled jump declines
-  conservatively. A `return` that
-  leaves a `try` while a `for`/`of` iterator is still open; a `switch` case that
-  declares a lexical binding; and a labeled jump that would close more than one
-  `for`/`of` iterator at once.
+- A labeled `break`/`continue` across a `try`, an escaping `break`/`continue`
+  out of a `for`/`of` (its iterator close is not routed through the finally
+  chain), and a `break`/`continue` inside a `finally` that leaves it (which would
+  abandon the pending completion). An unlabeled `break`/`continue` that escapes a
+  plain loop through a `try`/`catch` or `try`/`finally` compiles: a crossed catch
+  is popped and a crossed finally runs first, through `ABRUPT_JUMP`. A `return`
+  that leaves a `try` while a `for`/`of` iterator is still open; a `switch` case
+  that declares a lexical binding; and a labeled jump that would close more than
+  one `for`/`of` iterator at once.
 - A generator whose own body uses `try`, `for`/`of`, or `for`/`in`; `yield*`
   inside an async generator; and a `for await` loop.
 - A `for (let ...)` whose test, update, or body makes a closure: estrogen uses one
@@ -433,11 +434,11 @@ does, is still a large amount of further work. In rough dependency order:
 1. The rest of generators: a `try`, `for`/`of`, or `for`/`in` inside a generator
    body, `yield*` inside an async generator, and a `for await` consumer, which
    the completion-record and iterator-close machinery can extend to.
-2. The rest of control flow: `break`/`continue` that escapes a `try` (the
-   abrupt-jump trampoline and `ABRUPT_JUMP`, which the shield routes through a
-   `jump` completion record), a `switch` case that declares a lexical binding, and
-   the conservative closure check that makes a `for (let ...)` containing a
-   `for`/`of`, `try`, or labeled statement decline.
+2. The rest of control flow: a labeled jump across a `try`, an escaping jump out
+   of a `for`/`of` (routing the iterator close through the finally chain), a
+   `break`/`continue` that leaves a `finally`, a `switch` case that declares a
+   lexical binding, and the conservative closure check that makes a
+   `for (let ...)` containing a `for`/`of`, `try`, or labeled statement decline.
 3. ES modules and the loader: static imports and native reexports have a hybrid
    wrapper now. Locally declared exports, the module descriptor (`imports`,
    `exports`, `reexports`, `deps`, `exportSlots`), the module ops, and the shield

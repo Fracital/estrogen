@@ -47,6 +47,30 @@
 	const DONE_NORMAL = 0;
 	const DONE_THROW = 1;
 	const DONE_RETURN = 2;
+	const DONE_JUMP = 3;
+
+	// A break or continue that crosses one or more finally blocks. Pop the
+	// handler stack down to `stop` (the handler depth at the target loop); for
+	// each finally crossed, restore its try scope and stack and route a jump
+	// completion through it, so END_FINALLY re-enters here for the next finally.
+	// When no finally remains before `stop`, land at `target`, where the compiler
+	// placed a trampoline that exits the leftover scopes and jumps to the loop.
+	function doJump(frame, target, stop) {
+		const handlers = frame.handlers;
+		while (handlers.length > stop) {
+			const h = handlers.pop();
+			if (h.type === HANDLER_FINALLY) {
+				frame.stack.length = h.stackLength;
+				frame.scope = h.scope;
+				frame.completions.push({ kind: DONE_JUMP, t: target, s: stop });
+				frame.pc = h.pc;
+				return null;
+			}
+			// a catch handler crossed on the way out: discard it.
+		}
+		frame.pc = target;
+		return null;
+	}
 
 	// Stable opcode indices, in the exact order of estrogen-core's opcodes.rs
 	// OP_NAMES. The counter assigns each name its position, so a handler stored at
@@ -586,7 +610,14 @@
 			return;
 		}
 		if (record.kind === DONE_THROW) throw record.value;
+		if (record.kind === DONE_JUMP) return doJump(frame, record.t, record.s);
 		return doReturn(frame, record.value);
+	};
+	// A break or continue that crosses a finally. The const holds the trampoline
+	// target and the handler depth to unwind down to.
+	HANDLERS[OP_ABRUPT_JUMP] = (frame, arg, consts) => {
+		const record = consts[arg];
+		return doJump(frame, record.t, record.s);
 	};
 	// Suspend the frame with the value on top of the stack. The async driver
 	// resumes the frame after the value settles, pushing the resolved value

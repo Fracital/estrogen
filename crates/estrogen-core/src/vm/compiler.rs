@@ -128,6 +128,14 @@ struct FnState {
     /// inside it (they push handlers that complicate yield resume), and `yield`
     /// compiles only here.
     is_generator: bool,
+    /// The live runtime handler stack (catch, finally, iterator), mirrored at
+    /// compile time so an escaping `break`/`continue` knows what it crosses.
+    handlers: Vec<HandlerKind>,
+    /// The loop-stack length at the start of each finally body being compiled. A
+    /// `break`/`continue` inside a finally that targets a loop below this escapes
+    /// the finally and would abandon its pending completion record, which is not
+    /// ported, so it declines. A `return` is fine: the frame leaves.
+    finally_floors: Vec<usize>,
 }
 
 /// One open loop or `switch`. Collects the jump operand indices to patch once the
@@ -145,6 +153,10 @@ struct LoopState {
     // (true for a `switch` and for a labeled non-loop block) marks an entry that
     // `continue` cannot target.
     label: Option<String>,
+    // The handler-stack depth when the loop body starts (a for-of sets it after
+    // its own iterator handler). A jump out of the loop crosses the handlers
+    // above this.
+    handler_base: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +164,21 @@ struct IteratorLoop {
     slot: usize,
     head_scope_index: usize,
     handler_active: bool,
+}
+
+/// One live runtime handler, mirroring `frame.handlers` at compile time so a
+/// `break`/`continue` that escapes a `try` knows what it crosses. A catch is
+/// popped on the way out; a finally must run, so the jump routes through it;
+/// a for-of iterator handler means the simple unwind does not apply.
+#[derive(Clone, Copy)]
+enum HandlerKind {
+    Catch,
+    /// The scope depth (`self.scopes.len()`) at the finally's `try`, so a jump
+    /// that lands past the finally chain can exit the scopes left over.
+    Finally {
+        scope_depth: usize,
+    },
+    Iterator,
 }
 
 struct Compiler {
@@ -199,6 +226,8 @@ impl Compiler {
             var_slots: Vec::new(),
             is_async: false,
             is_generator: false,
+            handlers: Vec::new(),
+            finally_floors: Vec::new(),
         });
         self.scopes.push(Scope::default());
         if allow_module_var {
@@ -246,6 +275,8 @@ impl Compiler {
             var_slots: Vec::new(),
             is_async,
             is_generator,
+            handlers: Vec::new(),
+            finally_floors: Vec::new(),
         });
         self.scopes.push(Scope::default());
         let num_params = self.compile_params(params)?;
@@ -433,6 +464,8 @@ impl Compiler {
             var_slots: Vec::new(),
             is_async: false,
             is_generator: false,
+            handlers: Vec::new(),
+            finally_floors: Vec::new(),
         });
         self.scopes.push(Scope::default());
         self.compile_named_expr(value, name)?;
@@ -915,26 +948,29 @@ impl Compiler {
         if catch.is_none() && finalizer.is_none() {
             return Err(Unsupported("try without catch or finally"));
         }
-        // A break or continue that escapes the try needs the ABRUPT_JUMP
-        // trampoline, which is not emitted yet. Decline when any of the block,
-        // catch, or finally bodies carries one. A jump that stays inside the try
-        // (targeting a loop nested within it) is handled by that loop.
-        if escaping_jump_in(&stmt.block.body)
-            || catch.is_some_and(|handler| escaping_jump_in(&handler.body.body))
-            || finalizer.is_some_and(|block| escaping_jump_in(&block.body))
-        {
-            return Err(Unsupported("break or continue across try"));
-        }
+        // A break/continue/return that escapes the try is routed by emit_break,
+        // emit_continue, and doReturn: a catch it crosses is popped, a finally it
+        // crosses runs first (through ABRUPT_JUMP). The compile-time handler
+        // stack below mirrors the runtime handlers so those jumps know what they
+        // cross.
 
         // `finally` pushes a handler that stays live through the body and the
         // catch, so an abrupt completion routes its completion record through
         // the finally block before leaving.
+        let try_scope_depth = self.scopes.len();
         let finally_handler = finalizer.map(|_| self.emit_jump("PUSH_FINALLY"));
+        if finalizer.is_some() {
+            self.push_handler(HandlerKind::Finally {
+                scope_depth: try_scope_depth,
+            });
+        }
 
         if let Some(catch) = catch {
             let catch_target = self.emit_jump("PUSH_HANDLER");
+            self.push_handler(HandlerKind::Catch);
             self.compile_block(&stmt.block.body)?;
             self.emit0("POP_HANDLER");
+            self.pop_handler();
             let after_catch = self.emit_jump("JMP");
             self.patch_here(catch_target);
 
@@ -961,9 +997,17 @@ impl Compiler {
             // completion, and fall into the finally body. An abrupt completion
             // jumped here with its own record already pushed.
             self.emit0("POP_HANDLER");
+            self.pop_handler();
             self.emit0("PUSH_COMPLETION_NORMAL");
             self.patch_here(finally_handler);
+            let floor = self.fns.last().expect("frame").loops.len();
+            self.fns
+                .last_mut()
+                .expect("frame")
+                .finally_floors
+                .push(floor);
             self.compile_block(&finalizer.body)?;
+            self.fns.last_mut().expect("frame").finally_floors.pop();
             let end = self.emit_jump("END_FINALLY");
             self.patch_here(end);
         }
@@ -1234,16 +1278,20 @@ impl Compiler {
         }
 
         let caught = self.emit_jump("PUSH_HANDLER");
-        self.fns
-            .last_mut()
-            .expect("frame")
-            .loops
-            .last_mut()
-            .expect("loop")
-            .iterator
-            .as_mut()
-            .expect("iterator")
-            .handler_active = true;
+        self.push_handler(HandlerKind::Iterator);
+        // The loop body runs above its own iterator handler, so a jump out of
+        // the body does not count that handler among the ones it crosses.
+        let body_handler_base = self.fns.last().expect("frame").handlers.len();
+        {
+            let frame = self.fns.last_mut().expect("frame");
+            let loop_state = frame.loops.last_mut().expect("loop");
+            loop_state.handler_base = body_handler_base;
+            loop_state
+                .iterator
+                .as_mut()
+                .expect("iterator")
+                .handler_active = true;
+        }
         self.compile_statement(body, false)?;
         self.fns
             .last_mut()
@@ -1256,6 +1304,7 @@ impl Compiler {
             .expect("iterator")
             .handler_active = false;
         self.emit0("POP_HANDLER");
+        self.pop_handler();
         let after_catch = self.emit_jump("JMP");
         self.patch_here(caught);
         let error_slot = self.add_local("\0iteration-error");
@@ -2819,6 +2868,7 @@ impl Compiler {
         is_switch: bool,
         label: Option<&str>,
     ) {
+        let handler_base = self.fns.last().expect("frame").handlers.len();
         self.fns.last_mut().expect("frame").loops.push(LoopState {
             break_sites: Vec::new(),
             continue_sites: Vec::new(),
@@ -2827,6 +2877,7 @@ impl Compiler {
             is_switch,
             iterator: None,
             label: label.map(str::to_string),
+            handler_base,
         });
     }
 
@@ -2869,14 +2920,114 @@ impl Compiler {
             .expect("open loop")
     }
 
+    fn push_handler(&mut self, kind: HandlerKind) {
+        self.fns.last_mut().expect("frame").handlers.push(kind);
+    }
+
+    fn pop_handler(&mut self) {
+        self.fns.last_mut().expect("frame").handlers.pop();
+    }
+
+    /// A `break`/`continue` that leaves the finally body currently being
+    /// compiled (its target loop is below the finally's floor) would abandon the
+    /// pending completion record, which is not ported. Decline it.
+    fn check_finally_escape(&self, idx: usize) -> R<()> {
+        if let Some(&floor) = self.fns.last().expect("frame").finally_floors.last() {
+            if idx < floor {
+                return Err(Unsupported("break or continue out of a finally"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The handlers a jump out to `loops[idx]` crosses, innermost first.
+    fn crossed_handlers(&self, idx: usize) -> Vec<HandlerKind> {
+        let frame = self.fns.last().expect("frame");
+        let base = frame.loops[idx].handler_base;
+        frame.handlers[base..].iter().rev().copied().collect()
+    }
+
+    /// Emit the handler cleanup for a `break`/`continue` out to `loops[idx]`:
+    /// pop a crossed catch, and for a crossed finally route the jump through the
+    /// finally chain with ABRUPT_JUMP so it runs before the loop is left. Returns
+    /// `Ok(true)` when it emitted an ABRUPT_JUMP trampoline that already jumped to
+    /// `site_target` (so the caller must not also emit the plain JMP), `Ok(false)`
+    /// for the simple path (caller emits the unwind + JMP). Declines when a for-of
+    /// iterator is crossed, which needs iterator-close routing not ported here.
+    fn emit_escape_cleanup(&mut self, idx: usize, target_depth: usize) -> R<Option<usize>> {
+        let crossed = self.crossed_handlers(idx);
+        if crossed.is_empty() {
+            return Ok(None);
+        }
+        if crossed.iter().any(|h| matches!(h, HandlerKind::Iterator)) {
+            return Err(Unsupported("break or continue across a for-of and a try"));
+        }
+        // The target loop's own for-of iterator would need closing on the way
+        // out, which the simple pop and the finally trampoline do not do; decline
+        // a cross-try jump out of a for-of.
+        if self.fns.last().expect("frame").loops[idx]
+            .iterator
+            .is_some_and(|i| i.handler_active)
+        {
+            return Err(Unsupported(
+                "break or continue across a try out of a for-of",
+            ));
+        }
+        // Outermost crossed finally, if any: its try-scope is where the runtime
+        // lands after the finally chain, so the trampoline exits from there.
+        let outer_finally = crossed.iter().rev().find_map(|h| match h {
+            HandlerKind::Finally { scope_depth } => Some(*scope_depth),
+            HandlerKind::Catch => None,
+            HandlerKind::Iterator => None,
+        });
+        match outer_finally {
+            None => {
+                // All crossed handlers are catch: pop each, then the caller
+                // emits the scope unwind and the plain jump.
+                for _ in &crossed {
+                    self.emit0("POP_HANDLER");
+                }
+                Ok(None)
+            }
+            Some(finally_scope) => {
+                // Route through the finally chain: ABRUPT_JUMP unwinds the
+                // runtime handlers down to the loop's base, running each crossed
+                // finally, then lands at a trampoline that exits the scopes left
+                // over down to the loop target and jumps to it.
+                let stop = self.fns.last().expect("frame").loops[idx].handler_base;
+                let op_site = self.emit_jump("ABRUPT_JUMP");
+                let tramp = self.code_len();
+                for _ in target_depth..finally_scope {
+                    self.emit0("EXIT_SCOPE");
+                }
+                let jump_site = self.emit_jump("JMP");
+                let cidx = self.consts.add_jump_record(tramp as i64, stop as i64);
+                self.patch_to(op_site, cidx);
+                Ok(Some(jump_site))
+            }
+        }
+    }
+
     fn emit_break(&mut self) -> R<()> {
-        let loops = &self.fns.last().expect("frame").loops;
-        let idx = loops
+        let idx = self
+            .fns
+            .last()
+            .expect("frame")
+            .loops
             .len()
             .checked_sub(1)
             .ok_or(Unsupported("break outside a loop or switch"))?;
-        let target = loops[idx].break_depth;
-        let iterator = loops[idx].iterator;
+        self.check_finally_escape(idx)?;
+        let target = self.fns.last().expect("frame").loops[idx].break_depth;
+        // A try crossed on the way out runs its finally and pops its catch. A
+        // finally reroute already jumps to the loop exit, so record that site.
+        if let Some(site) = self.emit_escape_cleanup(idx, target)? {
+            self.fns.last_mut().expect("frame").loops[idx]
+                .break_sites
+                .push(site);
+            return Ok(());
+        }
+        let iterator = self.fns.last().expect("frame").loops[idx].iterator;
         if let Some(iterator) = iterator.filter(|i| i.handler_active) {
             self.emit0("POP_HANDLER");
             self.emit_close_iterator(iterator);
@@ -2890,13 +3041,23 @@ impl Compiler {
     }
 
     fn emit_continue(&mut self) -> R<()> {
-        let loops = &self.fns.last().expect("frame").loops;
-        let idx = loops
+        let idx = self
+            .fns
+            .last()
+            .expect("frame")
+            .loops
             .iter()
             .rposition(|l| !l.is_switch)
             .ok_or(Unsupported("continue outside a loop"))?;
-        let target = loops[idx].continue_depth;
-        let iterator = loops[idx].iterator;
+        self.check_finally_escape(idx)?;
+        let target = self.fns.last().expect("frame").loops[idx].continue_depth;
+        if let Some(site) = self.emit_escape_cleanup(idx, target)? {
+            self.fns.last_mut().expect("frame").loops[idx]
+                .continue_sites
+                .push(site);
+            return Ok(());
+        }
+        let iterator = self.fns.last().expect("frame").loops[idx].iterator;
         if iterator.is_some_and(|i| i.handler_active) {
             self.emit0("POP_HANDLER");
         }
@@ -2917,6 +3078,16 @@ impl Compiler {
             .iter()
             .rposition(|l| l.label.as_deref() == Some(label))
             .ok_or(Unsupported("labeled break target not found"))?;
+        self.check_finally_escape(idx)?;
+        // Routing a labeled jump through a crossed try/finally is not ported;
+        // only unlabeled break/continue cross a try.
+        if self
+            .crossed_handlers(idx)
+            .iter()
+            .any(|h| !matches!(h, HandlerKind::Iterator))
+        {
+            return Err(Unsupported("labeled break across a try"));
+        }
         // Close every active iterator of a loop this break fully exits, innermost
         // first. More than one would need atomic multi-iterator unwinding, the
         // same hazard `return across nested iterators` declines, so decline that.
@@ -2950,11 +3121,19 @@ impl Compiler {
             .iter()
             .rposition(|l| l.label.as_deref() == Some(label))
             .ok_or(Unsupported("labeled continue target not found"))?;
+        self.check_finally_escape(idx)?;
         if self.fns.last().expect("frame").loops[idx].is_switch {
             // `continue` to a `switch` or a labeled block is a syntax error the
             // parser rejects; decline rather than emit a bad jump if it reaches
             // here.
             return Err(Unsupported("continue to a non-loop label"));
+        }
+        if self
+            .crossed_handlers(idx)
+            .iter()
+            .any(|h| !matches!(h, HandlerKind::Iterator))
+        {
+            return Err(Unsupported("labeled continue across a try"));
         }
         // Inner loops this continue fully exits have their iterators closed; the
         // target loop keeps iterating, so its handler is only popped (the loop
@@ -3184,69 +3363,6 @@ fn contains_return_stmt(stmts: &[Statement<'_>]) -> bool {
         }
         _ => false,
     })
-}
-
-/// Whether a statement list holds a `break`/`continue` that would leave it,
-/// i.e. one not caught by a loop or `switch` nested inside the list. A jump that
-/// targets an inner loop stays inside and is handled by that loop, so it does
-/// not count. A labeled jump counts conservatively, because its target label may
-/// sit outside the list and the VM does not route a labeled jump across a
-/// `finally` yet.
-fn escaping_jump_in(stmts: &[Statement<'_>]) -> bool {
-    stmts
-        .iter()
-        .any(|stmt| escaping_jump_stmt(stmt, false, false))
-}
-
-fn escaping_jump_stmt(stmt: &Statement<'_>, break_bound: bool, continue_bound: bool) -> bool {
-    match stmt {
-        // A labeled jump may target a label outside the scanned region; treat it
-        // as escaping. An unlabeled jump escapes only when no enclosing loop or
-        // switch inside the region catches it.
-        Statement::BreakStatement(s) => s.label.is_some() || !break_bound,
-        Statement::ContinueStatement(s) => s.label.is_some() || !continue_bound,
-        Statement::BlockStatement(block) => block
-            .body
-            .iter()
-            .any(|s| escaping_jump_stmt(s, break_bound, continue_bound)),
-        Statement::IfStatement(s) => {
-            escaping_jump_stmt(&s.consequent, break_bound, continue_bound)
-                || s.alternate
-                    .as_ref()
-                    .is_some_and(|a| escaping_jump_stmt(a, break_bound, continue_bound))
-        }
-        Statement::LabeledStatement(s) => escaping_jump_stmt(&s.body, break_bound, continue_bound),
-        // A loop binds both break and continue for the statements inside it.
-        Statement::WhileStatement(s) => escaping_jump_stmt(&s.body, true, true),
-        Statement::DoWhileStatement(s) => escaping_jump_stmt(&s.body, true, true),
-        Statement::ForStatement(s) => escaping_jump_stmt(&s.body, true, true),
-        Statement::ForOfStatement(s) => escaping_jump_stmt(&s.body, true, true),
-        Statement::ForInStatement(s) => escaping_jump_stmt(&s.body, true, true),
-        // A switch binds break but not continue.
-        Statement::SwitchStatement(s) => s.cases.iter().any(|case| {
-            case.consequent
-                .iter()
-                .any(|st| escaping_jump_stmt(st, true, continue_bound))
-        }),
-        Statement::TryStatement(s) => {
-            s.block
-                .body
-                .iter()
-                .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
-                || s.handler.as_ref().is_some_and(|h| {
-                    h.body
-                        .body
-                        .iter()
-                        .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
-                })
-                || s.finalizer.as_ref().is_some_and(|b| {
-                    b.body
-                        .iter()
-                        .any(|st| escaping_jump_stmt(st, break_bound, continue_bound))
-                })
-        }
-        _ => false,
-    }
 }
 
 fn pack_addr(depth: usize, index: usize) -> i64 {
