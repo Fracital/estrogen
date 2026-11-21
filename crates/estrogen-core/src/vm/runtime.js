@@ -508,6 +508,44 @@
 		o[consts[arg]] = v;
 		s.push(v);
 	};
+	// Private members. `consts[arg]` is the `#name`; frame.privs carries the
+	// class private env (one WeakMap per field), so a read or write brand-checks
+	// the receiver and throws if its class did not declare the name.
+	HANDLERS[OP_GET_PRIVATE] = (frame, arg, consts) => {
+		const s = frame.stack;
+		const obj = s.pop();
+		const pn = consts[arg];
+		const e = frame.privs && frame.privs[pn];
+		if (!e || obj === null || typeof obj !== 'object' || !e.map.has(obj))
+			throw new TypeError(
+				'Cannot read private member ' +
+					pn +
+					' from an object whose class did not declare it',
+			);
+		s.push(e.map.get(obj));
+	};
+	HANDLERS[OP_SET_PRIVATE] = (frame, arg, consts) => {
+		const s = frame.stack;
+		const v = s.pop();
+		const obj = s.pop();
+		const pn = consts[arg];
+		const e = frame.privs && frame.privs[pn];
+		if (!e || obj === null || typeof obj !== 'object' || !e.map.has(obj))
+			throw new TypeError(
+				'Cannot write private member ' +
+					pn +
+					' to an object whose class did not declare it',
+			);
+		e.map.set(obj, v);
+		s.push(v);
+	};
+	HANDLERS[OP_HAS_PRIVATE] = (frame, arg, consts) => {
+		const s = frame.stack;
+		const obj = s.pop();
+		const pn = consts[arg];
+		const e = frame.privs && frame.privs[pn];
+		s.push(!!(e && obj !== null && typeof obj === 'object' && e.map.has(obj)));
+	};
 	HANDLERS[OP_SET_PROP_DYN] = (frame) => {
 		const s = frame.stack;
 		const v = s.pop();
@@ -776,7 +814,13 @@
 	) {
 		const def = functions[arg];
 		frame.stack.push(
-			createClosure(def, { scope: frame.scope, arrowThis: frame.thisVal }),
+			createClosure(def, {
+				scope: frame.scope,
+				arrowThis: frame.thisVal,
+				privs: frame.privs,
+				home: frame.home,
+				newTarget: frame.newTarget,
+			}),
 		);
 	};
 	HANDLERS[OP_BUILD_CLASS] = function (
@@ -1153,6 +1197,10 @@
 				// A derived constructor's instance fields initialize right after
 				// super() binds `this`; SUPER_CALL runs this with the receiver.
 				initFields: extra ? extra.initFields : undefined,
+				// The class private environment (`#name` -> { map }), carried
+				// lexically so `this.#x` resolves inside methods and their nested
+				// closures.
+				privs: extra ? extra.privs : undefined,
 			};
 		}
 
@@ -1178,6 +1226,7 @@
 							makeFrame(def, ctx.scope, ctx.arrowThis, callArgs, {
 								newTarget: ctx.newTarget,
 								home: ctx.home,
+								privs: ctx.privs,
 							}),
 						)
 				: function (...callArgs) {
@@ -1185,6 +1234,7 @@
 							makeFrame(def, ctx.scope, this, callArgs, {
 								newTarget: new.target,
 								home: ctx.home,
+								privs: ctx.privs,
 							}),
 						);
 					};
@@ -1213,6 +1263,13 @@
 						' is not a constructor or null',
 				);
 			}
+			// The class private environment: one WeakMap per private field, keyed
+			// by instance. Method frames carry it so `this.#x` resolves and
+			// brand-checks. Only private fields are compiled, so every entry is a
+			// field map.
+			const privEnv = {};
+			for (const pn of desc.privNames || [])
+				privEnv[pn] = { map: new WeakMap() };
 			const defineField = (receiver, field) => {
 				const value =
 					field.fn === null
@@ -1220,14 +1277,21 @@
 						: runSync(
 								makeFrame(functions[field.fn], classScope, receiver, [], {
 									home: proto,
+									privs: privEnv,
 								}),
 							);
-				Object.defineProperty(receiver, field.key, {
-					value,
-					writable: true,
-					enumerable: true,
-					configurable: true,
-				});
+				if (field.priv) {
+					// A private field lives in the per-class WeakMap, not as a string
+					// property, so it never appears in Object.keys or JSON.
+					privEnv[field.priv].map.set(receiver, value);
+				} else {
+					Object.defineProperty(receiver, field.key, {
+						value,
+						writable: true,
+						enumerable: true,
+						configurable: true,
+					});
+				}
 			};
 			const initInstanceFields = (receiver) => {
 				for (const field of desc.fields) {
@@ -1262,6 +1326,7 @@
 							newTarget: nt,
 							superClass,
 							initFields: initInstanceFields,
+							privs: privEnv,
 						},
 					);
 					const value = runSync(f);
@@ -1285,6 +1350,7 @@
 						makeFrame(functions[desc.ctor], classScope, this, args, {
 							home: proto,
 							newTarget: nt,
+							privs: privEnv,
 						}),
 					);
 					if (
@@ -1323,7 +1389,10 @@
 				({
 					[name](...args) {
 						return runSync(
-							makeFrame(def, classScope, this, args, { home: proto }),
+							makeFrame(def, classScope, this, args, {
+								home: proto,
+								privs: privEnv,
+							}),
 						);
 					},
 				})[name];
@@ -1383,6 +1452,7 @@
 					runSync(
 						makeFrame(functions[field.fn], classScope, Class, [], {
 							home: Class,
+							privs: privEnv,
 						}),
 					);
 				} else {

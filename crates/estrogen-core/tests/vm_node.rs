@@ -256,6 +256,22 @@ const CLASSES: &[&str] = &[
     "class C { static { let n = 5; this.v = n * 2; } } C.v",
     // a static block in a derived class sees super through the class
     "class A { static who() { return 'A'; } } class B extends A { static { this.tag = super.who(); } } B.tag",
+    // a private field reads and writes through the class brand
+    "class C { #x = 5; get() { return this.#x; } set(v) { this.#x = v; } } const c = new C(); c.set(c.get() + 10); c.get()",
+    // a private field is not an own string property
+    "class C { #x = 1; } const c = new C(); [Object.keys(c).length, JSON.stringify(c)]",
+    // reading a private member of a wrong-brand object throws a TypeError
+    "class C { #x = 1; static read(o) { return o.#x; } } let e = ''; try { C.read({}); } catch (err) { e = err.constructor.name; } e",
+    // `#x in obj` is a brand check
+    "class C { #x = 1; static has(o) { return #x in o; } } [C.has(new C()), C.has({})]",
+    // a private field holding a function keeps `this` when called
+    "class C { #f = function () { return this.#v; }; #v = 9; run() { return this.#f(); } } new C().run()",
+    // a derived class declares its own private field
+    "class A { a() { return 1; } } class B extends A { #x = 7; get() { return this.#x + this.a(); } } new B().get()",
+    // a private field initializer reads an earlier private field
+    "class C { #a = 2; #b = this.#a * 3; get() { return this.#b; } } new C().get()",
+    // a private field in a nested closure inside a method
+    "class C { #x = 4; make() { return () => this.#x * 2; } } new C().make()()",
 ];
 
 /// Control flow: if/else, while, do/while, C-style for, break/continue, switch,
@@ -713,7 +729,8 @@ fn unsupported_constructs_decline() {
         "import x from './y.js'; x",
         "class C { [Math.random()]() {} }",
         "class C { [Math.random()] = 1; }",
-        "class C { #private = 1; }",
+        "class C { #m() { return 1; } }",
+        "class C { static #s = 1; }",
         "class C { async method() {} }",
         "class C { *method() {} }",
         "let C; C = class {}; C.name",
@@ -1117,9 +1134,10 @@ fn unsupported_chunk_still_declines_at_the_api() {
         seed: Some(b"fallback-seed".to_vec()),
         ..Options::default()
     };
-    // A private class member is still outside the subset, so the VM declines it.
-    let declined =
-        try_compile_chunk("class C { #x = 1; }\n", &opts).expect("compile should not error");
+    // A private method is still outside the subset, so the VM declines it (a
+    // private field now compiles).
+    let declined = try_compile_chunk("class C { #m() { return 1; } }\n", &opts)
+        .expect("compile should not error");
     assert!(
         declined.is_none(),
         "an out-of-subset class chunk must decline to the fallback path"

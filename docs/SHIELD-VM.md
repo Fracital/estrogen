@@ -293,6 +293,14 @@ falls back. The subset:
 - Class accessors: a `get` or `set`, instance or static, installs a merged
   accessor descriptor (`enumerable` false, `configurable` true) on the prototype
   or the class. A plain method still installs a value property.
+- Private instance fields (`#x`): each private name is one per-class `WeakMap`
+  keyed by the instance, not a string property, so it never shows in
+  `Object.keys` or `JSON`. `BUILD_CLASS` creates the maps and threads the private
+  env through every class frame and nested closure, so `this.#x` resolves inside
+  a method or a closure it returns. `GET_PRIVATE`, `SET_PRIVATE`, and
+  `HAS_PRIVATE` read, write, and brand-check (`#x in obj`), throwing a
+  `TypeError` on a receiver whose class did not declare the name. A private field
+  holding a function keeps its receiver when called as `this.#x()`.
 - Control flow: `if`/`else`, `while`, `do`/`while`, C-style `for`, `for`/`of`,
   `for`/`in`, `switch`, `try`/`catch`/`finally`, `throw`, and `break`/`continue`,
   both unlabeled and to a label on an enclosing loop, `switch`, or block. A

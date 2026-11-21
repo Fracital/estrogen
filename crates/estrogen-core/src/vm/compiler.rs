@@ -536,6 +536,7 @@ impl Compiler {
         let mut constructor = None;
         let mut methods = Vec::new();
         let mut fields = Vec::new();
+        let mut priv_names: Vec<String> = Vec::new();
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
@@ -591,8 +592,29 @@ impl Compiler {
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    if field.computed || !field.decorators.is_empty() {
-                        return Err(Unsupported("computed or decorated class field"));
+                    if !field.decorators.is_empty() {
+                        return Err(Unsupported("decorated class field"));
+                    }
+                    // A private instance field lives in the class's per-field
+                    // WeakMap, not as a string property. Private static fields are
+                    // not ported.
+                    if let PropertyKey::PrivateIdentifier(id) = &field.key {
+                        if field.r#static {
+                            return Err(Unsupported("private static field"));
+                        }
+                        let pn = format!("#{}", id.name);
+                        let initializer = match &field.value {
+                            Some(value) => Some(self.compile_field_initializer(value, &pn)?),
+                            None => None,
+                        };
+                        priv_names.push(pn.clone());
+                        fields.push(
+                            json!({"key": null, "static": false, "priv": pn, "fn": initializer}),
+                        );
+                        continue;
+                    }
+                    if field.computed {
+                        return Err(Unsupported("computed class field"));
                     }
                     let key =
                         static_key(&field.key).ok_or(Unsupported("non-static class field key"))?;
@@ -616,6 +638,7 @@ impl Compiler {
             "methods": methods,
             "fields": fields,
             "hasSuper": has_super,
+            "privNames": priv_names,
         });
         let index = self.consts.add_class(descriptor);
         // Push the superclass value (null for a non-derived class) for
@@ -1662,6 +1685,22 @@ impl Compiler {
                 self.compile_expr(&m.expression)?;
                 self.emit0("GET_PROP_DYN");
             }
+            Expression::PrivateFieldExpression(m) => {
+                // `obj.#x`: read the private field through the class private env,
+                // which brand-checks the receiver.
+                if m.optional {
+                    return Err(Unsupported("optional private member access"));
+                }
+                self.compile_expr(&m.object)?;
+                let i = self.consts.add_str(format!("#{}", m.field.name).as_str());
+                self.emit1("GET_PRIVATE", i as i64);
+            }
+            Expression::PrivateInExpression(e) => {
+                // `#x in obj`: a brand check, not a property lookup.
+                self.compile_expr(&e.right)?;
+                let i = self.consts.add_str(format!("#{}", e.left.name).as_str());
+                self.emit1("HAS_PRIVATE", i as i64);
+            }
             Expression::CallExpression(call) => self.compile_call(call)?,
             Expression::NewExpression(new) => {
                 self.compile_expr(&new.callee)?;
@@ -2025,8 +2064,13 @@ impl Compiler {
                             self.compile_expr(&node.right)?;
                             self.emit0("SET_PROP_DYN");
                         }
-                        MemberExpression::PrivateFieldExpression(_) => {
-                            return Err(Unsupported("private field assignment"))
+                        MemberExpression::PrivateFieldExpression(m) => {
+                            // `obj.#x = v`: write through the class private env,
+                            // which brand-checks the receiver.
+                            self.compile_expr(&m.object)?;
+                            self.compile_expr(&node.right)?;
+                            let i = self.consts.add_str(format!("#{}", m.field.name).as_str());
+                            self.emit1("SET_PRIVATE", i as i64);
                         }
                     }
                 }
@@ -2263,6 +2307,20 @@ impl Compiler {
                 self.emit0("DUP");
                 self.compile_expr(&m.expression)?;
                 self.emit0("GET_PROP_DYN");
+                let (argc, spread) = self.compile_args(&call.arguments)?;
+                if spread {
+                    self.emit0("CALL_METHOD_APPLY");
+                } else {
+                    self.emit1("CALL_METHOD", argc as i64);
+                }
+            }
+            // `obj.#x(args)`: the receiver is kept so a private field holding a
+            // regular function sees the right `this`.
+            Expression::PrivateFieldExpression(m) if !m.optional => {
+                self.compile_expr(&m.object)?;
+                self.emit0("DUP");
+                let i = self.consts.add_str(format!("#{}", m.field.name).as_str());
+                self.emit1("GET_PRIVATE", i as i64);
                 let (argc, spread) = self.compile_args(&call.arguments)?;
                 if spread {
                     self.emit0("CALL_METHOD_APPLY");
