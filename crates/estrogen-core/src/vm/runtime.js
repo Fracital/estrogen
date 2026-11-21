@@ -151,28 +151,28 @@
 	// bytes to the trap.
 	const HANDLERS = [];
 
-	HANDLERS[OP_HALT] = function (frame) {
+	HANDLERS[OP_HALT] = (frame) => {
 		return { type: SIG_HALT, value: frame.completion };
 	};
 	HANDLERS[OP_NOP] = function () {};
-	HANDLERS[OP_POP] = function (frame) {
+	HANDLERS[OP_POP] = (frame) => {
 		frame.stack.pop();
 	};
-	HANDLERS[OP_DUP] = function (frame) {
+	HANDLERS[OP_DUP] = (frame) => {
 		const s = frame.stack;
 		s.push(s[s.length - 1]);
 	};
-	HANDLERS[OP_SWAP] = function (frame) {
+	HANDLERS[OP_SWAP] = (frame) => {
 		const s = frame.stack;
 		const a = s.pop();
 		const b = s.pop();
 		s.push(a, b);
 	};
-	HANDLERS[OP_SET_COMPLETION] = function (frame) {
+	HANDLERS[OP_SET_COMPLETION] = (frame) => {
 		frame.completion = frame.stack.pop();
 	};
 
-	HANDLERS[OP_PUSH_CONST] = function (frame, arg, consts) {
+	HANDLERS[OP_PUSH_CONST] = (frame, arg, consts) => {
 		const value = consts[arg];
 		frame.stack.push(
 			value instanceof NativeRegExp
@@ -180,28 +180,28 @@
 				: value,
 		);
 	};
-	HANDLERS[OP_PUSH_UNDEF] = function (frame) {
+	HANDLERS[OP_PUSH_UNDEF] = (frame) => {
 		frame.stack.push(undefined);
 	};
-	HANDLERS[OP_PUSH_NULL] = function (frame) {
+	HANDLERS[OP_PUSH_NULL] = (frame) => {
 		frame.stack.push(null);
 	};
-	HANDLERS[OP_PUSH_TRUE] = function (frame) {
+	HANDLERS[OP_PUSH_TRUE] = (frame) => {
 		frame.stack.push(true);
 	};
-	HANDLERS[OP_PUSH_FALSE] = function (frame) {
+	HANDLERS[OP_PUSH_FALSE] = (frame) => {
 		frame.stack.push(false);
 	};
-	HANDLERS[OP_PUSH_THIS] = function (frame) {
+	HANDLERS[OP_PUSH_THIS] = (frame) => {
 		frame.stack.push(frame.thisVal);
 	};
 
-	HANDLERS[OP_LOAD_SLOT] = function (frame, arg) {
+	HANDLERS[OP_LOAD_SLOT] = (frame, arg) => {
 		const b = scopeAt(frame.scope, arg >>> 16).slots[arg & 0xffff];
 		if (!b.init) throw new ReferenceError(TDZ_READ);
 		frame.stack.push(b.v);
 	};
-	HANDLERS[OP_STORE_SLOT] = function (frame, arg) {
+	HANDLERS[OP_STORE_SLOT] = (frame, arg) => {
 		const v = frame.stack.pop();
 		const b = scopeAt(frame.scope, arg >>> 16).slots[arg & 0xffff];
 		if (b.kind === 2 && b.init)
@@ -210,18 +210,18 @@
 		b.v = v;
 		frame.stack.push(v);
 	};
-	HANDLERS[OP_INIT_SLOT] = function (frame, arg) {
+	HANDLERS[OP_INIT_SLOT] = (frame, arg) => {
 		const v = frame.stack.pop();
 		const b = scopeAt(frame.scope, arg >>> 16).slots[arg & 0xffff];
 		b.v = v;
 		b.init = true;
 	};
-	HANDLERS[OP_TYPEOF_SLOT] = function (frame, arg) {
+	HANDLERS[OP_TYPEOF_SLOT] = (frame, arg) => {
 		const b = scopeAt(frame.scope, arg >>> 16).slots[arg & 0xffff];
 		if (!b.init) throw new ReferenceError(TDZ_READ);
 		frame.stack.push(typeof b.v);
 	};
-	HANDLERS[OP_DECLARE_SLOT] = function (frame, arg) {
+	HANDLERS[OP_DECLARE_SLOT] = (frame, arg) => {
 		frame.scope.slots[arg >>> 2] = {
 			v: undefined,
 			kind: arg & 3,
@@ -229,7 +229,7 @@
 		};
 	};
 	// arg packs slot<<8 | argIndex: bind a plain parameter to its slot.
-	HANDLERS[OP_BIND_PARAM] = function (frame, arg) {
+	HANDLERS[OP_BIND_PARAM] = (frame, arg) => {
 		frame.scope.slots[arg >>> 8] = {
 			v: frame.args[arg & 0xff],
 			kind: 0,
@@ -238,34 +238,34 @@
 	};
 	// Push one call argument by index (undefined past the end). Used by default
 	// parameters, which test the loaded value against undefined.
-	HANDLERS[OP_LOAD_ARG] = function (frame, arg) {
+	HANDLERS[OP_LOAD_ARG] = (frame, arg) => {
 		frame.stack.push(frame.args[arg]);
 	};
 	// Push a fresh array of the call arguments from `arg` onward. Backs a rest
 	// parameter (`...xs`), which is a real Array.
-	HANDLERS[OP_LOAD_ARGS_FROM] = function (frame, arg) {
+	HANDLERS[OP_LOAD_ARGS_FROM] = (frame, arg) => {
 		frame.stack.push(frame.args.slice(arg));
 	};
 	// Push a genuine (unmapped) arguments object built from the call arguments.
 	// A fresh arguments object is array-like with the right length, indices, and
 	// iterator, and is not an Array, matching a strict function's `arguments`.
-	HANDLERS[OP_LOAD_ARGUMENTS] = function (frame) {
+	HANDLERS[OP_LOAD_ARGUMENTS] = (frame) => {
 		frame.stack.push(buildArguments(frame.args));
 	};
 	// Store a freshly made closure into a hoisted function-declaration slot.
-	HANDLERS[OP_DEF_FUNC_SLOT] = function (frame, arg) {
+	HANDLERS[OP_DEF_FUNC_SLOT] = (frame, arg) => {
 		frame.scope.slots[arg] = { v: frame.stack.pop(), kind: 0, init: true };
 	};
 
 	// Block scopes: a fresh child scope for a lexical block, popped on exit.
-	HANDLERS[OP_ENTER_SCOPE] = function (frame) {
+	HANDLERS[OP_ENTER_SCOPE] = (frame) => {
 		frame.scope = { parent: frame.scope, slots: [] };
 	};
-	HANDLERS[OP_EXIT_SCOPE] = function (frame) {
+	HANDLERS[OP_EXIT_SCOPE] = (frame) => {
 		frame.scope = frame.scope.parent;
 	};
 
-	HANDLERS[OP_LOAD_GLOBAL] = function (frame, arg, consts, functions, globals) {
+	HANDLERS[OP_LOAD_GLOBAL] = (frame, arg, consts, functions, globals) => {
 		const name = consts[arg];
 		if (name === '\0t') {
 			frame.stack.push((value) => `${value}`);
@@ -304,178 +304,178 @@
 		frame.stack.push(name in globals ? typeof globals[name] : 'undefined');
 	};
 
-	HANDLERS[OP_ADD] = function (frame) {
+	HANDLERS[OP_ADD] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a + b);
 	};
-	HANDLERS[OP_SUB] = function (frame) {
+	HANDLERS[OP_SUB] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a - b);
 	};
-	HANDLERS[OP_MUL] = function (frame) {
+	HANDLERS[OP_MUL] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a * b);
 	};
-	HANDLERS[OP_DIV] = function (frame) {
+	HANDLERS[OP_DIV] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a / b);
 	};
-	HANDLERS[OP_MOD] = function (frame) {
+	HANDLERS[OP_MOD] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a % b);
 	};
-	HANDLERS[OP_EXP] = function (frame) {
+	HANDLERS[OP_EXP] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a ** b);
 	};
-	HANDLERS[OP_EQ] = function (frame) {
+	HANDLERS[OP_EQ] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a == b);
 	};
-	HANDLERS[OP_NEQ] = function (frame) {
+	HANDLERS[OP_NEQ] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a != b);
 	};
-	HANDLERS[OP_SEQ] = function (frame) {
+	HANDLERS[OP_SEQ] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a === b);
 	};
-	HANDLERS[OP_SNEQ] = function (frame) {
+	HANDLERS[OP_SNEQ] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a !== b);
 	};
-	HANDLERS[OP_LT] = function (frame) {
+	HANDLERS[OP_LT] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a < b);
 	};
-	HANDLERS[OP_LTE] = function (frame) {
+	HANDLERS[OP_LTE] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a <= b);
 	};
-	HANDLERS[OP_GT] = function (frame) {
+	HANDLERS[OP_GT] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a > b);
 	};
-	HANDLERS[OP_GTE] = function (frame) {
+	HANDLERS[OP_GTE] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a >= b);
 	};
-	HANDLERS[OP_BAND] = function (frame) {
+	HANDLERS[OP_BAND] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a & b);
 	};
-	HANDLERS[OP_BOR] = function (frame) {
+	HANDLERS[OP_BOR] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a | b);
 	};
-	HANDLERS[OP_BXOR] = function (frame) {
+	HANDLERS[OP_BXOR] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a ^ b);
 	};
-	HANDLERS[OP_SHL] = function (frame) {
+	HANDLERS[OP_SHL] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a << b);
 	};
-	HANDLERS[OP_SHR] = function (frame) {
+	HANDLERS[OP_SHR] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a >> b);
 	};
-	HANDLERS[OP_USHR] = function (frame) {
+	HANDLERS[OP_USHR] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a >>> b);
 	};
-	HANDLERS[OP_NOT] = function (frame) {
+	HANDLERS[OP_NOT] = (frame) => {
 		const s = frame.stack;
 		s.push(!s.pop());
 	};
-	HANDLERS[OP_NEG] = function (frame) {
+	HANDLERS[OP_NEG] = (frame) => {
 		const s = frame.stack;
 		s.push(-s.pop());
 	};
-	HANDLERS[OP_POS] = function (frame) {
+	HANDLERS[OP_POS] = (frame) => {
 		const s = frame.stack;
 		s.push(+s.pop());
 	};
-	HANDLERS[OP_BNOT] = function (frame) {
+	HANDLERS[OP_BNOT] = (frame) => {
 		const s = frame.stack;
 		s.push(~s.pop());
 	};
-	HANDLERS[OP_TYPEOF] = function (frame) {
+	HANDLERS[OP_TYPEOF] = (frame) => {
 		const s = frame.stack;
 		s.push(typeof s.pop());
 	};
-	HANDLERS[OP_INSTANCEOF] = function (frame) {
+	HANDLERS[OP_INSTANCEOF] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a instanceof b);
 	};
-	HANDLERS[OP_IN] = function (frame) {
+	HANDLERS[OP_IN] = (frame) => {
 		const s = frame.stack;
 		const b = s.pop();
 		const a = s.pop();
 		s.push(a in b);
 	};
 
-	HANDLERS[OP_GET_PROP] = function (frame, arg, consts) {
+	HANDLERS[OP_GET_PROP] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const o = s.pop();
 		s.push(o[consts[arg]]);
 	};
-	HANDLERS[OP_GET_PROP_DYN] = function (frame) {
+	HANDLERS[OP_GET_PROP_DYN] = (frame) => {
 		const s = frame.stack;
 		const k = s.pop();
 		const o = s.pop();
 		s.push(o[k]);
 	};
-	HANDLERS[OP_SET_PROP] = function (frame, arg, consts) {
+	HANDLERS[OP_SET_PROP] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const v = s.pop();
 		const o = s.pop();
 		o[consts[arg]] = v;
 		s.push(v);
 	};
-	HANDLERS[OP_SET_PROP_DYN] = function (frame) {
+	HANDLERS[OP_SET_PROP_DYN] = (frame) => {
 		const s = frame.stack;
 		const v = s.pop();
 		const k = s.pop();
@@ -487,7 +487,7 @@
 	// delete that returns false is a TypeError; a sloppy-mode `delete` returns
 	// false instead. Raising on a false result replays the strict behavior no
 	// matter which mode this runtime itself runs in.
-	HANDLERS[OP_DELETE_PROP] = function (frame, arg, consts) {
+	HANDLERS[OP_DELETE_PROP] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const o = s.pop();
 		const key = consts[arg];
@@ -495,7 +495,7 @@
 			throw new TypeError("Cannot delete property '" + key + "' of " + o);
 		s.push(true);
 	};
-	HANDLERS[OP_DELETE_PROP_DYN] = function (frame) {
+	HANDLERS[OP_DELETE_PROP_DYN] = (frame) => {
 		const s = frame.stack;
 		const k = s.pop();
 		const o = s.pop();
@@ -504,34 +504,34 @@
 		s.push(true);
 	};
 
-	HANDLERS[OP_JMP] = function (frame, arg) {
+	HANDLERS[OP_JMP] = (frame, arg) => {
 		frame.pc = arg;
 	};
-	HANDLERS[OP_JMP_IF_FALSE] = function (frame, arg) {
+	HANDLERS[OP_JMP_IF_FALSE] = (frame, arg) => {
 		if (!frame.stack.pop()) frame.pc = arg;
 	};
-	HANDLERS[OP_JMP_IF_TRUE] = function (frame, arg) {
+	HANDLERS[OP_JMP_IF_TRUE] = (frame, arg) => {
 		if (frame.stack.pop()) frame.pc = arg;
 	};
-	HANDLERS[OP_JMP_IF_FALSY_KEEP] = function (frame, arg) {
+	HANDLERS[OP_JMP_IF_FALSY_KEEP] = (frame, arg) => {
 		const s = frame.stack;
 		if (!s[s.length - 1]) frame.pc = arg;
 		else s.pop();
 	};
-	HANDLERS[OP_JMP_IF_TRUTHY_KEEP] = function (frame, arg) {
+	HANDLERS[OP_JMP_IF_TRUTHY_KEEP] = (frame, arg) => {
 		const s = frame.stack;
 		if (s[s.length - 1]) frame.pc = arg;
 		else s.pop();
 	};
-	HANDLERS[OP_JMP_IF_NOT_NULLISH_KEEP] = function (frame, arg) {
+	HANDLERS[OP_JMP_IF_NOT_NULLISH_KEEP] = (frame, arg) => {
 		const s = frame.stack;
 		if (s[s.length - 1] != null) frame.pc = arg;
 		else s.pop();
 	};
-	HANDLERS[OP_THROW] = function (frame) {
+	HANDLERS[OP_THROW] = (frame) => {
 		throw frame.stack.pop();
 	};
-	HANDLERS[OP_PUSH_HANDLER] = function (frame, target) {
+	HANDLERS[OP_PUSH_HANDLER] = (frame, target) => {
 		frame.handlers.push({
 			type: HANDLER_CATCH,
 			pc: target,
@@ -539,13 +539,13 @@
 			stackLength: frame.stack.length,
 		});
 	};
-	HANDLERS[OP_POP_HANDLER] = function (frame) {
+	HANDLERS[OP_POP_HANDLER] = (frame) => {
 		frame.handlers.pop();
 	};
 	// A finally handler. It stays on the stack while the try body and any catch
 	// run, so an abrupt completion (throw, return) that crosses it routes a
 	// completion record through the finally block before leaving.
-	HANDLERS[OP_PUSH_FINALLY] = function (frame, target) {
+	HANDLERS[OP_PUSH_FINALLY] = (frame, target) => {
 		frame.handlers.push({
 			type: HANDLER_FINALLY,
 			pc: target,
@@ -555,7 +555,7 @@
 	};
 	// Normal completion of a try: the finally runs and then falls through to the
 	// code after it.
-	HANDLERS[OP_PUSH_COMPLETION_NORMAL] = function (frame) {
+	HANDLERS[OP_PUSH_COMPLETION_NORMAL] = (frame) => {
 		frame.completions.push({ kind: DONE_NORMAL });
 	};
 	// Run after a finally block. Replay the pending completion: a normal one
@@ -583,22 +583,22 @@
 	// resumes the frame after the value settles, pushing the resolved value
 	// back (or routing a rejection through the handler stack). AWAIT_TOP is the
 	// module-root form a top-level await compiles to; it suspends the same way.
-	HANDLERS[OP_AWAIT] = function (frame) {
+	HANDLERS[OP_AWAIT] = (frame) => {
 		return { type: SIG_AWAIT, value: frame.stack.pop() };
 	};
-	HANDLERS[OP_AWAIT_TOP] = function (frame) {
+	HANDLERS[OP_AWAIT_TOP] = (frame) => {
 		return { type: SIG_AWAIT, value: frame.stack.pop() };
 	};
 	// Suspend a generator frame with the yielded value. The generator driver
 	// returns it as { value, done: false }; the next resume pushes the value
 	// sent to next() back as this expression's result.
-	HANDLERS[OP_YIELD] = function (frame) {
+	HANDLERS[OP_YIELD] = (frame) => {
 		return { type: SIG_YIELD, value: frame.stack.pop() };
 	};
 	// Suspend to delegate to the iterable on top of the stack. The generator
 	// driver drives its iterator, forwarding next/throw/return, and resumes the
 	// frame with the delegate's return value once it is done.
-	HANDLERS[OP_YIELD_STAR] = function (frame) {
+	HANDLERS[OP_YIELD_STAR] = (frame) => {
 		return { type: SIG_YIELD_STAR, value: frame.stack.pop() };
 	};
 	// Module context handlers. moduleCtx is the tenth dispatch argument, filled
@@ -709,7 +709,7 @@
 		const recv = s.pop();
 		s.push(callValue(fn, recv, args));
 	};
-	HANDLERS[OP_NEW] = function (frame, arg) {
+	HANDLERS[OP_NEW] = (frame, arg) => {
 		const s = frame.stack;
 		const args = new Array(arg);
 		for (let i = arg - 1; i >= 0; i--) args[i] = s.pop();
@@ -718,7 +718,7 @@
 			throw new TypeError(String(ctor) + ' is not a constructor');
 		s.push(Reflect.construct(ctor, args));
 	};
-	HANDLERS[OP_NEW_APPLY] = function (frame) {
+	HANDLERS[OP_NEW_APPLY] = (frame) => {
 		const s = frame.stack;
 		const args = s.pop();
 		const ctor = s.pop();
@@ -777,10 +777,10 @@
 		return doReturn(frame, undefined);
 	};
 
-	HANDLERS[OP_ARR_EMPTY] = function (frame) {
+	HANDLERS[OP_ARR_EMPTY] = (frame) => {
 		frame.stack.push([]);
 	};
-	HANDLERS[OP_ARR_APPEND] = function (frame) {
+	HANDLERS[OP_ARR_APPEND] = (frame) => {
 		const s = frame.stack;
 		const v = s.pop();
 		const arr = s[s.length - 1];
@@ -791,7 +791,7 @@
 			configurable: true,
 		});
 	};
-	HANDLERS[OP_ARR_SPREAD] = function (frame) {
+	HANDLERS[OP_ARR_SPREAD] = (frame) => {
 		const s = frame.stack;
 		const values = s.pop();
 		const arr = s[s.length - 1];
@@ -804,10 +804,10 @@
 			});
 		}
 	};
-	HANDLERS[OP_OBJ_EMPTY] = function (frame) {
+	HANDLERS[OP_OBJ_EMPTY] = (frame) => {
 		frame.stack.push({});
 	};
-	HANDLERS[OP_OBJ_SET] = function (frame, arg, consts) {
+	HANDLERS[OP_OBJ_SET] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const v = s.pop();
 		const obj = s[s.length - 1];
@@ -825,7 +825,7 @@
 			});
 		}
 	};
-	HANDLERS[OP_OBJ_SET_DYN] = function (frame) {
+	HANDLERS[OP_OBJ_SET_DYN] = (frame) => {
 		const s = frame.stack;
 		const v = s.pop();
 		const key = s.pop();
@@ -839,7 +839,7 @@
 	};
 	// Define an accessor. A get then a set on the same configurable key merge
 	// into one get/set accessor, so `{ get x() {}, set x(v) {} }` composes.
-	HANDLERS[OP_OBJ_DEFINE_GETTER] = function (frame, arg, consts) {
+	HANDLERS[OP_OBJ_DEFINE_GETTER] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const getter = s.pop();
 		const obj = s[s.length - 1];
@@ -849,7 +849,7 @@
 			configurable: true,
 		});
 	};
-	HANDLERS[OP_OBJ_DEFINE_SETTER] = function (frame, arg, consts) {
+	HANDLERS[OP_OBJ_DEFINE_SETTER] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const setter = s.pop();
 		const obj = s[s.length - 1];
@@ -859,7 +859,7 @@
 			configurable: true,
 		});
 	};
-	HANDLERS[OP_OBJ_SPREAD] = function (frame) {
+	HANDLERS[OP_OBJ_SPREAD] = (frame) => {
 		const s = frame.stack;
 		const source = s.pop();
 		const obj = s[s.length - 1];
@@ -878,7 +878,7 @@
 	};
 	// Iterator records cache the next method once, as GetIterator does. Their
 	// close method implements IteratorClose for exceptional loop completion.
-	HANDLERS[OP_GET_ITERATOR] = function (frame) {
+	HANDLERS[OP_GET_ITERATOR] = (frame) => {
 		const value = frame.stack.pop();
 		const iteratorMethod = value[Symbol.iterator];
 		if (typeof iteratorMethod !== 'function')
@@ -919,12 +919,12 @@
 	// Array destructuring steps. The iterator wrapper (from GET_ITERATOR) stays
 	// on the stack so later elements keep pulling from it; the value, or the
 	// remaining values as an array, is pushed above it.
-	HANDLERS[OP_ITER_NEXT_PUSH] = function (frame) {
+	HANDLERS[OP_ITER_NEXT_PUSH] = (frame) => {
 		const s = frame.stack;
 		const item = s[s.length - 1].nextStep();
 		s.push(item.done ? undefined : item.value);
 	};
-	HANDLERS[OP_ITER_REST_PUSH] = function (frame) {
+	HANDLERS[OP_ITER_REST_PUSH] = (frame) => {
 		const s = frame.stack;
 		const iterator = s[s.length - 1];
 		const rest = [];
@@ -938,7 +938,7 @@
 	// Object rest: a new object with the source's own enumerable keys minus the
 	// ones already bound. OBJ_REST reads the excluded names from a JSON const;
 	// OBJ_REST_DYN reads them from an array on the stack (computed keys).
-	HANDLERS[OP_OBJ_REST] = function (frame, arg, consts) {
+	HANDLERS[OP_OBJ_REST] = (frame, arg, consts) => {
 		const s = frame.stack;
 		const source = Object(s.pop());
 		const excluded = JSON.parse(consts[arg]);
@@ -947,7 +947,7 @@
 			if (excluded.indexOf(key) < 0) rest[key] = source[key];
 		s.push(rest);
 	};
-	HANDLERS[OP_OBJ_REST_DYN] = function (frame) {
+	HANDLERS[OP_OBJ_REST_DYN] = (frame) => {
 		const s = frame.stack;
 		const excluded = s
 			.pop()
@@ -958,7 +958,7 @@
 			if (excluded.indexOf(key) < 0) rest[key] = source[key];
 		s.push(rest);
 	};
-	HANDLERS[OP_FOR_ITER] = function (frame, target) {
+	HANDLERS[OP_FOR_ITER] = (frame, target) => {
 		const iterator = frame.stack.pop();
 		const item = iterator.nextStep();
 		if (item.done) {
@@ -967,7 +967,7 @@
 			frame.stack.push(item.value);
 		}
 	};
-	HANDLERS[OP_FOR_IN_KEYS] = function (frame) {
+	HANDLERS[OP_FOR_IN_KEYS] = (frame) => {
 		const value = frame.stack.pop();
 		frame.stack.push(
 			(function* () {
